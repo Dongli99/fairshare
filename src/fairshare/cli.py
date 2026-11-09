@@ -2,18 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 import fairshare
 
 from . import providers, store
 from .providers import claude
-from .model import load_accounts
+from .model import load_accounts, plan_names, render_config
 from .policy import rank
 
 
@@ -76,19 +78,73 @@ def cmd_run(a) -> int:
     os.execvpe(cmd[0], cmd + args, {**os.environ, **env})
 
 
-def cmd_init(_a) -> int:
-    print(f"""Create {store.config_path()}:
+def _tilde(p: Path, home: Path) -> str:
+    return f"~/{p.relative_to(home)}" if p.is_relative_to(home) and p != home else str(p)
 
-  [[account]]
-  id = "work"
-  plan = "claude-pro"          # or claude-max5x, claude-max20x
-  config_dir = "~/.claude-work"
 
-Then, in EACH account's settings.json, add (one capture command per account):
+def _candidates(old: dict, home: Path) -> list[tuple[dict, str]]:
+    """Accounts already configured, then discovered ones not yet in the config."""
+    out = [(dict(a), "accounts.toml") for a in old.get("account", [])]
+    known = {Path(a["config_dir"]).expanduser() for a, _ in out}
+    for prov in providers.REGISTRY.values():
+        for c in prov.discover(home):
+            if c.config_dir not in known:
+                out.append(({"id": c.id, "plan": prov.default_plan,
+                             "config_dir": _tilde(c.config_dir, home)}, c.found))
+    return out
 
-  "statusLine": {{"type": "command", "command": "fairshare capture work"}}
 
-fairshare never writes your settings and never touches your logins.""")
+def _ask(found: list[tuple[dict, str]]) -> list[dict]:
+    """Thin prompt layer: confirm or edit each id and plan; '-' drops an account."""
+    print("Found:" if found else "Found no accounts (name them with --account ID=DIR:PLAN).")
+    for a, where in found:
+        print(f"  {a['id']:<12} {a['config_dir']:<24} ({where})")
+    print(f"Plans: {', '.join(plan_names())}. Enter keeps [default]; id '-' drops the account.")
+    entries = []
+    for a, _ in found:
+        new_id = input(f"{a['config_dir']}  id [{a['id']}]: ").strip() or a["id"]
+        if new_id == "-":
+            continue
+        plan = input(f"{a['config_dir']}  plan [{a['plan']}]: ").strip() or a["plan"]
+        entries.append({**a, "id": new_id, "plan": plan})
+    return entries
+
+
+def _account_flag(s: str) -> dict:
+    ident, eq, rest = s.partition("=")
+    d, colon, plan = rest.rpartition(":")
+    if not (eq and colon and ident and d and plan):
+        raise SystemExit(f"fairshare: --account wants id=dir:plan, got {s!r}")
+    return {"id": ident, "plan": plan, "config_dir": d}
+
+
+def cmd_init(a) -> int:
+    """Shows what was found, asks, and writes only accounts.toml (with a backup)."""
+    path, home = store.config_path(), Path.home()
+    old_text = path.read_text() if path.exists() else ""
+    old = tomllib.loads(old_text)
+    if a.account:
+        entries = [_account_flag(x) for x in a.account]
+    elif a.yes:
+        entries = [e for e, _ in _candidates(old, home)]
+    else:
+        entries = _ask(_candidates(old, home))
+    if not entries:
+        raise SystemExit("fairshare: no accounts; nothing written")
+    try:
+        new_text = render_config(entries, old.get("policy", {}))
+    except ValueError as e:
+        raise SystemExit(f"fairshare: {e}; nothing written")
+    if new_text == old_text:
+        print(f"{path} is already up to date.")
+        return 0
+    sys.stdout.writelines(difflib.unified_diff(
+        old_text.splitlines(True), new_text.splitlines(True), str(path), f"{path} (new)"))
+    if not a.yes and input(f"Write {path}? [y/N] ").strip().lower() != "y":
+        print("Nothing written.")
+        return 1
+    backup = store.write_with_backup(path, new_text)
+    print(f"Wrote {path}" + (f" (backup: {backup})" if backup else ""))
     return 0
 
 
@@ -116,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
     pk = sub.add_parser("pick"); pk.add_argument("--json", action="store_true"); pk.set_defaults(f=cmd_pick)
     cp = sub.add_parser("capture"); cp.add_argument("account"); cp.set_defaults(f=cmd_capture)
     r = sub.add_parser("run"); r.add_argument("args", nargs=argparse.REMAINDER); r.set_defaults(f=cmd_run)
-    sub.add_parser("init").set_defaults(f=cmd_init)
+    it = sub.add_parser("init")
+    it.add_argument("--yes", action="store_true", help="accept what was found; do not ask")
+    it.add_argument("--account", action="append", metavar="ID=DIR:PLAN",
+                    help="use exactly these accounts instead of discovery (repeatable)")
+    it.set_defaults(f=cmd_init)
     sh = sub.add_parser("shim").add_subparsers(dest="shim_cmd", required=True)
     si = sh.add_parser("install")
     si.add_argument("--dir", default=str(Path.home() / ".local/share/fairshare/bin"))

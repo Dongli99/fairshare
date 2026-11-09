@@ -14,7 +14,7 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
 
 | Seam | What varies | Where |
 |---|---|---|
-| Provider | how usage is read, how the tool starts | `providers/` (one file each) |
+| Provider | how usage is read, how the tool starts, where accounts already live | `providers/` (one file each) |
 | Plan | window names and lengths, relative capacity | `plans/*.toml` (data only) |
 | Policy | the routing rule | `policy.py` (pure function) |
 | Storage | where snapshots live | `store.py` |
@@ -57,5 +57,5 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
 
 ## Not built yet
 
-OpenAI/Codex adapter · `init --write` · stale-snapshot warning in `status` ·
+OpenAI/Codex adapter · stale-snapshot warning in `status` ·
 mid-session handover · packaging for Homebrew.

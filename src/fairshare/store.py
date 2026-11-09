@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from .model import Snapshot, Window
@@ -41,3 +43,24 @@ def merge(old: Snapshot | None, fresh: dict[str, Window], now: float) -> Snapsho
     """A payload may omit a window that is still running; keep the old one until it expires."""
     kept = {k: w for k, w in (old.windows if old else {}).items() if w.resets_at > now}
     return Snapshot(now, {**kept, **fresh})
+
+
+def write_with_backup(path: Path, text: str) -> Path | None:
+    """Replace a user's file atomically, first copying any existing one beside it with a
+    timestamp. Returns the backup's path, or None when there was nothing to back up."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = None
+    if path.exists():
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.name}.bak-fairshare-{stamp}")
+        n = 1
+        while backup.exists():
+            backup, n = path.with_name(f"{path.name}.bak-fairshare-{stamp}-{n}"), n + 1
+        shutil.copy2(path, backup)
+    fd, tmp = tempfile.mkstemp(dir=path.parent)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    if backup:
+        shutil.copymode(backup, tmp)
+    os.replace(tmp, path)
+    return backup

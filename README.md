@@ -33,8 +33,13 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
 ## Setup
 
 1. `pipx install .` (Python 3.11+, no dependencies).
-2. `fairshare init` prints a sample `accounts.toml` and the one-line `statusLine` entry to add
-   to each account's settings. fairshare never edits your settings.
+2. `fairshare init` lists the accounts it finds (shell aliases that set `CLAUDE_CONFIG_DIR`,
+   and signed-in `~/.claude*` directories), asks you to confirm each id and plan, shows the
+   resulting `accounts.toml` as a diff and writes it only on yes, keeping a backup. It checks
+   that a login file exists and never opens it. Non-interactive: `--yes`, or
+   `--account id=dir:plan` (repeatable) to name the accounts yourself.
+   Then add a capture line to each account's settings.json:
+   `"statusLine": {"type": "command", "command": "fairshare capture <id>"}`.
 3. Use each account normally for a while. Every session refreshes that account's snapshot.
 
 Usage comes from Claude Code's documented statusLine input, so fairshare needs no tokens, no
