@@ -41,6 +41,14 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
    score (a soft preference) and a spent week sets it to `-hours until reset` (a hard fact,
    below any usable account). `Verdict.eligible` survives only so the CLI can report it.
 
+8. **A shim, not a replacement.** `fairshare shim install` writes a small `claude` script into
+   its own directory, placed earlier on PATH; the real binary is never touched. With
+   `CLAUDE_CONFIG_DIR` already set (an account alias) the shim runs the real `claude` as is;
+   otherwise it calls `fairshare run`. Both find the real binary the same way: the first
+   `claude` on PATH whose first bytes do not carry the shim marker. Skipping by marker rather
+   than by directory name survives PATH spelling variants and a second shim copy, so the shim
+   cannot re-enter itself.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.

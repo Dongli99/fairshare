@@ -2,9 +2,14 @@
 CLAUDE_CONFIG_DIR. fairshare never reads or copies a login."""
 from __future__ import annotations
 
+import json
+import os
+import shlex
+
 from ..model import Account, Window
 
 name = "claude"
+SHIM_MARK = "fairshare-shim"     # in the first bytes of every shim; the lookup skips such files
 
 
 def parse_capture(raw: dict) -> dict[str, Window]:
@@ -17,4 +22,45 @@ def parse_capture(raw: dict) -> dict[str, Window]:
 
 
 def launch(account: Account) -> tuple[list[str], dict[str, str]]:
-    return ["claude"], {"CLAUDE_CONFIG_DIR": str(account.config_dir)}
+    return [real_binary()], {"CLAUDE_CONFIG_DIR": str(account.config_dir)}
+
+
+def is_shim(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return SHIM_MARK.encode() in f.read(64)
+    except OSError:
+        return False
+
+
+def real_binary(path: str | None = None) -> str:
+    """The first `claude` on PATH that is not a fairshare shim. The shim runs the same walk."""
+    for d in (os.environ.get("PATH", "") if path is None else path).split(os.pathsep):
+        f = os.path.join(d, "claude")
+        if d and os.path.isfile(f) and os.access(f, os.X_OK) and not is_shim(f):
+            return f
+    raise SystemExit("fairshare: no claude found on PATH besides the fairshare shim")
+
+
+def shim_script(python: str, pkg_parent: str) -> str:
+    """A POSIX `claude` that routes through `fairshare run`, or, when CLAUDE_CONFIG_DIR is
+    already set (an account alias), runs the real claude untouched."""
+    code = (f"import sys; sys.path.insert(0, {json.dumps(pkg_parent)}); "
+            'from fairshare.cli import main; sys.exit(main(["run", "--", *sys.argv[1:]]))')
+    return f"""#!/bin/sh
+# {SHIM_MARK}: written by `fairshare shim install`. Delete it to stop routing.
+# Plain `claude` routes through fairshare. With CLAUDE_CONFIG_DIR set, the real claude runs as is.
+if [ -z "${{CLAUDE_CONFIG_DIR:-}}" ]; then
+  exec {shlex.quote(python)} -I -c {shlex.quote(code)} "$@"
+fi
+set -f
+IFS=:
+for d in $PATH; do
+  f="$d/claude"
+  if [ -n "$d" ] && [ -f "$f" ] && [ -x "$f" ] && ! head -c 64 "$f" | grep -q {SHIM_MARK}; then
+    exec "$f" "$@"
+  fi
+done
+echo "fairshare: no claude found on PATH besides the fairshare shim" >&2
+exit 127
+"""

@@ -1,13 +1,18 @@
-"""fairshare CLI: status | pick | capture | run | init."""
+"""fairshare CLI: status | pick | capture | run | init | shim install."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
+import tempfile
 import time
+from pathlib import Path
+
+import fairshare
 
 from . import providers, store
+from .providers import claude
 from .model import load_accounts
 from .policy import rank
 
@@ -87,6 +92,23 @@ fairshare never writes your settings and never touches your logins.""")
     return 0
 
 
+def cmd_shim_install(a) -> int:
+    d = Path(a.dir).expanduser().resolve()
+    dest = d / "claude"
+    if dest.exists() and not claude.is_shim(str(dest)):
+        raise SystemExit(f"fairshare: {dest} exists and is not a fairshare shim; not touching it")
+    d.mkdir(parents=True, exist_ok=True)
+    body = claude.shim_script(sys.executable, str(Path(fairshare.__file__).resolve().parent.parent))
+    fd, tmp = tempfile.mkstemp(dir=d)
+    with os.fdopen(fd, "w") as f:
+        f.write(body)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dest)
+    print(f"Wrote {dest}. Put its directory first on PATH, e.g. in your shell rc:\n\n"
+          f'  export PATH="{d}:$PATH"')
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fairshare", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -95,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     cp = sub.add_parser("capture"); cp.add_argument("account"); cp.set_defaults(f=cmd_capture)
     r = sub.add_parser("run"); r.add_argument("args", nargs=argparse.REMAINDER); r.set_defaults(f=cmd_run)
     sub.add_parser("init").set_defaults(f=cmd_init)
+    sh = sub.add_parser("shim").add_subparsers(dest="shim_cmd", required=True)
+    si = sh.add_parser("install")
+    si.add_argument("--dir", default=str(Path.home() / ".local/share/fairshare/bin"))
+    si.set_defaults(f=cmd_shim_install)
     a = p.parse_args(argv)
     return a.f(a)
 
