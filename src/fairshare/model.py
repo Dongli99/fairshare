@@ -51,7 +51,10 @@ def load_plan(name: str, capacity: float | None = None) -> Plan:
     text = (resources.files("fairshare.plans") / f"{name}.toml").read_text()
     d = tomllib.loads(text)
     w = d["windows"]
-    return Plan(d["name"], d["provider"], capacity or float(d["capacity"]),
+    cap = float(d["capacity"]) if capacity is None else float(capacity)
+    if cap <= 0:
+        raise ValueError(f"capacity must be positive (got {cap}) for plan {name}")
+    return Plan(d["name"], d["provider"], cap,
                 w["short"]["name"], float(w["short"]["hours"]),
                 w["long"]["name"], float(w["long"]["hours"]))
 

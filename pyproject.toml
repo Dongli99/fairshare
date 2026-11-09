@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fairshare"
 version = "0.0.1"
-description = "Route AI-assistant sessions across several subscriptions by real usage, so each is used fully and none hits its limit."
+description = "Route AI-assistant sessions across several subscriptions by real usage, aiming to use each fully and avoid hitting limits."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"

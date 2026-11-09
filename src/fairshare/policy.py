@@ -11,9 +11,11 @@ HOUR = 3600.0
 @dataclass(frozen=True)
 class Verdict:
     account: Account
-    eligible: bool
-    score: float                    # budget units to burn per hour to use the long window fully
-    short_reset_in_h: float | None  # None = short window not running
+    eligible: bool                  # False = near a limit; the CLI reports it, ranking ignores it
+    score: float                    # budget units to burn per hour to use the long window fully,
+                                    # scaled down while the short window is nearly full; an
+                                    # exhausted week is -(hours until it resets), below any usable
+                                    # account
     reason: str
 
 
@@ -33,25 +35,25 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Ver
     long_in = (long_.resets_at - now) / HOUR if long_ else p.long_hours  # unknown = a fresh window
     score = p.capacity * (100.0 - long_used) / max(long_in, t.min_hours)
 
-    hot = short_used >= t.short_hot_pct and (short_in or 0) > t.grace_hours
+    # Near the short limit and not about to reset: only the unused part of that window is usable.
+    hot = short_used >= t.short_hot_pct and (short_in or 0) >= t.grace_hours
+    if hot:
+        score *= (100.0 - short_used) / 100.0
+    # A spent week is a fact, not a preference: nothing usable until it resets.
     exhausted = long_used >= t.long_exhausted_pct
     if exhausted:
-        why = f"week {long_used:.0f}% used, resets in {long_in:.0f}h"
-    elif hot:
+        score = -long_in
+    if long_ is None:
+        why = "no active weekly window, assumed fresh"
+    elif hot and not exhausted:
         why = f"5h window {short_used:.0f}% used, resets in {short_in:.1f}h"
-    elif snap is None:
-        why = "no usage data yet, assumed fresh"
     else:
         why = f"week {long_used:.0f}% used, resets in {long_in:.0f}h"
-    return Verdict(acct, not (hot or exhausted), score, short_in, why)
+    return Verdict(acct, not (hot or exhausted), score, why)
 
 
 def rank(accounts: list[Account], snaps: dict[str, Snapshot], now: float,
          t: Tuning = Tuning()) -> list[Verdict]:
-    """Best first. Eligible accounts by score; if none is eligible, whichever frees first."""
+    """Best first: highest score, ties by id."""
     vs = [evaluate(a, snaps.get(a.id), now, t) for a in accounts]
-    ok = sorted((v for v in vs if v.eligible), key=lambda v: (-v.score, v.account.id))
-    rest = sorted((v for v in vs if not v.eligible),
-                  key=lambda v: (v.short_reset_in_h if v.short_reset_in_h is not None else 1e9,
-                                 v.account.id))
-    return ok + rest
+    return sorted(vs, key=lambda v: (-v.score, v.account.id))

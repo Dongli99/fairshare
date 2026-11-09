@@ -35,6 +35,18 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
 6. **No data is not zero.** An account with no snapshot is treated as a fresh window and ranked
    by the normal formula. It is neither favoured nor starved.
 
+7. **One ordering, not tiers.** The first version split accounts into eligible and blocked and
+   sorted the blocked by their short reset. A cold review showed that threw the score away
+   across the boundary and mis-ranked spent weeks. Now a nearly-full short window scales the
+   score (a soft preference) and a spent week sets it to `-hours until reset` (a hard fact,
+   below any usable account). `Verdict.eligible` survives only so the CLI can report it.
+
+## Known limits
+
+- Below the "nearly full" line, short-window usage plays no part in the ranking.
+- A snapshot's age is never read, so a stale snapshot is trusted until its windows reset.
+- The ranking is greedy; it cannot promise full use of every week.
+
 ## Not built yet
 
 OpenAI/Codex adapter · `init --write` · stale-snapshot warning in `status` ·

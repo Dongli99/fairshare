@@ -46,7 +46,7 @@ class WeeklyPace(unittest.TestCase):
 
 class FiveHourGuard(unittest.TestCase):
     def test_hot_account_with_distant_reset_is_avoided(self):
-        snaps = {"a": snap((95, 4), (10, 20)), "b": snap((10, 3), (80, 150))}
+        snaps = {"a": snap((95, 4), (10, 20)), "b": snap((10, 3), (20, 20))}
         self.assertEqual(order([acct("a"), acct("b")], snaps), ["b", "a"])
 
     def test_hot_account_resetting_within_an_hour_is_still_eligible(self):
@@ -62,6 +62,49 @@ class FiveHourGuard(unittest.TestCase):
     def test_exhausted_week_is_avoided(self):
         snaps = {"a": snap((10, 3), (99, 20)), "b": snap((10, 3), (80, 150))}
         self.assertEqual(order([acct("a"), acct("b")], snaps)[0], "b")
+
+    def test_reset_exactly_at_the_grace_hour_counts_as_hot(self):
+        v = rank([acct("a")], {"a": snap((95, 1.0), (10, 20))}, NOW)[0]
+        self.assertFalse(v.eligible)
+
+
+class OneRuleNotTwoTiers(unittest.TestCase):
+    def test_huge_expiring_budget_beats_a_nearly_empty_account_despite_hot_window(self):
+        # A: 20x plan, week untouched, resets in 3h, 5h window 90%. B: Pro, week 97% used.
+        snaps = {"A": snap((90, 1.5), (0, 3)), "B": snap((5, 3), (97, 160))}
+        self.assertEqual(order([acct("A", MAX20), acct("B")], snaps), ["A", "B"])
+
+    def test_blocked_week_is_not_rescued_by_a_short_window_reset(self):
+        # exh: week 99% used for 100h (5h window nearly resets). hot: 5h window full, week free.
+        snaps = {"exh": snap((10, 0.2), (99, 100)), "hot": snap((95, 2), (10, 20))}
+        self.assertEqual(order([acct("exh"), acct("hot")], snaps), ["hot", "exh"])
+
+    def test_two_exhausted_weeks_pick_the_one_that_frees_first(self):
+        snaps = {"far": snap(None, (99, 100)), "near": snap(None, (99, 3))}
+        self.assertEqual(order([acct("far"), acct("near")], snaps), ["near", "far"])
+
+
+    def test_nearly_spent_week_does_not_outrank_a_healthy_account_just_by_resetting_soon(self):
+        snaps = {"full": snap((0, 4), (99.5, 5)), "ok": snap((0, 4), (95, 160))}
+        self.assertEqual(order([acct("full"), acct("ok")], snaps), ["ok", "full"])
+
+    def test_exhausted_threshold_is_inclusive(self):
+        snaps = {"edge": snap((0, 4), (98.0, 5)), "ok": snap((0, 4), (97.0, 160))}
+        self.assertEqual(order([acct("edge"), acct("ok")], snaps), ["ok", "edge"])
+
+
+class Reasons(unittest.TestCase):
+    def test_missing_weekly_window_is_reported_as_assumed(self):
+        for sn in (None, Snapshot(NOW, {}), snap((10, 3))):
+            v = rank([acct("a")], {} if sn is None else {"a": sn}, NOW)[0]
+            self.assertIn("assumed fresh", v.reason)
+
+
+class Capacity(unittest.TestCase):
+    def test_zero_or_negative_capacity_is_rejected_not_defaulted(self):
+        for bad in (0, 0.0, -1):
+            with self.assertRaises(ValueError):
+                load_plan("claude-pro", bad)
 
 
 if __name__ == "__main__":

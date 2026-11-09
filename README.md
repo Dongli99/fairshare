@@ -2,8 +2,8 @@
 
 Use several AI-assistant subscriptions as if they were one. `fairshare` reads each account's
 real usage, then starts your next session on the account that makes the best use of what is
-left: every account used fully before its weekly reset, and none hitting its short limit
-unless that limit is about to reset anyway.
+left. It aims to use every account fully before its weekly reset and to avoid hitting a short
+limit unless that limit is about to reset anyway. It is a heuristic, not a guarantee.
 
 > Status: early. Claude Code on Pro and Max plans is the first supported provider.
 
@@ -19,10 +19,16 @@ $ alias claude='fairshare run --'      # then just type: claude
 
 For each account, `score = capacity × (100 − weekly used %) ÷ hours until the weekly reset`:
 the budget it must burn per hour to avoid wasting any. The highest score wins, which sends
-work to the account whose reset is nearest and whose budget is least used. An account whose
-short (5-hour) window is nearly full is skipped unless it resets within the hour. If every
-account is near a limit, the one that frees up first is chosen. The rule is one pure function
-in [`src/fairshare/policy.py`](src/fairshare/policy.py).
+work to the account whose reset is nearest and whose budget is least used.
+
+- If the short (5-hour) window is nearly full and not resetting within the hour, the score is
+  scaled by what is left of that window. Such an account can still win when its weekly budget
+  is far larger than the others'.
+- An account whose week is spent ranks below every usable account, and among spent accounts
+  the one that resets soonest ranks first.
+
+The rule is one pure function in [`src/fairshare/policy.py`](src/fairshare/policy.py).
+Known limit: below the "nearly full" line, short-window usage plays no part in the ranking.
 
 ## Setup
 
