@@ -1,0 +1,6 @@
+#!/bin/sh
+# Blocks a plaintext secret at commit time. Enable once per clone: git config core.hooksPath .githooks
+if command -v gitleaks >/dev/null 2>&1; then
+  exec gitleaks protect --staged --redact
+fi
+echo "fairshare pre-commit: gitleaks not installed, secret scan SKIPPED (brew install gitleaks)" >&2

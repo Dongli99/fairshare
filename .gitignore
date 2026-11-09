@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.DS_Store
+# local state and credentials never belong in the repo
+accounts.toml
+snapshots/
+.env
+*.local.*
