@@ -1,10 +1,12 @@
-"""fairshare CLI: status | pick | capture | run | init | shim install."""
+"""fairshare CLI: status | pick | capture | run | init | shim install | apply | uninstall."""
 from __future__ import annotations
 
 import argparse
 import difflib
 import json
 import os
+import shlex
+import subprocess
 import sys
 import tempfile
 import time
@@ -56,17 +58,23 @@ def cmd_pick(a) -> int:
 
 
 def cmd_capture(a) -> int:
-    """Runs as the provider's statusLine command. Must never raise or print noise."""
+    """Runs as the provider's statusLine command. Must never raise or print noise. With
+    --then, the user's own statusLine command gets the same stdin and prints the line."""
+    raw = sys.stdin.buffer.read()
     try:
         accounts, _ = _load()
         acct = next(x for x in accounts if x.id == a.account)
-        fresh = providers.get(acct.provider).parse_capture(json.load(sys.stdin))
+        fresh = providers.get(acct.provider).parse_capture(json.loads(raw))
         if fresh:
             now = time.time()
             store.save(acct.id, store.merge(store.load(acct.id), fresh, now))
-            print(" · ".join(f"{k} {w.used_pct:.0f}%" for k, w in fresh.items()))
+            if not a.then:
+                print(" · ".join(f"{k} {w.used_pct:.0f}%" for k, w in fresh.items()))
     except Exception:
         pass
+    if a.then:
+        sys.stdout.flush()
+        return subprocess.run(a.then, shell=True, input=raw).returncode
     return 0
 
 
@@ -148,20 +156,95 @@ def cmd_init(a) -> int:
     return 0
 
 
-def cmd_shim_install(a) -> int:
-    d = Path(a.dir).expanduser().resolve()
+def _self_command() -> str:
+    """A shell command that runs this very fairshare, however it was installed. -I keeps the
+    current directory and PYTHON* variables out of it."""
+    src = json.dumps(str(Path(fairshare.__file__).resolve().parent.parent))
+    code = f"import sys; sys.path.insert(0, {src}); from fairshare.cli import main; sys.exit(main())"
+    return f"{shlex.quote(sys.executable)} -I -c {shlex.quote(code)}"
+
+
+def _shim_dir(a) -> Path:
+    return Path(a.dir).expanduser().resolve()
+
+
+def _write_shim(d: Path) -> Path:
     dest = d / "claude"
     if dest.exists() and not claude.is_shim(str(dest)):
         raise SystemExit(f"fairshare: {dest} exists and is not a fairshare shim; not touching it")
     d.mkdir(parents=True, exist_ok=True)
-    body = claude.shim_script(sys.executable, str(Path(fairshare.__file__).resolve().parent.parent))
     fd, tmp = tempfile.mkstemp(dir=d)
     with os.fdopen(fd, "w") as f:
-        f.write(body)
+        f.write(claude.shim_script(_self_command()))
     os.chmod(tmp, 0o755)
     os.replace(tmp, dest)
-    print(f"Wrote {dest}. Put its directory first on PATH, e.g. in your shell rc:\n\n"
+    return dest
+
+
+def cmd_shim_install(a) -> int:
+    d = _shim_dir(a)
+    print(f"Wrote {_write_shim(d)}. Put its directory first on PATH, e.g. in your shell rc:\n\n"
           f'  export PATH="{d}:$PATH"')
+    return 0
+
+
+def _yes(question: str) -> bool:
+    return input(f"{question} [y/N] ").strip().lower() == "y"
+
+
+def _offer(changes: dict[Path, str], files: dict[Path, str | None], dry_run: bool) -> None:
+    """Show each change as a diff; write it, after a backup, only on a yes for that file."""
+    for p, new in changes.items():
+        sys.stdout.writelines(difflib.unified_diff(
+            (files.get(p) or "").splitlines(True), new.splitlines(True), str(p), f"{p} (new)"))
+        if dry_run:
+            continue
+        if _yes(f"Change {p}?"):
+            backup = store.write_with_backup(p, new)
+            print("  changed" + (f" (backup: {backup})" if backup else ""))
+        else:
+            print("  left as is")
+
+
+def _files(accounts, home: Path) -> dict[Path, str | None]:
+    paths = [x.config_dir / "settings.json" for x in accounts] + [home / r for r in claude.RC_FILES]
+    return {p: p.read_text() if p.is_file() else None for p in paths}
+
+
+def cmd_apply(a) -> int:
+    """Install the shim, wire each account's statusLine, put the shim first on PATH."""
+    accounts, _ = _load()
+    home, d = Path.home(), _shim_dir(a)
+    files = _files(accounts, home)
+    try:
+        changes = claude.wire(files, accounts, home, os.environ.get("SHELL", ""),
+                              _self_command(), d)
+    except ValueError as e:
+        raise SystemExit(f"fairshare: {e}; nothing changed")
+    print(f"The shim: {d / 'claude'} (fairshare's own file; routes plain `claude`).")
+    if not a.dry_run and _yes(f"Write {d / 'claude'}?"):
+        _write_shim(d)
+    _offer(changes, files, a.dry_run)
+    if not a.dry_run:
+        print("Open a new shell for the PATH change. `fairshare uninstall` reverses all of this.")
+    return 0
+
+
+def cmd_uninstall(a) -> int:
+    """Reverse apply: unwrap statusLines, drop the rc block, restore the alias, remove the shim.
+    accounts.toml and snapshots are kept."""
+    accounts = _load()[0] if store.config_path().exists() else []
+    home, shim = Path.home(), _shim_dir(a) / "claude"
+    files = _files(accounts, home)
+    try:
+        changes = claude.unwire(files, accounts, home)
+    except ValueError as e:
+        raise SystemExit(f"fairshare: {e}; nothing changed")
+    if claude.is_shim(str(shim)):
+        print(f"Remove the shim {shim}.")
+        if not a.dry_run and _yes(f"Remove {shim}?"):
+            shim.unlink()
+    _offer(changes, files, a.dry_run)
     return 0
 
 
@@ -170,7 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(f=cmd_status)
     pk = sub.add_parser("pick"); pk.add_argument("--json", action="store_true"); pk.set_defaults(f=cmd_pick)
-    cp = sub.add_parser("capture"); cp.add_argument("account"); cp.set_defaults(f=cmd_capture)
+    cp = sub.add_parser("capture"); cp.add_argument("account")
+    cp.add_argument("--then", help="the user's own statusLine command, run after recording")
+    cp.set_defaults(f=cmd_capture)
     r = sub.add_parser("run"); r.add_argument("args", nargs=argparse.REMAINDER); r.set_defaults(f=cmd_run)
     it = sub.add_parser("init")
     it.add_argument("--yes", action="store_true", help="accept what was found; do not ask")
@@ -179,8 +264,14 @@ def main(argv: list[str] | None = None) -> int:
     it.set_defaults(f=cmd_init)
     sh = sub.add_parser("shim").add_subparsers(dest="shim_cmd", required=True)
     si = sh.add_parser("install")
-    si.add_argument("--dir", default=str(Path.home() / ".local/share/fairshare/bin"))
+    shim_dir = str(Path.home() / ".local/share/fairshare/bin")
+    si.add_argument("--dir", default=shim_dir)
     si.set_defaults(f=cmd_shim_install)
+    for name, f in (("apply", cmd_apply), ("uninstall", cmd_uninstall)):
+        x = sub.add_parser(name)
+        x.add_argument("--dry-run", action="store_true", help="print the diffs, change nothing")
+        x.add_argument("--dir", default=shim_dir, help="the shim's directory")
+        x.set_defaults(f=f)
     a = p.parse_args(argv)
     return a.f(a)
 

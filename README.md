@@ -12,7 +12,7 @@ $ fairshare status
 > two   claude-pro   score 2.40  week 40% used, resets in 25h
   one   claude-pro   score 0.27  week 70% used, resets in 111h
 
-$ alias claude='fairshare run --'      # then just type: claude
+$ claude          # after setup: starts on the account at the top of that list
 ```
 
 ## How it decides
@@ -38,9 +38,23 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
    resulting `accounts.toml` as a diff and writes it only on yes, keeping a backup. It checks
    that a login file exists and never opens it. Non-interactive: `--yes`, or
    `--account id=dir:plan` (repeatable) to name the accounts yourself.
-   Then add a capture line to each account's settings.json:
-   `"statusLine": {"type": "command", "command": "fairshare capture <id>"}`.
-3. Use each account normally for a while. Every session refreshes that account's snapshot.
+3. `fairshare apply --dry-run` prints every change as a diff; `fairshare apply` makes them,
+   asking per file and backing each up first:
+   - writes the `claude` shim into its own directory (`~/.local/share/fairshare/bin`); the real
+     `claude` binary is never touched;
+   - adds a capture `statusLine` to each account's settings.json. One you already have is
+     wrapped, not replaced: `fairshare capture <id> --then '<yours>'` records usage, then runs
+     yours on the same input and prints its line;
+   - appends a marked block to your shell rc that puts the shim first on PATH, and comments out
+     an `alias claude=...` line, because an alias would hide the shim.
+
+   Then plain `claude` routes. An alias that sets `CLAUDE_CONFIG_DIR` (say `alias work=
+   "CLAUDE_CONFIG_DIR=~/.claude-work command claude"`) still goes straight to that account.
+4. Use each account normally for a while. Every session refreshes that account's snapshot.
+
+`fairshare uninstall` reverses step 3 the same way (diff, ask, back up): it unwraps each
+statusLine, removes the rc block, restores the alias and deletes the shim. It also removes a
+plain fairshare capture `statusLine` you added by hand. `accounts.toml` and snapshots stay.
 
 Usage comes from Claude Code's documented statusLine input, so fairshare needs no tokens, no
 endpoint access and no keychain. A snapshot is only as fresh as that account's last session;

@@ -49,11 +49,22 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
    than by directory name survives PATH spelling variants and a second shim copy, so the shim
    cannot re-enter itself.
 
+9. **Setup edits, shown and reversible.** `wire()`/`unwire()` in the Claude provider are pure:
+   current file texts in, new texts out. The CLI shows each change as a diff, asks per file,
+   and backs the file up before writing. Reversal needs no state file: a wrapped statusLine
+   carries the user's command after `--then`, the rc block is marker-delimited, and a disabled
+   alias keeps its text behind a `# fairshare-disabled: ` prefix. An existing statusLine is
+   never replaced, only wrapped. Any plain fairshare capture counts as fairshare's to remove.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
 - A snapshot's age is never read, so a stale snapshot is trusted until its windows reset.
 - The ranking is greedy; it cannot promise full use of every week.
+- A PATH entry added to the shell rc after fairshare's block can put the real `claude` ahead of
+  the shim; re-running `fairshare apply` moves the block back to the end.
+- The shim and statusLine call fairshare through the Python that ran `apply`; if that Python
+  moves, run `fairshare apply` again.
 
 ## Not built yet
 
