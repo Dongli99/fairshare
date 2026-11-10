@@ -22,10 +22,9 @@ class Plan:
     name: str
     provider: str
     capacity: float      # relative budget size; Pro = 1.0
-    short_name: str      # provider's name for the short window
-    short_hours: float
     long_name: str       # provider's name for the long window
-    long_hours: float
+    long_hours: float    # its length: the fallback for an unknown reset
+    short_name: str | None = None   # provider's name for the short window; None: the plan has none
 
 
 @dataclass(frozen=True)
@@ -56,6 +55,16 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class Capture:
+    """A usage hook the provider calls, as found in its settings: which fairshare command it
+    runs (`runner`, the argv before `capture`), for which account, and the user's own command it
+    wraps, if any."""
+    account: str
+    runner: tuple[str, ...]
+    then: str | None
+
+
+@dataclass(frozen=True)
 class Snapshot:
     captured_at: float
     windows: dict[str, Window] = field(default_factory=dict)
@@ -82,15 +91,20 @@ def plan_for(provider: str, native: str | None) -> str | None:
     return None
 
 
+def window_names(provider: str) -> set[str]:
+    """Every window name the plan files give for `provider`: what its usage payload may carry."""
+    return {w["name"] for n in plan_names() if (d := _plan_data(n))["provider"] == provider
+            for w in d["windows"].values()}
+
+
 def load_plan(name: str, capacity: float | None = None) -> Plan:
     d = _plan_data(name)
     w = d["windows"]
     cap = float(d["capacity"]) if capacity is None else float(capacity)
     if cap <= 0:
         raise ValueError(f"capacity must be positive (got {cap}) for plan {name}")
-    return Plan(d["name"], d["provider"], cap,
-                w["short"]["name"], float(w["short"]["hours"]),
-                w["long"]["name"], float(w["long"]["hours"]))
+    return Plan(d["name"], d["provider"], cap, w["long"]["name"], float(w["long"]["hours"]),
+                w["short"]["name"] if "short" in w else None)
 
 
 def load_accounts(path: Path) -> tuple[list[Account], Tuning]:

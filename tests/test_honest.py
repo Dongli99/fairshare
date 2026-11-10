@@ -1,6 +1,7 @@
 """Honest when everything is spent, and the sign-in check. A fake `claude` on a temp PATH serves
 the recorded outputs in tests/fixtures/<version>/; HOME, config and state are temp dirs; the
-clock and the sleep are injected. The real claude is never run."""
+clock and the sleep are injected. The real claude is never run; a fake `fairshare` stands in
+for the installed command."""
 import calendar
 import contextlib
 import io
@@ -13,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from fairshare import cli, store
+from fairshare import cli, session, store
 from fairshare.model import (Account, AccountStatus, Snapshot, Window, load_accounts, load_plan,
                              plan_for, render_config)
 from fairshare.providers import claude
@@ -26,13 +27,17 @@ EMAIL, ORG = "someone@example.invalid", "11111111-1111-4111-8111-111111111111"
 
 FAKE_CLAUDE = """#!/bin/sh
 # Serves $FAKE_AUTH/<basename of CLAUDE_CONFIG_DIR>.json, and records how it was called.
+[ "$1" = "--version" ] && { echo "9.9.9 (Fake Code)"; exit 0; }
 name=$(basename "$CLAUDE_CONFIG_DIR")
 printf '%s\\n' "$@" > "$FAKE_LOG/args-$name"
 env > "$FAKE_LOG/env-$name"
 [ -n "$FAKE_SLEEP" ] && exec sleep "$FAKE_SLEEP"
-[ -f "$FAKE_AUTH/$name.json" ] && exec cat "$FAKE_AUTH/$name.json"
-exit 1
+case "$1" in      # a sign-in check is answered; a session (no such command) is quiet
+  auth|whoami) [ -f "$FAKE_AUTH/$name.json" ] && exec cat "$FAKE_AUTH/$name.json"; exit 1 ;;
+  *) exit 0 ;;
+esac
 """
+FAKE_FAIRSHARE = "#!/bin/sh\nexit 0\n"      # the installed command: answers --help, does nothing
 
 
 def fixture(version: Path, name: str, **override) -> dict:
@@ -51,6 +56,8 @@ class Fleet(unittest.TestCase):
             d.mkdir()
         (self.bin / "claude").write_text(FAKE_CLAUDE)
         (self.bin / "claude").chmod(0o755)
+        (self.bin / "fairshare").write_text(FAKE_FAIRSHARE)
+        (self.bin / "fairshare").chmod(0o755)
         env = mock.patch.dict(os.environ, {
             "HOME": str(self.tmp / "home"), "PATH": f"{self.bin}:/usr/bin:/bin", "TZ": "UTC",
             "FAIRSHARE_CONFIG": str(self.tmp / "accounts.toml"),
@@ -60,7 +67,8 @@ class Fleet(unittest.TestCase):
         self.addCleanup(env.stop)
         time.tzset()
         self.addCleanup(time.tzset)      # runs after env.stop restores TZ
-        self.assertEqual(shutil.which("claude"), str(self.bin / "claude"))   # never the real one
+        for tool in ("claude", "fairshare"):                                  # never the real ones
+            self.assertEqual(shutil.which(tool), str(self.bin / tool))
         self.clock, self.slept = [NOW], []
         for target, fn in (("_now", lambda: self.clock[0]), ("_sleep", self.sleep)):
             p = mock.patch.object(cli, target, fn)
@@ -93,19 +101,23 @@ class Fleet(unittest.TestCase):
             w["seven_day"] = Window(seven[0], NOW + seven[1] * H)
         store.save(id, Snapshot(at, w))
 
-    def go(self, *argv, tty=False, answers=()):
+    def go(self, *argv, tty=False, answers=(), real=False):
+        """Run the CLI. A launch is recorded and not made, unless `real`: then the fake claude
+        runs as the child."""
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 mock.patch.object(cli, "_interactive", return_value=tty), \
                 mock.patch("builtins.input", side_effect=list(answers)) as asked, \
-                mock.patch("os.execvpe") as launched:
+                mock.patch.object(session, "run_child",
+                                  **({"wraps": session.run_child} if real
+                                     else {"return_value": 0})) as launched:
             code = cli.main(list(argv))
         self.asked, self.launched = asked, launched
         return code, out.getvalue(), err.getvalue()
 
     def launched_dir(self):
         self.launched.assert_called_once()
-        return self.launched.call_args.args[2]["CLAUDE_CONFIG_DIR"]
+        return self.launched.call_args.args[1]["CLAUDE_CONFIG_DIR"]
 
     def spent_pair(self):
         """a: week spent, back in 3h. b: short window hot for 5h, week mostly free. b ranks
@@ -149,7 +161,7 @@ class Refusal(Fleet):
         self.snap("a", five=(10, 1), seven=(40, 50))
         code, _, err = self.go("run", "--", "-p", "hi", tty=True)
         self.assertEqual(self.launched_dir(), str(self.tmp / "accts/a"))
-        self.assertEqual(self.launched.call_args.args[1][1:], ["-p", "hi"])
+        self.assertEqual(self.launched.call_args.args[0][1:], ["-p", "hi"])
         self.assertNotIn("warning", err)
         self.asked.assert_not_called()
 
@@ -233,7 +245,8 @@ class Excluded(Fleet):
 
     def test_nothing_rankable_is_an_error_not_a_launch(self):
         (self.tmp / "accounts.toml").write_text(self.accounts[1])
-        with self.assertRaises(SystemExit) as e, mock.patch("os.execvpe") as launched, \
+        with self.assertRaises(SystemExit) as e, \
+                mock.patch.object(session, "run_child") as launched, \
                 contextlib.redirect_stderr(io.StringIO()):
             cli.main(["run"])
         self.assertIn("no account can take work", str(e.exception))

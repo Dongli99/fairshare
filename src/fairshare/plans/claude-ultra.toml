@@ -1,7 +1,7 @@
 # Capacity is relative to Pro (= 1.0), so 10% of a bigger plan counts for more.
 # Anthropic, "What is the Ultra plan?" (support.claude.com, read 2026-11-09): "10 times the Pro
 # plan's usage every week" and no five-hour limit for verified accounts (unverified accounts get
-# a temporary one). Formerly Max 20x. Also a separate weekly limit for Fable.
+# a temporary one). Formerly Max 20x.
 name = "claude-ultra"
 provider = "claude"
 capacity = 10.0
@@ -10,7 +10,6 @@ names = ["ultra"]   # unverified: only "pro" has been seen from `claude auth sta
 # Usually absent for Ultra; an absent window counts as unused, a temporary one is honoured.
 [windows.short]
 name = "five_hour"
-hours = 5
 
 [windows.long]
 name = "seven_day"

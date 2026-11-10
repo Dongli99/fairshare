@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import shutil
 import tempfile
 import tomllib
 import unittest
@@ -49,6 +50,7 @@ class Home(unittest.TestCase):
                                            "PATH": str(self.home / "no-bin")})
         env.start()
         self.addCleanup(env.stop)
+        self.assertIsNone(shutil.which("claude"))          # never the real one
 
     def init(self, *args, answers=()):
         with contextlib.redirect_stdout(io.StringIO()) as out, \

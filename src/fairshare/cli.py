@@ -1,4 +1,4 @@
-"""fairshare CLI: status | pick | capture | run | init | shim install | apply | uninstall."""
+"""fairshare CLI: status | pick | capture | run (the default) | init | apply | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -6,19 +6,16 @@ import difflib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-import fairshare
-
-from . import providers, store
-from .providers import claude
+from . import providers, session, store
 from .model import (Account, AccountStatus, Snapshot, Tuning, load_accounts, load_plan,
                     plan_names, render_config)
 from .policy import HOUR, Verdict, rank
@@ -68,7 +65,7 @@ def _survey() -> Survey:
     for a, st in zip(accounts, _probe(accounts)):
         if st is None:
             failed.append(a.id)
-            signed_in = (a.config_dir / claude.LOGIN_FILE).exists()
+            signed_in = providers.get(a.provider).login_present(a)
             how = "found, counted as signed in" if signed_in else "not found, counted as signed out"
             notes[a.id] = [f"sign-in check failed; login file {how}; plan {a.plan.name} from config"]
             if signed_in:
@@ -150,8 +147,8 @@ def cmd_pick(a) -> int:
 
 
 def cmd_capture(a) -> int:
-    """Runs as the provider's statusLine command. Must never raise or print noise. With
-    --then, the user's own statusLine command gets the same stdin and prints the line."""
+    """Runs as the provider's usage hook. Must never raise or print noise. With --then, the
+    user's own command for that hook gets the same stdin and prints the line."""
     raw = sys.stdin.buffer.read()
     try:
         accounts, _ = _load()
@@ -178,20 +175,24 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stderr.isatty()
 
 
-def _grace_warning(s: Survey, v: Verdict) -> None:
+def _grace_warning(v: Verdict, snaps: dict[str, Snapshot], tuning: Tuning, now: float) -> None:
     """An account that is eligible only because its hot short window resets soon."""
-    w = (snap := s.snaps.get(v.account.id)) and snap.windows.get(v.account.plan.short_name)
-    if w and w.used_pct >= s.tuning.short_hot_pct and 0 < w.resets_at - s.now:
-        left = (w.resets_at - s.now) / HOUR
-        if left < s.tuning.grace_hours:
+    w = (snap := snaps.get(v.account.id)) and snap.windows.get(v.account.plan.short_name)
+    if w and w.used_pct >= tuning.short_hot_pct and 0 < w.resets_at - now:
+        left = (w.resets_at - now) / HOUR
+        if left < tuning.grace_hours:
             _say(f"warning: {v.account.id} {v.account.plan.short_name} window "
                  f"{w.used_pct:.0f}% used, resets in {int(left * 60)}m")
 
 
-def _launch(v: Verdict, args: list[str]):
-    cmd, env = providers.get(v.account.provider).launch(v.account)
+def _launch(v: Verdict, args: list[str]) -> int:
+    """Start the provider as a child, in its clean environment, and return its exit code."""
+    prov = providers.get(v.account.provider)
+    cmd, env = prov.launch(v.account)
     print(f"fairshare -> {v.account.id} ({v.reason})", file=sys.stderr)
-    os.execvpe(cmd[0], cmd + args, {**os.environ, **env})
+    if dropped := prov.dropped_login_vars():
+        _say(f"ignoring {', '.join(dropped)} from the environment; the account's own login is used")
+    return session.run_child(cmd + args, env)
 
 
 def _wait_until(t: float) -> None:
@@ -199,8 +200,43 @@ def _wait_until(t: float) -> None:
         _sleep(min(left, 60.0))      # short naps: a sleeping laptop must not oversleep the target
 
 
+def _run_account(account_id: str, args: list[str]) -> int:
+    """The user's explicit choice: no ranking, no refusal, no prompt. Only an account that is
+    not signed in with a subscription is stopped."""
+    accounts, tuning = _load()
+    acct = next((x for x in accounts if x.id == account_id), None)
+    if acct is None:
+        _say(f"no account '{account_id}' (configured: {', '.join(x.id for x in accounts)})")
+        return 2
+    prov = providers.get(acct.provider)
+    st = prov.account_status(acct)
+    if st is None:
+        if not prov.login_present(acct):
+            _say(f"{acct.id} is not signed in (the sign-in check failed and no login was found)")
+            return 1
+        _say(f"sign-in check failed for {acct.id}; went by the login file and the plan in "
+             "accounts.toml")
+    elif not st.logged_in:
+        _say(f"{acct.id} is not signed in")
+        return 1
+    elif not st.usable:
+        _say(f"{acct.id} is not a subscription login")
+        return 1
+    elif st.plan and st.plan != acct.plan.name:
+        acct = replace(acct, plan=load_plan(st.plan))
+    now = _now()
+    snaps = {acct.id: s} if (s := store.load(acct.id)) else {}
+    v = rank([acct], snaps, now, tuning)[0]
+    if v.eligible:
+        _grace_warning(v, snaps, tuning, now)
+    else:
+        _say(f"warning: {acct.id} is near a limit: {v.reason}; {_usable(v, now)}")
+    return _launch(v, args)
+
+
 def cmd_run(a) -> int:
-    args = a.args[1:] if a.args[:1] == ["--"] else a.args
+    if a.account:
+        return _run_account(a.account, a.args)
     try:
         while True:
             s = _survey()
@@ -212,8 +248,8 @@ def cmd_run(a) -> int:
             _nothing_to_rank(s)
             top = s.verdicts[0]
             if top.eligible:
-                _grace_warning(s, top)
-                return _launch(top, args)
+                _grace_warning(top, s.snaps, s.tuning, s.now)
+                return _launch(top, a.args)
             _say("no account is eligible:")
             for v in s.verdicts:
                 print(f"  {v.account.id:<12} {v.reason}; {_usable(v, s.now)} (in {_in(v.usable_in)})",
@@ -229,7 +265,7 @@ def cmd_run(a) -> int:
                 choice = "q"
             if choice == "s":
                 _say(f"starting on {top.account.id}, which is near a limit")
-                return _launch(top, args)
+                return _launch(top, a.args)
             if choice != "w":
                 return 75
             _say(f"waiting for {soon.account.id}, {_usable(soon, s.now)} (Ctrl-C to quit)")
@@ -312,38 +348,6 @@ def cmd_init(a) -> int:
     return 0
 
 
-def _self_command() -> str:
-    """A shell command that runs this very fairshare, however it was installed. -I keeps the
-    current directory and PYTHON* variables out of it."""
-    src = json.dumps(str(Path(fairshare.__file__).resolve().parent.parent))
-    code = f"import sys; sys.path.insert(0, {src}); from fairshare.cli import main; sys.exit(main())"
-    return f"{shlex.quote(sys.executable)} -I -c {shlex.quote(code)}"
-
-
-def _shim_dir(a) -> Path:
-    return Path(a.dir).expanduser().resolve()
-
-
-def _write_shim(d: Path) -> Path:
-    dest = d / "claude"
-    if dest.exists() and not claude.is_shim(str(dest)):
-        raise SystemExit(f"fairshare: {dest} exists and is not a fairshare shim; not touching it")
-    d.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d)
-    with os.fdopen(fd, "w") as f:
-        f.write(claude.shim_script(_self_command()))
-    os.chmod(tmp, 0o755)
-    os.replace(tmp, dest)
-    return dest
-
-
-def cmd_shim_install(a) -> int:
-    d = _shim_dir(a)
-    print(f"Wrote {_write_shim(d)}. Put its directory first on PATH, e.g. in your shell rc:\n\n"
-          f'  export PATH="{d}:$PATH"')
-    return 0
-
-
 def _yes(question: str) -> bool:
     return input(f"{question} [y/N] ").strip().lower() == "y"
 
@@ -362,46 +366,127 @@ def _offer(changes: dict[Path, str], files: dict[Path, str | None], dry_run: boo
             print("  left as is")
 
 
-def _files(accounts, home: Path) -> dict[Path, str | None]:
-    paths = [x.config_dir / "settings.json" for x in accounts] + [home / r for r in claude.RC_FILES]
-    return {p: p.read_text() if p.is_file() else None for p in paths}
+def _by_provider(accounts: list[Account]):
+    """(provider, its accounts) for each provider that has any."""
+    for prov in providers.REGISTRY.values():
+        if mine := [x for x in accounts if x.provider == prov.name]:
+            yield prov, mine
+
+
+def _read(p: Path) -> str | None:
+    try:
+        return p.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _files(accounts: list[Account]) -> dict[Path, str | None]:
+    return {p: _read(p) for prov, mine in _by_provider(accounts)
+            for p in (prov.capture_file(x) for x in mine)}
+
+
+def _installed() -> str | None:
+    """Absolute path of the installed `fairshare` command, as the shell would find it."""
+    found = shutil.which("fairshare")
+    return os.path.abspath(found) if found else None
 
 
 def cmd_apply(a) -> int:
-    """Install the shim, wire each account's statusLine, put the shim first on PATH."""
+    """Wire each account's usage hook to the installed fairshare command."""
     accounts, _ = _load()
-    home, d = Path.home(), _shim_dir(a)
-    files = _files(accounts, home)
+    if not (installed := _installed()):
+        raise SystemExit("fairshare: no installed `fairshare` found on PATH; install it first "
+                         "(pipx install .), then run `fairshare apply` again")
+    files = _files(accounts)
     try:
-        changes = claude.wire(files, accounts, home, os.environ.get("SHELL", ""),
-                              _self_command(), d)
+        changes = {p: t for prov, mine in _by_provider(accounts)
+                   for p, t in prov.wire(files, mine, shlex.quote(installed)).items()}
     except ValueError as e:
         raise SystemExit(f"fairshare: {e}; nothing changed")
-    print(f"The shim: {d / 'claude'} (fairshare's own file; routes plain `claude`).")
-    if not a.dry_run and _yes(f"Write {d / 'claude'}?"):
-        _write_shim(d)
     _offer(changes, files, a.dry_run)
     if not a.dry_run:
-        print("Open a new shell for the PATH change. `fairshare uninstall` reverses all of this.")
+        print("`fairshare uninstall` reverses this.")
     return 0
 
 
 def cmd_uninstall(a) -> int:
-    """Reverse apply: unwrap statusLines, drop the rc block, restore the alias, remove the shim.
-    accounts.toml and snapshots are kept."""
+    """Reverse apply: unwrap each account's usage hook. accounts.toml and snapshots are kept."""
     accounts = _load()[0] if store.config_path().exists() else []
-    home, shim = Path.home(), _shim_dir(a) / "claude"
-    files = _files(accounts, home)
+    files = _files(accounts)
     try:
-        changes = claude.unwire(files, accounts, home)
+        changes = {p: t for prov, mine in _by_provider(accounts)
+                   for p, t in prov.unwire(files, mine).items()}
     except ValueError as e:
         raise SystemExit(f"fairshare: {e}; nothing changed")
-    if claude.is_shim(str(shim)):
-        print(f"Remove the shim {shim}.")
-        if not a.dry_run and _yes(f"Remove {shim}?"):
-            shim.unlink()
     _offer(changes, files, a.dry_run)
     return 0
+
+
+def _runs(runner: tuple[str, ...]) -> bool:
+    """Whether the fairshare command `runner` starts and answers --help."""
+    try:
+        return subprocess.run([*runner, "--help"], stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def cmd_doctor(_a) -> int:
+    """One line per check, read-only. Safe to paste: account ids and plan names only."""
+    failed = []
+
+    def check(ok: bool, text: str) -> None:
+        print(f"{'pass' if ok else 'FAIL'}  {text}")
+        if not ok:
+            failed.append(text)
+
+    for prov in providers.REGISTRY.values():
+        found = prov.find_binary() is not None
+        check(found, f"{prov.name}: command " + (f"found, version {prov.version() or 'unknown'}"
+                                                 if found else "not found on PATH"))
+    accounts: list[Account] = []
+    try:
+        accounts = _load()[0]
+    except SystemExit:
+        check(False, "accounts.toml not found (run `fairshare init`)")
+    except (OSError, ValueError, KeyError):
+        check(False, "accounts.toml is not valid (run `fairshare init`)")
+    for a, st in zip(accounts, _probe(accounts)):
+        how = ("answers: " + ("signed out" if not st.logged_in else
+                              "not a subscription login" if not st.usable else
+                              f"signed in, plan {st.plan or a.plan.name}")) if st else "gave no answer"
+        check(st is not None, f"{a.id}: sign-in check {how}")
+    callers: dict[tuple[str, ...], list[str]] = {}
+    for prov, mine in _by_provider(accounts):
+        for a in mine:
+            cap = prov.wired(_read(prov.capture_file(a)), a.id)
+            check(cap is not None, f"{a.id}: usage hook "
+                  + ("calls fairshare capture" if cap else "does not call fairshare capture "
+                                                           "(run `fairshare apply`)"))
+            if cap:
+                callers.setdefault(cap.runner, []).append(a.id)
+    if not callers and (installed := _installed()):
+        callers[(installed,)] = []
+    if not callers:
+        check(False, "fairshare command not found on PATH")
+    for runner, ids in callers.items():
+        who = f"called by the usage hook of {', '.join(ids)}" if ids else "installed"
+        check(_runs(runner), f"fairshare command ({who}) runs")
+    return 1 if failed else 0
+
+
+def _run_args(parser: argparse.ArgumentParser, rest: list[str]) -> argparse.Namespace:
+    """`run [-a ID | --account ID] [--] ARGS...`. Only a leading -a/--account is fairshare's;
+    everything else goes to the provider unchanged (it takes a prompt as its first argument, so a
+    positional id or argparse's own option handling would not do)."""
+    account = None
+    if rest[:1] in (["-a"], ["--account"]):
+        if len(rest) < 2:
+            parser.error("run: --account needs an id")
+        account, rest = rest[1], rest[2:]
+    elif rest and rest[0].startswith("--account="):
+        account, rest = rest[0].partition("=")[2], rest[1:]
+    return argparse.Namespace(account=account, args=rest[1:] if rest[:1] == ["--"] else rest)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -410,24 +495,23 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status").set_defaults(f=cmd_status)
     pk = sub.add_parser("pick"); pk.add_argument("--json", action="store_true"); pk.set_defaults(f=cmd_pick)
     cp = sub.add_parser("capture"); cp.add_argument("account")
-    cp.add_argument("--then", help="the user's own statusLine command, run after recording")
+    cp.add_argument("--then", help="the user's own command for this hook, run after recording")
     cp.set_defaults(f=cmd_capture)
-    r = sub.add_parser("run"); r.add_argument("args", nargs=argparse.REMAINDER); r.set_defaults(f=cmd_run)
+    sub.add_parser("run", help="start a session on the best account (also: no command at all); "
+                   "`run [-a ID] [--] ARGS...` passes ARGS to the provider unchanged")
     it = sub.add_parser("init")
     it.add_argument("--yes", action="store_true", help="accept what was found; do not ask")
     it.add_argument("--account", action="append", metavar="ID=DIR:PLAN",
                     help="use exactly these accounts instead of discovery (repeatable)")
     it.set_defaults(f=cmd_init)
-    sh = sub.add_parser("shim").add_subparsers(dest="shim_cmd", required=True)
-    si = sh.add_parser("install")
-    shim_dir = str(Path.home() / ".local/share/fairshare/bin")
-    si.add_argument("--dir", default=shim_dir)
-    si.set_defaults(f=cmd_shim_install)
     for name, f in (("apply", cmd_apply), ("uninstall", cmd_uninstall)):
         x = sub.add_parser(name)
         x.add_argument("--dry-run", action="store_true", help="print the diffs, change nothing")
-        x.add_argument("--dir", default=shim_dir, help="the shim's directory")
         x.set_defaults(f=f)
+    sub.add_parser("doctor", help="check the setup, read-only").set_defaults(f=cmd_doctor)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if not argv or argv[0] == "run":
+        return cmd_run(_run_args(p, argv[1:]))
     a = p.parse_args(argv)
     return a.f(a)
 

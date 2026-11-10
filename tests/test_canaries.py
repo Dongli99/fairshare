@@ -14,7 +14,7 @@ SHORT, LONG = "five_hour", "seven_day"
 
 
 def plan(cap=1.0):
-    return Plan(f"p{cap}", "claude", cap, SHORT, 5.0, LONG, 168.0)
+    return Plan(f"p{cap}", "claude", cap, LONG, 168.0, SHORT)
 
 
 def acct(i, cap=1.0):
