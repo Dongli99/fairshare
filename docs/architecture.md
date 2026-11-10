@@ -60,6 +60,9 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
 - A snapshot's age is never read, so a stale snapshot is trusted until its windows reset.
+- Idle sessions redraw their statusLine with old values. Within one window (reset times within
+  an hour of each other) a lower used % is treated as stale and the stored one kept, so usage
+  cannot roll back; an idle redraw of unchanged values still counts as fresh.
 - The ranking is greedy; it cannot promise full use of every week.
 - A PATH entry added to the shell rc after fairshare's block can put the real `claude` ahead of
   the shim; re-running `fairshare apply` moves the block back to the end.

@@ -39,10 +39,19 @@ def save(account_id: str, snap: Snapshot) -> None:
     os.replace(tmp, dest / f"{account_id}.json")
 
 
+SAME_WINDOW_S = 3600   # resets this close together belong to the same window
+
+
 def merge(old: Snapshot | None, fresh: dict[str, Window], now: float) -> Snapshot:
-    """A payload may omit a window that is still running; keep the old one until it expires."""
+    """A payload may omit a window that is still running; keep the old one until it expires.
+    Idle sessions redraw with the last values they received, and usage never falls within one
+    window, so a lower value for the same window is stale: keep the stored one. The snapshot's
+    time moves only when something was taken, so stale redraws cannot make it look fresh."""
     kept = {k: w for k, w in (old.windows if old else {}).items() if w.resets_at > now}
-    return Snapshot(now, {**kept, **fresh})
+    taken = {k: w for k, w in fresh.items()
+             if not (k in kept and w.used_pct < kept[k].used_pct
+                     and abs(w.resets_at - kept[k].resets_at) <= SAME_WINDOW_S)}
+    return Snapshot(now if taken or old is None else old.captured_at, {**kept, **taken})
 
 
 def write_with_backup(path: Path, text: str) -> Path | None:
