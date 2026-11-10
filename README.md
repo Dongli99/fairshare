@@ -9,8 +9,8 @@ limit unless that limit is about to reset anyway. It is a heuristic, not a guara
 
 ```
 $ fairshare status
-> two   claude-pro   score 2.40  week 40% used, resets in 25h
-  one   claude-pro   score 0.27  week 70% used, resets in 111h
+> two   claude-pro   score 2.40  seven_day 40% used, resets in 25h
+  one   claude-pro   score 0.27  seven_day 70% used, resets in 111h
 
 $ fairshare       # starts a session on the account at the top of that list
 ```

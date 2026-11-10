@@ -119,8 +119,8 @@ class Account_(Fleet):
     def test_it_launches_even_when_the_account_is_near_a_limit_with_one_warning(self):
         self.snap("a", five=(10, 1), seven=(99, 3))
         self.snap("b", five=(95, 5), seven=(50, 100))
-        for who, reason, usable in (("a", "week 99% used", "usable at 11:00"),
-                                    ("b", "5h window 95% used", "usable at 13:00")):
+        for who, reason, usable in (("a", "seven_day 99% used", "usable at 11:00"),
+                                    ("b", "five_hour 95% used", "usable at 13:00")):
             code, out, err = self.go("run", "-a", who, tty=True)
             self.assertEqual(code, 0)
             self.assertEqual(self.launched_dir(), str(self.tmp / "accts" / who))
@@ -321,7 +321,7 @@ class NoShortWindow(Fleet):
         code, out, _ = self.go("status")
         self.assertEqual(code, 0)
         self.assertIn("weekly-only", out)
-        self.assertIn("week 40% used", out)
+        self.assertIn("seven_day 40% used", out)
         self.assertEqual(self.go("run", "-a", "w")[0], 0)
         self.assertEqual(self.go("run")[0], 0)
         self.launched.assert_called_once()

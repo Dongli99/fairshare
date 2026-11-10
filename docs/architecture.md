@@ -163,10 +163,8 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 - The usage hook calls the installed `fairshare` by the absolute path found when `apply` ran; if
   it moves (a reinstall elsewhere), `fairshare doctor` fails and `fairshare apply` is run again.
 - `run -a` takes the account only as its first argument; later `-a` goes to the provider.
-- The ranking's reason text names the five-hour window in `policy.py` (the one plan fact left in
-  code); a plan with another short window would need that text changed.
 - Ctrl-Z and `fg` are tested by sending the stop and continue signals to a supervised fake
-  child, not through a real terminal.
+  child; a real terminal (interactive shell in a pty) was checked by hand once, 2026-11-09.
 - Plan detection has seen only Claude Pro: the `"max"` and `"ultra"` names are unverified; an
   unmatched value leaves the plan in `accounts.toml`.
 - Per-model weekly limits (e.g. a Fable week, seen on Pro as well) are not read yet; they will
@@ -182,18 +180,19 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 
 Every outside fact fairshare relies on today, where the adapter names it, what happens when it
 changes, and the Claude Code version it was last verified on. "Not recorded" means it has worked
-since it was written but no version was noted; `doctor` is the check.
+since it was written but no version was noted; `doctor` is the check. A clean exit on SIGTERM
+(code 143, transcript intact) was verified on 2.1.321 for stage 5's handoff; nothing relies on it yet.
 
 | Dependency | Adapter constant or function | Fallback when it changes | Verified |
 |---|---|---|---|
-| The tool on PATH (`claude`) | `BINARY`, `find_binary`, `real_binary` | launch stops with a clear message; `doctor` fails | not recorded |
+| The tool on PATH (`claude`) | `BINARY`, `find_binary`, `real_binary` | launch stops with a clear message; `doctor` fails | 2.1.322, 2026-11-09 |
 | Sign-in check: `auth status --json` and its fields (`loggedIn`, `authMethod`, `email`, `orgId`, `planTier`) | `STATUS_ARGS` (per account `status_args`), `STATUS_*`, `parse_account_status` | fails soft (decision 10): login file and `accounts.toml` plan | 2.1.321, 2026-11-09 |
-| Version: `--version` | `VERSION_ARGS`, `version` | `doctor` prints "version unknown" | not verified (added in stage 2) |
-| Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | not recorded |
-| Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_ENV_PREFIX` | a variable missing from the lists reaches the child: add it | not recorded |
-| Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `unwire`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | not recorded |
-| Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | not recorded |
-| Login file (`.credentials.json`), existence only | `LOGIN_FILE`, `login_present` | only used when the sign-in check fails | not recorded |
+| Version: `--version` | `VERSION_ARGS`, `version` | `doctor` prints "version unknown" | 2.1.322, 2026-11-09 (prints `2.1.322 (Claude Code)`) |
+| Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | 2.1.321, 2026-11-09 (sign-in, sign-out and usage per folder, independently) |
+| Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_ENV_PREFIX` | a variable missing from the lists reaches the child: add it | session variables 2.1.321, 2026-11-09 (inherited, they stop the child saving a transcript; scrubbing fixes it); login-override variables not tested live |
+| Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `unwire`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
+| Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
+| Login file (`.credentials.json`), existence only | `LOGIN_FILE`, `login_present` | only used when the sign-in check fails | 2.1.321, 2026-11-09 (present exactly in signed-in folders) |
 | Shell aliases that set the folder variable | `RC_FILES`, `discover` | `init` finds fewer accounts; name them with `--account` | not applicable |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
 

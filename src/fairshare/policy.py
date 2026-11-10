@@ -45,11 +45,11 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Ver
     if exhausted:
         score = -long_in
     if long_ is None:
-        why = "no active weekly window, assumed fresh"
+        why = f"no active {p.long_name} window, assumed fresh"
     elif hot and not exhausted:
-        why = f"5h window {short_used:.0f}% used, resets in {short_in:.1f}h"
+        why = f"{p.short_name} {short_used:.0f}% used, resets in {short_in:.1f}h"
     else:
-        why = f"week {long_used:.0f}% used, resets in {long_in:.0f}h"
+        why = f"{p.long_name} {long_used:.0f}% used, resets in {long_in:.0f}h"
     usable_in = max(short_in if hot else 0.0, long_in if exhausted else 0.0)
     return Verdict(acct, not (hot or exhausted), score, why, usable_in)
 

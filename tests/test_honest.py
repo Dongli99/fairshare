@@ -136,9 +136,9 @@ class Refusal(Fleet):
         self.launched.assert_not_called()
         lines = {l.split()[0]: l for l in err.splitlines() if l.startswith("  ")}
         self.assertEqual(set(lines), {"a", "b"})
-        self.assertIn("week 99% used", lines["a"])
+        self.assertIn("seven_day 99% used", lines["a"])
         self.assertIn("usable at 11:00 (in 3h00m)", lines["a"])
-        self.assertIn("5h window 95% used", lines["b"])
+        self.assertIn("five_hour 95% used", lines["b"])
         self.assertIn("usable at 13:00 (in 5h00m)", lines["b"])
         self.assertEqual(out, "")
 
@@ -266,7 +266,7 @@ class SameLogin(Fleet):
     def test_one_quota_is_ranked_once_by_its_newest_snapshot(self):
         s = cli._survey()
         self.assertEqual([v.account.id for v in s.verdicts], ["two", "other"])
-        self.assertIn("week 30% used", s.verdicts[0].reason)
+        self.assertIn("seven_day 30% used", s.verdicts[0].reason)
         self.assertEqual([(a.id, rep) for a, rep in s.twins], [("one", "two")])
 
     def test_status_shows_the_other_folder_as_the_same_login(self):

@@ -3,7 +3,7 @@
 Routes AI-assistant sessions across several subscriptions by real usage. Open-source (MIT), currently private. **Nothing in this repo may reference any other project, private host, path, account or person's credentials.**
 
 ## Layout
-`src/fairshare/policy.py` the rule (pure) · `model.py` data + config loading · `providers/` one adapter per provider · `plans/` data files · `store.py` snapshots · `cli.py`. Seams and decisions: `docs/architecture.md`. Stance on terms: `docs/terms-and-limits.md`.
+`src/fairshare/policy.py` the rule (pure) · `model.py` data + config loading · `providers/` one adapter per provider · `plans/` data files · `store.py` snapshots · `session.py` runs the child session (signals, exit code) · `cli.py`. Seams and decisions: `docs/architecture.md`. Stance on terms: `docs/terms-and-limits.md`.
 
 ## Run
 `PYTHONPATH=src python3 -m unittest discover -s tests -v` (stdlib only: no pytest, no dependencies, ever, without a reason written in docs/architecture.md).
