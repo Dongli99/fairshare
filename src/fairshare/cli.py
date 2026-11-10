@@ -156,7 +156,7 @@ def cmd_capture(a) -> int:
         fresh = providers.get(acct.provider).parse_capture(json.loads(raw))
         if fresh:
             now = time.time()
-            store.save(acct.id, store.merge(store.load(acct.id), fresh, now))
+            store.record(acct.id, fresh, now)
             if not a.then:
                 print(" · ".join(f"{k} {w.used_pct:.0f}%" for k, w in fresh.items()))
     except Exception:

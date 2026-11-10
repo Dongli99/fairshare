@@ -120,7 +120,7 @@ class Account_(Fleet):
         self.snap("a", five=(10, 1), seven=(99, 3))
         self.snap("b", five=(95, 5), seven=(50, 100))
         for who, reason, usable in (("a", "seven_day 99% used", "usable at 11:00"),
-                                    ("b", "five_hour 95% used", "usable at 13:00")):
+                                    ("b", "five_hour 95% used", "usable at 12:00")):
             code, out, err = self.go("run", "-a", who, tty=True)
             self.assertEqual(code, 0)
             self.assertEqual(self.launched_dir(), str(self.tmp / "accts" / who))

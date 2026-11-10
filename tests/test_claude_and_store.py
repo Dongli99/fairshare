@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 from fairshare import store
@@ -72,10 +75,45 @@ class StaleRedraw(unittest.TestCase):
         self.assertEqual(m.windows["five_hour"].used_pct, 45)
         self.assertEqual(m.captured_at, 200.0)
 
+    def test_an_already_expired_window_never_replaces_a_live_one(self):
+        """An idle session redraws a window that reset after it last heard: never taken."""
+        live = Snapshot(100.0, {"five_hour": Window(96, 20_000), "seven_day": Window(5, 500_000)})
+        m = store.merge(live, {"five_hour": Window(70, 9_400),
+                               "seven_day": Window(97, 9_000)}, 10_000.0)
+        self.assertEqual(m.windows, live.windows)
+        self.assertEqual(m.captured_at, 100.0)
+
+    def test_an_already_expired_window_is_not_recorded_when_nothing_is_stored(self):
+        self.assertEqual(store.merge(None, {"five_hour": Window(70, 9_400)}, 10_000.0).windows, {})
+
     def test_an_all_stale_redraw_keeps_the_snapshot_time(self):
         m = store.merge(self.OLD, {"seven_day": Window(50, 500_000)}, 200.0)
         self.assertEqual(m.captured_at, 100.0)
 
+
+
+class ConcurrentCaptures(unittest.TestCase):
+    """Captures of one account arriving together must not let an idle redraw undo a live value."""
+    RECORD = ("import os, sys, time; sys.path.insert(0, {src!r})\n"
+              "from fairshare import store; from fairshare.model import Window\n"
+              "while not os.path.exists({go!r}): time.sleep(0.001)\n"
+              "store.record('a', {{'seven_day': Window(float(sys.argv[1]), 9e9)}}, time.time())")
+
+    def test_the_highest_value_survives_a_burst(self):
+        src = os.path.join(os.path.dirname(__file__), "..", "src")
+        for trial in range(5):
+            with tempfile.TemporaryDirectory() as d:
+                go = os.path.join(d, "go")
+                code = self.RECORD.format(src=src, go=go)
+                env = {**os.environ, "FAIRSHARE_STATE": d}
+                procs = [subprocess.Popen([sys.executable, "-c", code, str(v)], env=env)
+                         for v in [80] + list(range(11, 21))]
+                time.sleep(0.3)                      # let every process reach the start line
+                open(go, "w").close()
+                for p in procs:
+                    self.assertEqual(p.wait(timeout=20), 0)
+                os.environ["FAIRSHARE_STATE"] = d
+                self.assertEqual(store.load("a").windows["seven_day"].used_pct, 80, f"trial {trial}")
 
 if __name__ == "__main__":
     unittest.main()

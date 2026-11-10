@@ -139,7 +139,7 @@ class Refusal(Fleet):
         self.assertIn("seven_day 99% used", lines["a"])
         self.assertIn("usable at 11:00 (in 3h00m)", lines["a"])
         self.assertIn("five_hour 95% used", lines["b"])
-        self.assertIn("usable at 13:00 (in 5h00m)", lines["b"])
+        self.assertIn("usable at 12:00 (in 4h00m)", lines["b"])
         self.assertEqual(out, "")
 
     def test_a_far_off_time_carries_the_day(self):
@@ -153,7 +153,7 @@ class Refusal(Fleet):
         self.assertEqual(self.go("pick")[0], 75)
         code, out, _ = self.go("status")
         self.assertEqual(code, 0)
-        self.assertIn("usable at 13:00", [l for l in out.splitlines() if " b " in l][0])
+        self.assertIn("usable at 12:00", [l for l in out.splitlines() if " b " in l][0])
         self.assertIn("usable at 11:00", [l for l in out.splitlines() if " a " in l][0])
 
     def test_eligible_top_launches_with_no_prompt_and_no_warning(self):

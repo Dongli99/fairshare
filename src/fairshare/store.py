@@ -1,6 +1,7 @@
 """Where state lives. Snapshots are plain JSON, one per account, written atomically."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -46,13 +47,27 @@ def merge(old: Snapshot | None, fresh: dict[str, Window], now: float) -> Snapsho
     """A payload may omit a window that is still running; keep the old one until it expires.
     Idle sessions redraw with the last values they received, and usage never falls within one
     window, so a lower value for the same window is stale: keep the stored one. The snapshot's
-    time moves only when something was taken, so stale redraws cannot make it look fresh."""
+    time moves only when something was taken, so stale redraws cannot make it look fresh. A
+    fresh window already past its reset is a redraw from before the reset: never taken."""
     kept = {k: w for k, w in (old.windows if old else {}).items() if w.resets_at > now}
     taken = {k: w for k, w in fresh.items()
-             if not (k in kept and w.used_pct < kept[k].used_pct
+             if w.resets_at > now                  # a redraw of a window that already reset
+             and not (k in kept and w.used_pct < kept[k].used_pct
                      and abs(w.resets_at - kept[k].resets_at) <= SAME_WINDOW_S)}
     return Snapshot(now if taken or old is None else old.captured_at, {**kept, **taken})
 
+
+
+def record(account_id: str, fresh: dict[str, Window], now: float) -> Snapshot:
+    """Merge `fresh` into the stored snapshot and save it, holding the account's lock, so two
+    captures arriving together cannot both read the old snapshot and the last one win."""
+    dest = state_dir() / "snapshots"
+    dest.mkdir(parents=True, exist_ok=True)
+    with open(dest / f"{account_id}.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        snap = merge(load(account_id), fresh, now)
+        save(account_id, snap)
+    return snap
 
 def write_with_backup(path: Path, text: str) -> Path | None:
     """Replace a user's file atomically, first copying any existing one beside it with a

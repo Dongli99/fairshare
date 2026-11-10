@@ -116,8 +116,17 @@ class UsableIn(unittest.TestCase):
         self.assertEqual(self.usable_in(snap((50, 3), (50, 20))), 0.0)
         self.assertEqual(self.usable_in(snap((95, 0.5), (10, 20))), 0.0)   # within grace
 
-    def test_hot_waits_for_the_short_window(self):
-        self.assertAlmostEqual(self.usable_in(snap((95, 4), (10, 20))), 4.0)
+    def test_hot_waits_until_the_short_reset_is_within_grace(self):
+        # resets in 4h, grace 1h: eligible again after 3h, not 4h
+        self.assertAlmostEqual(self.usable_in(snap((95, 4), (10, 20))), 3.0)
+
+    def test_usable_in_agrees_with_eligibility(self):
+        sn = snap((95, 4), (10, 20))
+        u = self.usable_in(sn)
+        before = rank([acct("a")], {"a": sn}, NOW + (u - 0.01) * H)[0]
+        after = rank([acct("a")], {"a": sn}, NOW + (u + 0.01) * H)[0]
+        self.assertFalse(before.eligible)
+        self.assertTrue(after.eligible)
 
     def test_spent_week_waits_for_the_week_even_if_the_short_window_resets_first(self):
         self.assertAlmostEqual(self.usable_in(snap((95, 4), (99, 30))), 30.0)
