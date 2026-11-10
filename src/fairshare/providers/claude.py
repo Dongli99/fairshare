@@ -115,12 +115,13 @@ def parse_account_status(raw: object) -> AccountStatus | None:
 
 def account_status(account: Account) -> AccountStatus | None:
     """Ask the installed claude who `account` is. Reads no login file; the output is parsed in
-    memory and only its yes/no, a hash and a plan name survive. None on any failure."""
+    memory and only its yes/no, a hash and a plan name survive. None on any failure. The exit
+    code is not read: a signed-out folder prints its answer and exits 1 (2.1.322)."""
     try:
         r = subprocess.run([real_binary(), *(account.status_args or STATUS_ARGS)],
                            env=clean_env(account.config_dir), stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=PROBE_TIMEOUT)
-        return parse_account_status(json.loads(r.stdout)) if r.returncode == 0 else None
+        return parse_account_status(json.loads(r.stdout))
     except (SystemExit, OSError, subprocess.SubprocessError, ValueError):
         return None
 

@@ -26,14 +26,16 @@ VERSIONS = sorted(p for p in FIXTURES.iterdir() if p.is_dir())
 EMAIL, ORG = "someone@example.invalid", "11111111-1111-4111-8111-111111111111"
 
 FAKE_CLAUDE = """#!/bin/sh
-# Serves $FAKE_AUTH/<basename of CLAUDE_CONFIG_DIR>.json, and records how it was called.
+# Serves $FAKE_AUTH/<basename of CLAUDE_CONFIG_DIR>.json, exiting with the code in the .exit file
+# beside it (0 without one), and records how it was called.
 [ "$1" = "--version" ] && { echo "9.9.9 (Fake Code)"; exit 0; }
 name=$(basename "$CLAUDE_CONFIG_DIR")
 printf '%s\\n' "$@" > "$FAKE_LOG/args-$name"
 env > "$FAKE_LOG/env-$name"
 [ -n "$FAKE_SLEEP" ] && exec sleep "$FAKE_SLEEP"
 case "$1" in      # a sign-in check is answered; a session (no such command) is quiet
-  auth|whoami) [ -f "$FAKE_AUTH/$name.json" ] && exec cat "$FAKE_AUTH/$name.json"; exit 1 ;;
+  auth|whoami) [ -f "$FAKE_AUTH/$name.json" ] || exit 1
+    cat "$FAKE_AUTH/$name.json"; exit "$(cat "$FAKE_AUTH/$name.exit" 2>/dev/null || echo 0)" ;;
   *) exit 0 ;;
 esac
 """
@@ -42,6 +44,13 @@ FAKE_FAIRSHARE = "#!/bin/sh\nexit 0\n"      # the installed command: answers --h
 
 def fixture(version: Path, name: str, **override) -> dict:
     return {**json.loads((version / f"{name}.json").read_text()), **override}
+
+
+def serve(version: Path, name: str, auth: Path, id: str, **override):
+    """Have the fake claude answer for account `id` as the recorded `name` did, exit code too."""
+    (auth / f"{id}.json").write_text(json.dumps(fixture(version, name, **override)))
+    code = version / f"{name}.exit"
+    (auth / f"{id}.exit").write_text(code.read_text() if code.exists() else "0")
 
 
 class Fleet(unittest.TestCase):
@@ -89,8 +98,7 @@ class Fleet(unittest.TestCase):
         if login:
             (d / claude.LOGIN_FILE).write_text("")
         if auth:
-            out = fixture(self.version, f"auth-status-{auth}", **override)
-            (self.auth / f"{id}.json").write_text(json.dumps(out))
+            serve(self.version, f"auth-status-{auth}", self.auth, id, **override)
         self.accounts.append(f'[[account]]\nid = "{id}"\nplan = "{plan}"\nconfig_dir = "{d}"\n{extra}')
         (self.tmp / "accounts.toml").write_text("\n".join(self.accounts))
         return d
@@ -479,7 +487,7 @@ class Fixtures(Fleet):
         for v in VERSIONS:
             for name, expect in (("auth-status-pro", True), ("auth-status-logged-out", False)):
                 with self.subTest(version=v.name, fixture=name):
-                    shutil.copy(v / f"{name}.json", self.auth / "a.json")
+                    serve(v, name, self.auth, "a")
                     self.assertEqual(claude.account_status(acct).logged_in, expect)
 
     def test_an_unknown_shape_is_a_failed_probe(self):

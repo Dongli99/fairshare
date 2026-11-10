@@ -84,7 +84,8 @@ providers/<p>.account_status (once per command, in parallel) ──────�
     variable that could pick another login or carry another session's state
     (`claude.clean_env`, which the launcher reuses). Verified on Claude Code 2.1.321 (2026-11-09):
     the output is a JSON object with `loggedIn`, `authMethod`, `email`, `orgId`, `planTier` among
-    others. `cli.py` never names the command or a field; the adapter parses, and the parser is
+    others. Rechecked on 2.1.322 (2026-11-10): same keys; a signed-out folder prints its answer and
+    exits 1, so the adapter reads the output and ignores the exit code. `cli.py` never names the command or a field; the adapter parses, and the parser is
     tested against recorded outputs in `tests/fixtures/<version>/`. A new Claude Code version means
     a new fixture folder, not new test code. Everything is held in memory: `identity` is a hash of
     org id and email, used only to tell whether two folders are one login; the email, org id and
@@ -200,7 +201,7 @@ providers/<p>.account_status (once per command, in parallel) ──────�
   unmatched value leaves the plan in `accounts.toml`.
 - Per-model weekly limits (e.g. a Fable week, seen on Pro as well) are not read yet; they will
   come from the provider's usage report for whatever plan reports them, never from plan data.
-- The sign-in check relies on `claude auth status --json` (Claude Code 2.1.321). If a release
+- The sign-in check relies on `claude auth status --json` (Claude Code 2.1.322). If a release
   changes it, the check fails soft (see decision 10) until a fixture and the parser follow.
 - `claude --version` (for `doctor`) and the usage hook have not been checked against a recorded
   Claude Code version; see the table below.
@@ -231,7 +232,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Dependency | Adapter constant or function | Fallback when it changes | Verified |
 |---|---|---|---|
 | The tool on PATH (`claude`) | `BINARY`, `find_binary`, `real_binary` | launch stops with a clear message; `doctor` fails | 2.1.322, 2026-11-09 |
-| Sign-in check: `auth status --json` and its fields (`loggedIn`, `authMethod`, `email`, `orgId`, `planTier`) | `STATUS_ARGS` (per account `status_args`), `STATUS_*`, `parse_account_status` | fails soft (decision 10): login file and `accounts.toml` plan | 2.1.321, 2026-11-09 |
+| Sign-in check: `auth status --json` and its fields (`loggedIn`, `authMethod`, `email`, `orgId`, `planTier`) | `STATUS_ARGS` (per account `status_args`), `STATUS_*`, `parse_account_status` | fails soft (decision 10): login file and `accounts.toml` plan | 2.1.322, 2026-11-10 |
 | Version: `--version` | `VERSION_ARGS`, `version` | `doctor` prints "version unknown" | 2.1.322, 2026-11-09 (prints `2.1.322 (Claude Code)`) |
 | Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | 2.1.321, 2026-11-09 (sign-in, sign-out and usage per folder, independently) |
 | Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_MARK_ENV`, `WATCH_ENV_PREFIX`, `passed_session_vars` | a variable missing from the lists reaches the child: add it (inside a session the launcher names unlisted `CLAUDE_*` ones) | session variables 2.1.322, 2026-11-09 (the names a running session injects into its children; inherited, they stop the child saving a transcript; scrubbing fixes it); login-override variables not tested live |
