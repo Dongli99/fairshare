@@ -35,7 +35,7 @@ class UnknownPlan(Fleet):
         self.reason = f"plan claude-max-5x not found; known: {KNOWN}"
 
     def test_it_loads_with_the_reason_and_the_providers_only_provider(self):
-        accounts, _ = load_accounts(self.tmp / "accounts.toml")
+        accounts, *_ = load_accounts(self.tmp / "accounts.toml")
         b = accounts[1]
         self.assertEqual((b.plan, b.plan_error, b.provider), (None, self.reason, "claude"))
         self.assertIsNotNone(accounts[0].plan)
@@ -49,33 +49,35 @@ class UnknownPlan(Fleet):
     def test_run_prints_one_line_and_launches_the_other(self):
         code, _, err = self.go("run")
         self.assertEqual(code, 0)
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/a"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
         self.assertEqual([l for l in err.splitlines() if "skipped" in l],
                          [f"fairshare: skipped b ({self.reason})"])
 
     def test_run_account_works_for_the_other_and_explains_the_broken_one(self):
         self.assertEqual(self.go("run", "-a", "a")[0], 0)
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/a"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
         code, _, err = self.go("run", "-a", "b")
         self.assertEqual(code, 1)
         self.assertIn(self.reason, err)
         self.launched.assert_not_called()
 
     def test_doctor_fails_that_account_and_checks_the_rest(self):
-        (self.tmp / "accts/a/settings.json").write_text(json.dumps(
-            {"statusLine": {"type": "command", "command": f"{self.bin}/fairshare capture a"}}))
+        (self.tmp / "hub/shared").mkdir(parents=True)
+        (self.tmp / "hub/shared/settings.json").write_text(json.dumps(
+            {"statusLine": {"type": "command", "command": f"{self.bin}/fairshare capture"}}))
         code, out, _ = self.go("doctor")
         lines = out.splitlines()
         self.assertEqual(code, 1)
         self.assertIn(f"FAIL  b: {self.reason}", lines)
         self.assertIn("pass  a: sign-in check answers: signed in, plan claude-pro", lines)
-        self.assertIn("pass  a: usage hook calls fairshare capture", lines)
+        self.assertIn("pass  claude: usage hook in the hub calls fairshare capture", lines)
 
     def test_capture_keeps_recording_for_every_account_the_broken_one_included(self):
         for who in ("a", "b"):
             with mock.patch.object(sys, "stdin",
-                                   types.SimpleNamespace(buffer=io.BytesIO(json.dumps(PAYLOAD).encode()))):
-                self.assertEqual(self.go("capture", who, "--then", "exit 7")[0], 7)
+                                   types.SimpleNamespace(buffer=io.BytesIO(json.dumps(PAYLOAD).encode()))), \
+                    mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "hub/accounts" / who)}):
+                self.assertEqual(self.go("capture", "--then", "exit 7")[0], 7)
             self.assertEqual(sorted(store.load(who).windows), ["five_hour", "seven_day"], who)
 
     def test_with_no_provider_named_and_several_providers_it_is_a_config_error(self):
@@ -122,18 +124,33 @@ class BadInput(Fleet):
             self.assertIn("line 3", msg)
 
     def test_an_account_missing_a_key_is_named(self):
-        self.write('[[account]]\nid = "a"\nplan = "claude-pro"\n')
+        self.write('[[account]]\nplan = "claude-pro"\n')
         with self.assertRaises(SystemExit) as e:
             self.go("status")
-        self.assertIn("account 1: missing 'config_dir'", str(e.exception.code))
+        self.assertIn("account 1: missing 'id'", str(e.exception.code))
+
+    def test_a_config_dir_from_before_the_hub_says_what_to_do(self):
+        self.write('[[account]]\nid = "a"\nplan = "claude-pro"\nconfig_dir = "~/.claude-a"\n')
+        with self.assertRaises(SystemExit) as e:
+            self.go("status")
+        self.assertIn("account 1: config_dir is no longer used", str(e.exception.code))
+        self.assertIn("fairshare setup", str(e.exception.code))
+
+    def test_an_id_that_is_not_a_folder_name_is_refused(self):
+        for bad in ("../evil", "a/b", ""):
+            with self.subTest(id=bad):
+                self.write(f'[[account]]\nid = "{bad}"\nplan = "claude-pro"\n')
+                with self.assertRaises(SystemExit) as e:
+                    self.go("status")
+                self.assertIn("account 1: id", str(e.exception.code))
 
     def test_doctor_reports_every_config_error_as_a_failure(self):
         for text, expect in (('[policy]\nshort_hot_percent = 90\n', "short_hot_percent"),
                              ('[[account]]\nid = "a"\nplan = \n', "line 3"),
                              ('[[account]]\nid = "a"\n', "missing 'plan'"),
-                             ('[[account]]\nid = "a"\nplan = "claude-pro"\nconfig_dir = "/x"\n'
+                             ('[[account]]\nid = "a"\nplan = "claude-pro"\n'
                               'capacity = -1\n', "capacity must be positive"),
-                             ('[[account]]\nid = "a"\nplan = "claude-pro"\nconfig_dir = "/x"\n'
+                             ('[[account]]\nid = "a"\nplan = "claude-pro"\n'
                               'status_args = "a \\"b"\n', "account 1")):
             with self.subTest(expect=expect):
                 self.write(text)
@@ -145,60 +162,12 @@ class BadInput(Fleet):
                 self.assertNotIn(str(self.tmp), out)           # the file's name, not its path
 
     def test_a_missing_file_still_reads_as_before(self):
-        self.assertIn("FAIL  accounts.toml not found (run `fairshare init`)", self.go("doctor")[1])
+        self.assertIn("FAIL  accounts.toml not found (run `fairshare setup`)", self.go("doctor")[1])
 
     def test_capture_survives_a_broken_file_and_still_runs_the_users_line(self):
         self.write('[[account]]\nid = "a"\nplan = \n')
         with mock.patch.object(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"{}"))):
-            self.assertEqual(self.go("capture", "a", "--then", "exit 7")[0], 7)
-
-    def found_account(self):
-        d = self.tmp / "home" / ".claude-new"
-        d.mkdir()
-        (d / claude.LOGIN_FILE).write_text("")
-
-    def test_init_without_a_terminal_and_without_yes_says_so_and_exits_2(self):
-        self.found_account()
-        code, _, err = self.go("init", answers=[EOFError()])
-        self.assertEqual(code, 2)
-        self.assertIn("no terminal", err)
-        self.assertFalse((self.tmp / "accounts.toml").exists())
-
-    def test_init_over_a_broken_file_shows_the_error_and_offers_a_fresh_start(self):
-        self.found_account()
-        self.write('[[account]]\nid = "a"\nplan = \n')
-        code, out, err = self.go("init", answers=["y", "", "", "y"])
-        self.assertEqual(code, 0)
-        self.assertIn("line 3", err)
-        accounts, _ = load_accounts(self.tmp / "accounts.toml")
-        self.assertEqual([a.id for a in accounts], ["claude-new"])
-        (backup,) = self.tmp.glob("accounts.toml.bak-fairshare-*")
-        self.assertIn("plan = \n", backup.read_text())           # the broken file is kept
-
-    def test_declining_the_fresh_start_leaves_the_file_alone(self):
-        self.found_account()
-        broken = '[[account]]\nid = "a"\nplan = \n'
-        self.write(broken)
-        self.assertEqual(self.go("init", answers=["n"])[0], 1)
-        self.assertEqual((self.tmp / "accounts.toml").read_text(), broken)
-
-    def test_yes_alone_does_not_discard_a_broken_file(self):
-        self.found_account()
-        broken = '[[account]]\nid = "a"\nplan = \n'
-        self.write(broken)
-        code, _, err = self.go("init", "--yes")
-        self.assertEqual(code, 1)
-        self.assertIn("without asking", err)
-        self.assertEqual((self.tmp / "accounts.toml").read_text(), broken)
-
-    def test_account_flags_replace_a_broken_file_with_a_backup(self):
-        broken = '[[account]]\nid = "a"\nplan = \n'
-        self.write(broken)
-        code, _, _ = self.go("init", "--yes", "--account", f"x={self.tmp}/x:claude-pro")
-        self.assertEqual(code, 0)
-        self.assertEqual([a.id for a in load_accounts(self.tmp / "accounts.toml")[0]], ["x"])
-        (backup,) = self.tmp.glob("accounts.toml.bak-fairshare-*")
-        self.assertEqual(backup.read_text(), broken)
+            self.assertEqual(self.go("capture", "--then", "exit 7")[0], 7)
 
 
 class Confirmed(Fleet):
@@ -232,7 +201,7 @@ class Confirmed(Fleet):
         self.assertIn("left out: " + self.NEVER.format("new"), out)
         code, _, err = self.go("run")
         self.assertIn("skipped new (" + self.NEVER.format("new") + ")", err)
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/ok"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/ok"))
 
     def test_last_answer_no_or_login_file_gone_is_still_left_out(self):
         self.add("key", auth=None)
@@ -338,7 +307,7 @@ class Capacity(Fleet):
         (v,) = cli._survey().verdicts
         self.assertEqual((v.account.plan.name, v.account.plan.capacity), ("claude-max", 3.0))
         self.go("run", "-a", "a")
-        self.assertEqual(self.launched.call_args.args[1]["CLAUDE_CONFIG_DIR"], str(self.tmp / "accts/a"))
+        self.assertEqual(self.launched.call_args.args[1]["CLAUDE_CONFIG_DIR"], str(self.tmp / "hub/accounts/a"))
 
     def test_without_an_override_the_detected_plans_capacity_applies(self):
         self.add("a", plan="claude-pro", planTier="max")

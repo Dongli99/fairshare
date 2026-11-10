@@ -1,6 +1,7 @@
 """Where state lives. Snapshots are plain JSON, one per account, written atomically."""
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -94,22 +95,46 @@ def record(account_id: str, fresh: dict[str, Window], now: float) -> Snapshot:
         save(account_id, snap)
     return snap
 
-def write_with_backup(path: Path, text: str) -> Path | None:
-    """Replace a user's file atomically, first copying any existing one beside it with a
-    timestamp. Returns the backup's path, or None when there was nothing to back up."""
+@contextlib.contextmanager
+def locked(path: Path):
+    """Hold an exclusive lock on the file `path` (created if missing) while the block runs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def free_name(path: Path) -> Path:
+    """`path`, or the same name with -1, -2... added when that already exists."""
+    found, n = path, 1
+    while os.path.lexists(found):
+        found, n = path.with_name(f"{path.name}-{n}"), n + 1
+    return found
+
+
+def write_with_backup(path: Path, text: str, backups: Path | None = None) -> Path | None:
+    """Replace a file atomically, first copying any existing one beside it with a timestamp (or
+    into the folder `backups`), then read it back. A symlink is written through to its target,
+    never replaced by a regular file. Returns the backup's path, or None when there was nothing
+    to back up."""
+    if path.is_symlink():
+        path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = None
     if path.exists():
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup = path.with_name(f"{path.name}.bak-fairshare-{stamp}")
-        n = 1
-        while backup.exists():
-            backup, n = path.with_name(f"{path.name}.bak-fairshare-{stamp}-{n}"), n + 1
+        if backups is None:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = free_name(path.with_name(f"{path.name}.bak-fairshare-{stamp}"))
+        else:
+            backups.mkdir(parents=True, exist_ok=True)
+            backup = free_name(backups / path.name)
         shutil.copy2(path, backup)
     fd, tmp = tempfile.mkstemp(dir=path.parent)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
     if backup:
         shutil.copymode(backup, tmp)
     os.replace(tmp, path)
+    if path.read_text(encoding="utf-8") != text:
+        raise OSError(f"{path}: what was read back differs from what was written")
     return backup

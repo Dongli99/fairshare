@@ -16,7 +16,7 @@ from unittest import mock
 
 from fairshare import cli, session, store
 from fairshare.model import (Account, AccountStatus, Snapshot, Window, load_accounts, load_plan,
-                             plan_for, render_config)
+                             plan_for, with_account)
 from fairshare.providers import claude
 
 H = 3600.0
@@ -93,14 +93,15 @@ class Fleet(unittest.TestCase):
 
     def add(self, id, plan="claude-pro", auth="pro", login=True, extra="", **override):
         """An account folder. `auth` names a fixture served for it (None: the probe fails)."""
-        d = self.tmp / "accts" / id
+        d = self.tmp / "hub/accounts" / id
         d.mkdir(parents=True)
         if login:
             (d / claude.LOGIN_FILE).write_text("")
         if auth:
             serve(self.version, f"auth-status-{auth}", self.auth, id, **override)
-        self.accounts.append(f'[[account]]\nid = "{id}"\nplan = "{plan}"\nconfig_dir = "{d}"\n{extra}')
-        (self.tmp / "accounts.toml").write_text("\n".join(self.accounts))
+        self.accounts.append(f'[[account]]\nid = "{id}"\nplan = "{plan}"\n{extra}')
+        (self.tmp / "accounts.toml").write_text(f'hub = "{self.tmp / "hub"}"\n\n'
+                                                + "\n".join(self.accounts))
         return d
 
     def snap(self, id, five=None, seven=None, at=NOW):
@@ -173,7 +174,7 @@ class Refusal(Fleet):
         self.add("a")
         self.snap("a", five=(10, 1), seven=(40, 50))
         code, _, err = self.go("run", "--", "-p", "hi", tty=True)
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/a"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
         self.assertEqual(self.launched.call_args.args[0][1:], ["-p", "hi"])
         self.assertNotIn("warning", err)
         self.asked.assert_not_called()
@@ -182,7 +183,7 @@ class Refusal(Fleet):
         self.add("a")
         self.snap("a", five=(95, 0.5), seven=(40, 50))
         _, _, err = self.go("run")
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/a"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
         self.assertIn("warning: a five_hour window 95% used, resets in 30m", err)
 
 
@@ -190,7 +191,7 @@ class Prompt(Fleet):
     def test_start_launches_the_top_ranked_not_the_soonest(self):
         self.spent_pair()
         code, _, err = self.go("run", tty=True, answers=["s"])
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/b"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/b"))
         self.assertIn("[w]ait for a (usable at 11:00), [s]tart on b now, [q]uit", err)
         self.assertIn("starting on b, which is near a limit", err)
 
@@ -208,7 +209,7 @@ class Prompt(Fleet):
         self.assertGreaterEqual(self.clock[0], NOW + 3 * H)
         self.assertLess(self.clock[0], NOW + 3 * H + 120)
         self.assertEqual(err.count("waiting for a, usable at 11:00"), 1)   # told once, no countdown
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/a"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
 
     def test_waking_re_ranks_from_fresh_snapshots_and_never_launches_blindly(self):
         self.spent_pair()
@@ -253,7 +254,7 @@ class Excluded(Fleet):
         self.assertEqual(len(skipped), 1)
         self.assertIn("out (not signed in)", skipped[0])
         self.assertIn("key (not a subscription login)", skipped[0])
-        self.assertEqual(self.launched_dir(), str(self.tmp / "accts/ok"))
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/ok"))
 
     def test_nothing_rankable_is_an_error_not_a_launch(self):
         (self.tmp / "accounts.toml").write_text(self.accounts[1])
@@ -318,19 +319,6 @@ class DetectedPlan(Fleet):
         self.assertIsNone(plan_for("claude", "max_5x"))
         self.assertIsNone(plan_for("other-provider", "pro"))
         self.assertIsNone(plan_for("claude", None))
-
-    def test_init_proposes_the_detected_plan_instead_of_the_default(self):
-        d = self.tmp / "home" / ".claude-new"
-        d.mkdir()
-        (d / claude.LOGIN_FILE).write_text("")
-        (self.auth / ".claude-new.json").write_text(json.dumps(fixture(self.version, "auth-status-pro")))
-        with mock.patch.object(claude, "default_plan", "claude-ultra"):
-            found = cli._candidates({}, self.tmp / "home")
-        self.assertEqual([(a["id"], a["plan"]) for a, _ in found], [("claude-new", "claude-pro")])
-        (self.auth / ".claude-new.json").unlink()          # no answer: the default stands
-        with mock.patch.object(claude, "default_plan", "claude-ultra"):
-            found = cli._candidates({}, self.tmp / "home")
-        self.assertEqual([(a["id"], a["plan"]) for a, _ in found], [("claude-new", "claude-ultra")])
 
 
 class ProbeFails(Fleet):
@@ -430,19 +418,18 @@ class Probe(Fleet):
     def test_default_command_and_the_per_account_override(self):
         self.add("a")
         self.add("b", extra='status_args = "whoami --text"\n')
-        accounts, _ = load_accounts(self.tmp / "accounts.toml")
+        accounts, *_ = load_accounts(self.tmp / "accounts.toml")
         self.assertEqual([a.status_args for a in accounts], [None, ("whoami", "--text")])
         for a in accounts:
             claude.account_status(a)
         self.assertEqual((self.log / "args-a").read_text().split(), ["auth", "status", "--json"])
         self.assertEqual((self.log / "args-b").read_text().split(), ["whoami", "--text"])
 
-    def test_the_override_survives_init_rewriting_the_file(self):
-        text = render_config([{"id": "b", "plan": "claude-pro", "config_dir": "/x",
-                               "status_args": "whoami --text"}], {})
+    def test_the_override_survives_join_adding_an_account(self):
         p = self.tmp / "round.toml"
-        p.write_text(text)
-        self.assertEqual(load_accounts(p)[0][0].status_args, ("whoami", "--text"))
+        p.write_text('[[account]]\nid = "b"\nplan = "claude-pro"\nstatus_args = "whoami --text"\n')
+        p.write_text(with_account(p.read_text(), {"id": "c", "plan": "claude-pro"}))
+        self.assertEqual([a.status_args for a in load_accounts(p)[0]], [("whoami", "--text"), None])
 
     def test_every_account_is_asked_once_per_command(self):
         for i in "abc":

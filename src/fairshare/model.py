@@ -59,9 +59,7 @@ class Candidate:
 @dataclass(frozen=True)
 class Capture:
     """A usage hook the provider calls, as found in its settings: which fairshare command it
-    runs (`runner`, the argv before `capture`), for which account, and the user's own command it
-    wraps, if any."""
-    account: str
+    runs (`runner`, the argv before `capture`) and the user's own command it wraps, if any."""
     runner: tuple[str, ...]
     then: str | None
 
@@ -109,6 +107,10 @@ def load_plan(name: str, capacity: float | None = None) -> Plan:
                 w["short"]["name"] if "short" in w else None)
 
 
+DEFAULT_HUB = "~/.local/share/fairshare/hub"   # where setup proposes the hub
+ACCOUNT_ID = re.compile(r"\w[\w.-]*")         # an id is also a folder name in the hub
+
+
 class ConfigError(ValueError):
     """accounts.toml cannot be used. The message says what is wrong and where; callers add the
     file's name."""
@@ -120,7 +122,12 @@ def _sole_provider() -> str | None:
     return found.pop() if len(found) == 1 else None
 
 
-def _account(a: dict) -> Account:
+def _account(a: dict, hub: Path) -> Account:
+    if "config_dir" in a:
+        raise ValueError("config_dir is no longer used: each account lives in the hub, at "
+                         "<hub>/accounts/<id>; run `fairshare setup`")
+    if not isinstance(a["id"], str) or not ACCOUNT_ID.fullmatch(a["id"]):
+        raise ValueError(f"id {a['id']!r}: use letters, digits, '.', '-' or '_'")
     capacity = None if a.get("capacity") is None else float(a["capacity"])
     try:
         plan, error = load_plan(a["plan"], capacity), None
@@ -130,13 +137,14 @@ def _account(a: dict) -> Account:
     if not provider:
         raise ValueError(f"{error}, and no provider is named")
     args = a.get("status_args")
-    return Account(a["id"], provider, plan, Path(a["config_dir"]).expanduser(),
+    return Account(a["id"], provider, plan, hub / "accounts" / a["id"],
                    tuple(shlex.split(args)) if args else None, capacity, error)
 
 
-def load_accounts(path: Path) -> tuple[list[Account], Tuning]:
-    """Raises ConfigError, never anything else, for a file that cannot be used. An account whose
-    plan has no plan file loads with `plan` None and `plan_error` set."""
+def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
+    """The accounts, the tuning and the hub folder. Raises ConfigError, never anything else, for
+    a file that cannot be used. An account whose plan has no plan file loads with `plan` None and
+    `plan_error` set."""
     try:
         d = tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError as e:
@@ -145,14 +153,19 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning]:
         raise ConfigError("cannot be read as text") from None
     if not isinstance(d.get("account", []), list):
         raise ConfigError("account must be a list of [[account]] tables")
+    if not isinstance(d.get("hub", DEFAULT_HUB), str):
+        raise ConfigError("hub must be a folder path in quotes")
+    hub = Path(d.get("hub", DEFAULT_HUB)).expanduser()
     accounts = []
     for i, a in enumerate(d.get("account", []), 1):
         try:
-            accounts.append(_account(a))
+            accounts.append(_account(a, hub))
         except KeyError as e:
             raise ConfigError(f"account {i}: missing {e}") from None
         except (TypeError, ValueError, AttributeError) as e:
             raise ConfigError(f"account {i}: {e}") from None
+        if [x.id for x in accounts].count(accounts[-1].id) > 1:
+            raise ConfigError(f"account {i}: id {accounts[-1].id!r} is used twice")
     policy, valid = d.get("policy", {}), ", ".join(Tuning.__dataclass_fields__)
     if not isinstance(policy, dict):
         raise ConfigError("[policy] must be a table")
@@ -161,7 +174,7 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning]:
             raise ConfigError(f"[policy] unknown key {k!r}; valid keys: {valid}")
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ConfigError(f"[policy] {k} must be a number")
-    return accounts, Tuning(**policy)
+    return accounts, Tuning(**policy), hub
 
 
 def plan_names() -> list[str]:
@@ -169,22 +182,64 @@ def plan_names() -> list[str]:
                   if f.name.endswith(".toml"))
 
 
-def render_config(accounts: list[dict], policy: dict) -> str:
-    """accounts.toml text, the inverse of load_accounts. Refuses what would load wrong."""
-    ids = [a["id"] for a in accounts]
-    for a in accounts:
-        if not re.fullmatch(r"\w[\w.-]*", a["id"]):
-            raise ValueError(f"account id {a['id']!r}: use letters, digits, '.', '-' or '_'")
-        if ids.count(a["id"]) > 1:
-            raise ValueError(f"account id {a['id']!r} is used twice")
-        if a["plan"] not in plan_names():
-            raise ValueError(f"unknown plan {a['plan']!r} (known: {', '.join(plan_names())})")
-        load_plan(a["plan"], a.get("capacity"))
-    tables = ([("[policy]", policy)] if policy else []) + [("[[account]]", a) for a in accounts]
-    out = []
-    for header, table in tables:
-        out += [header, *(f"{k} = {_toml(v)}" for k, v in table.items()), ""]
-    return "\n".join(out)
+# accounts.toml is edited as text: a change touches only its own lines, so the user's comments and
+# layout survive, and every result is parsed again before it is returned.
+
+_TABLE = re.compile(r"^\s*\[")
+_ACCOUNT_TABLE = re.compile(r"^\s*\[\[\s*account\s*\]\]")
+
+
+def account_table(entry: dict) -> str:
+    """One [[account]] table. Refuses what would not load."""
+    if not ACCOUNT_ID.fullmatch(entry["id"]):
+        raise ValueError(f"account id {entry['id']!r}: use letters, digits, '.', '-' or '_'")
+    if entry["plan"] not in plan_names():
+        raise ValueError(f"unknown plan {entry['plan']!r} (known: {', '.join(plan_names())})")
+    load_plan(entry["plan"], entry.get("capacity"))
+    return "\n".join(["[[account]]", *(f"{k} = {_toml(v)}" for k, v in entry.items())]) + "\n"
+
+
+def with_hub(text: str, hub: str) -> str:
+    """`text` with a top-level `hub` key; unchanged when it already has one."""
+    if "hub" in tomllib.loads(text):
+        return text
+    new = f"hub = {_toml(hub)}\n" + ("\n" + text if text.strip() else "")
+    if tomllib.loads(new).get("hub") != hub:
+        raise ValueError("could not add the hub to accounts.toml")
+    return new
+
+
+def with_account(text: str, entry: dict) -> str:
+    """`text` with one more [[account]] table at its end."""
+    old = tomllib.loads(text).get("account", [])
+    if any(a.get("id") == entry["id"] for a in old):
+        raise ValueError(f"account id {entry['id']!r} is already configured")
+    body = text if not text or text.endswith("\n") else text + "\n"
+    new = body + ("\n" if body.strip() else "") + account_table(entry)
+    if tomllib.loads(new).get("account", []) != [*old, entry]:
+        raise ValueError("could not add the account to accounts.toml")
+    return new
+
+
+def without_account(text: str, account_id: str) -> str:
+    """`text` without the [[account]] table whose id is `account_id`: its lines, from its header
+    to the next table, are removed and nothing else."""
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if _TABLE.match(line)] + [len(lines)]
+    for i, end in zip(starts, starts[1:]):
+        if _ACCOUNT_TABLE.match(lines[i]):
+            try:
+                found = tomllib.loads("".join(lines[i:end]))["account"][0].get("id")
+            except (tomllib.TOMLDecodeError, KeyError, IndexError):
+                continue
+            if found == account_id:
+                new = "".join(lines[:i] + lines[end:])
+                old = tomllib.loads(text).get("account", [])
+                if tomllib.loads(new).get("account", []) != [a for a in old
+                                                             if a.get("id") != account_id]:
+                    raise ValueError("could not remove the account from accounts.toml")
+                return new
+    raise ValueError(f"no account {account_id!r} in accounts.toml")
 
 
 def _toml(v) -> str:

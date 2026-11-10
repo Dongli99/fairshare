@@ -9,8 +9,12 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
 providers/<p>.account_status (once per command, in parallel) ──────┘   │
    signed in? subscription? same login as another folder? plan?        ▼
                                                   cli: status | run ◄──┘
-                                                       run ──► providers/<p>.launch
+                                                       run ──► hub.check (the account's links)
+                                                           ──► providers/<p>.launch
                                                            ──► session.run_child (a child, not exec)
+
+setup ──► join ──► hub.check, providers/<p>.login_command, account_status
+                   [--from: hub.seed, providers/<p>.merge_state] ──► accounts.toml (+ one table)
 ```
 
 ## Seams
@@ -22,6 +26,7 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 | Policy | the routing rule | `policy.py` (pure function) |
 | Storage | where snapshots live | `store.py` |
 | Session | how a child session is started and supervised | `session.py` (provider-neutral) |
+| Hub | where the shared items live and how each account's folder links to them | `hub.py` (provider-neutral; the share list is the adapter's `SHARED`) |
 
 ## Decisions
 
@@ -66,16 +71,78 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 
    The "Public surface" table below lists every outside fact fairshare depends on today.
 
-9. **Setup edits, shown and reversible.** `wire()`/`unwire()` in the provider are pure: current
-   file texts in, new texts out. The CLI shows each change as a diff, asks per file, and backs
-   the file up before writing. The only thing `apply` edits is each account's usage hook (for
-   Claude Code, its `statusLine`); fairshare writes no PATH entry, alias, shim or rc line.
-   Reversal needs no state file: a wrapped hook carries the user's command after `--then`. An
-   existing hook is never replaced, only wrapped. Any fairshare capture counts as fairshare's to
-   remove, whatever form of the command an older version wrote. The command `apply` writes is
-   the installed `fairshare`, found on PATH and written by absolute path (never a source path or
-   `python -c`); with none installed, `apply` stops and says to install it first. Stage 3's hub
-   replaces this wiring.
+9. **One assistant: the hub.** Several accounts feel like one assistant (the same settings,
+   CLAUDE.md, skills, plugins, commands, agents, history, transcripts and project memory) without
+   fairshare writing into the user's own folders. Nothing fairshare does writes there any more;
+   `init`, `apply`, the per-account statusLine wiring and `uninstall`'s file editing are gone.
+   - **Layout.** One folder, by default `~/.local/share/fairshare/hub`, its path the top-level
+     `hub` key of `accounts.toml`. `<hub>/shared/` holds the shared items; `<hub>/accounts/<id>/`
+     is one config folder per account, holding what is its own (the login the provider creates
+     there, its state file, caches, jobs, locks) and a RELATIVE link for every shared item
+     (`projects -> ../../shared/projects`), so the whole hub can be moved: move the folder, change
+     `hub`, and every link still holds. `<hub>/backups/` gets whatever fairshare moves aside;
+     fairshare never deletes. An account's folder is derived (`<hub>/accounts/<id>`), so an
+     account table has no `config_dir` (an old one is a `ConfigError` that says to run `setup`),
+     and an id must be a plain folder name.
+   - **The launcher redirects.** A session on `<id>` runs with the provider's folder variable set
+     to `<hub>/accounts/<id>/`. The user's own folders and aliases keep working untouched;
+     sessions started by an old alias are simply not in the hub.
+   - **Share list** (`SHARED` in the adapter; a name ending in `/` is a folder). Anything not on
+     it stays per account. Every shared folder is created in `shared/` before linking, so the
+     provider never makes a local one; a shared file that does not exist yet is linked anyway
+     (the provider creates it through the link).
+   - **Start check, every launch, lossless** (`hub.check`, under a lock on the hub; stage 3b's
+     `doctor --fix` reuses it). A missing link is created. A real folder where a link belongs is
+     merged into `shared/` (a clashing file keeps both: the incoming one is renamed
+     `<name>.from-<id><ext>`; an identical one is not placed twice), then the rest of it goes to
+     `backups/` and the link is made. A real `.jsonl` file (history) gives `shared/` the lines it
+     lacks, in order. Another real file becomes the shared one when `shared/` has none; otherwise
+     `shared/`'s is kept, the account's goes to `backups/`, and a difference is shown as a diff.
+     A link pointing anywhere else (an absolute one to the right place included) is itself moved
+     to `backups/`. One line per item says what changed (new links of one run share one line).
+     If the hub cannot be changed, the launch stops (exit 1) rather than start a session that
+     would write a local folder. Diffs go through `Provider.masked`: for Claude Code the values
+     of the settings file's `env` are hidden.
+   - **Settings and capture live in the hub.** `shared/settings.json` is fairshare's own file and
+     carries the statusLine `<installed fairshare> capture`, wrapping a seeded statusLine with
+     `--then` as before (`Provider.wire`, which changes only the statusLine's command and keeps
+     every other byte; any older capture form is replaced and keeps what it wrapped). `capture`
+     takes no account id: it finds the account whose hub folder is the session's folder variable
+     (`Provider.session_dir`); a session outside the hub records nothing and still runs `--then`.
+     An id after `capture` (what the per-account wiring wrote) is accepted and ignored, so the
+     user's own folders' old statusLines keep printing their line.
+   - **`join [<id>] [--from <folder>]`** creates the folder with its links (the start check), runs
+     the provider's own sign-in in it (`Provider.login_command`, interactive; fairshare never sees
+     a token), then the sign-in check: not signed in or not a subscription login adds nothing;
+     the same identity as a configured account says "same login as <x>: one quota" and asks
+     before keeping it; a check that gives no answer adds it with the default plan and a warning.
+     `--from` COPIES (never moves) the shared items of a user's folder into `shared/`: folders
+     merge as above, `.jsonl` lines are appended, and a single file is copied only when `shared/`
+     has none (the first seed wins; a later difference is shown, not applied; a hub settings file
+     that holds only fairshare's own statusLine counts as none). Then, after asking, the state
+     keys `Provider.merge_state` allows (trusted projects, user MCP servers, the onboarding keys)
+     go into the new account's state file, adding only what it lacks; identity, tokens and
+     account fields never. The prompt names counts and server names only. The source is never
+     written. Default id: the folder's alias or name, else the lowest free `account-N`.
+   - **`leave <id> [--logout]`** removes the account's table from `accounts.toml`; its folder and
+     login stay. `--logout` runs the provider's sign-out in that folder first (a failure changes
+     nothing).
+   - **`setup`** asks the hub folder (default shown; not asked again once set), lists the user's
+     folders that discovery finds (signed-out ones marked, by the login file's existence: nothing
+     is run against them) and runs `join <id> --from <folder>` for each one picked. Bare
+     `fairshare` with no config offers it on a terminal; otherwise it prints how and exits 2.
+   - **`uninstall`** changes nothing: it prints where the config, state and hub are and what the
+     hub holds, the command that removes fairshare, and a prompt the user can give their own agent
+     to merge the hub's history back into their own folders.
+   - **Every file fairshare writes**: refused when it cannot be read or decoded (never taken for
+     absent); a symlink is written through to its target (`store.write_with_backup`), except the
+     hub's own links, which the start check manages; backed up first, written atomically, read
+     back. `accounts.toml` is edited as text under a lock, re-read just before writing: a change
+     touches only its own lines (`model.with_hub`, `with_account`, `without_account`, each
+     checked by parsing the result), so comments survive. The provider's state file may be
+     re-serialised (Claude Code rewrites it itself); fairshare takes the provider's own lock
+     folder (`Provider.state_lock`) while writing it, keeps every key it does not add, and when
+     the file changed after the user was asked, it shows the new list and asks again.
 
 10. **Ask the provider who is signed in.** `Provider.account_status(account)` returns a neutral
     `AccountStatus` (`logged_in`, `usable`, `identity`, `plan`) or `None` when the question could
@@ -94,7 +161,7 @@ providers/<p>.account_status (once per command, in parallel) ──────�
       of the ranking; `status` says why, `run` prints one line;
     - several folders with one identity are one quota: ranked once, by the member with the
       newest snapshot; `status` shows the others as "same login as <id>";
-    - the detected plan beats `accounts.toml` for ranking and `init`'s proposal; `status` marks a
+    - the detected plan beats `accounts.toml` for ranking and for the plan `join` writes; `status` marks a
       mismatch. Detection reads the plan files' `names` list (`"pro"`, `"max"`, `"ultra"`; only
       `"pro"` has been observed so far), never a table in code;
     - when the check fails (non-zero exit, timeout, bad JSON, no binary) it fails soft, but never
@@ -112,7 +179,7 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 
     The command's arguments are an adapter constant (`auth status --json`). To change them
     without a release, give an account `status_args = "auth status --json"` in `accounts.toml`
-    (one string, split like a shell would; per account, so `init` rewrites it untouched).
+    (one string, split like a shell would; per account, and `join`/`leave` leave it untouched).
     Parsing stays code, so an override can change the command, not the output format.
 
 11. **`run` does not launch an account that cannot take work.** If the top verdict is eligible it
@@ -163,11 +230,11 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 13. **`doctor` is read-only.** One line per check, `pass` or `FAIL`, exit 0 when all pass and 1
     otherwise: the provider's command is found (with its version, from the adapter);
     `accounts.toml` loads (a config error is one FAIL line with the file's name and the reason,
-    never a traceback); each account's plan exists and its sign-in check answers; the `fairshare` command a usage hook calls exists and runs
-    (`--help`; with no hook wired, the installed one); each account's usage hook still calls
-    capture. It reads settings and changes nothing, and prints account ids and plan names only,
-    so the output can go into a public issue. A repairing `--fix` waits for stage 3, when
-    everything it would repair is fairshare's own.
+    never a traceback); each account's plan exists and its sign-in check answers; the hub's one
+    settings file still calls capture; the `fairshare` command it calls exists and runs
+    (`--help`; with no hook wired, the installed one). It reads settings and changes nothing, and
+    prints account ids and plan names only, so the output can go into a public issue. A repairing
+    `--fix` (reusing the start check) is stage 3b.
 
 14. **Bad input degrades, it does not crash.** `load_accounts` raises only `ConfigError`, whose
     message says what is wrong and where (a TOML error with its line, a missing account key, an
@@ -179,10 +246,9 @@ providers/<p>.account_status (once per command, in parallel) ──────�
     Its provider is the one it names, else the only provider the plan files serve; with several
     and none named it is a `ConfigError`. `capture` needs only the provider's window names, so it
     keeps recording for every account, the broken one included, and a failing `capture` still
-    runs the user's own line (`--then`). `init` without a terminal and without `--yes` or
-    `--account` exits 2 with a message; over a broken `accounts.toml` it shows the error and asks
-    whether to start fresh (the old file is backed up when the new one is written); `--yes` alone
-    refuses to discard it unasked, `--account` replaces it.
+    runs the user's own line (`--then`). `setup` and `join` without a terminal exit 2 with a
+    message; over an `accounts.toml` that cannot be parsed they stop and say to fix it or move it
+    aside (it is never replaced).
 
 ## Known limits
 
@@ -192,8 +258,30 @@ providers/<p>.account_status (once per command, in parallel) ──────�
   an hour of each other) a lower used % is treated as stale and the stored one kept, so usage
   cannot roll back; an idle redraw of unchanged values still counts as fresh.
 - The ranking is greedy; it cannot promise full use of every week.
-- The usage hook calls the installed `fairshare` by the absolute path found when `apply` ran; if
-  it moves (a reinstall elsewhere), `fairshare doctor` fails and `fairshare apply` is run again.
+- The usage hook calls the installed `fairshare` by the absolute path found when `setup` or
+  `join` last ran; if it moves (a reinstall elsewhere), `fairshare doctor` fails and running
+  `fairshare setup` again rewrites the hook (it rewrites any older capture).
+- Whether Claude Code appends to `history.jsonl` in place (link kept) could not be provoked
+  without a login; the start check repairs a replaced link losslessly either way.
+- A shared settings change Claude Code writes by replacing the link (not seen: on 2.1.322 the
+  theme picker wrote through the link) would be set aside at the next launch, with its diff.
+- `plugins/` is shared as it is: install records seeded from a user's folder may name absolute
+  paths inside that folder, so such plugins load from there until reinstalled in the hub.
+- `join --from` copies every shared item, `sessions/` and `tasks/` included, so markers of a
+  session running in the user's folder at that moment are copied too (Claude Code clears such
+  leftovers itself, by its docs).
+- `shared/` is one namespace: a second provider whose share list names the same item as Claude
+  Code's would need its own folder there.
+- The first folder copied decides the shared settings and CLAUDE.md; later differences are only
+  shown. A first `join` without `--from` leaves only fairshare's statusLine, which a later seed
+  replaces.
+- `accounts.toml.lock` (beside the config) and `.lock` (in the hub) are lock files fairshare
+  leaves in place.
+- `join` cannot yet pick a provider: there is one.
+- Claude Code's docs say `claude auth status` exits 1 when signed out; the sign-in check treats a
+  non-zero exit as no answer (decision 10), so a signed-out account may read as a failed check
+  (the recorded fixtures keep the output, not the exit code). Not checked or changed in this
+  stage.
 - `run -a` takes the account only as its first argument; later `-a` goes to the provider.
 - Ctrl-Z and `fg` are tested by sending the stop and continue signals to a supervised fake
   child; a real terminal (interactive shell in a pty) was checked by hand once, 2026-11-09.
@@ -236,10 +324,16 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Version: `--version` | `VERSION_ARGS`, `version` | `doctor` prints "version unknown" | 2.1.322, 2026-11-09 (prints `2.1.322 (Claude Code)`) |
 | Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | 2.1.321, 2026-11-09 (sign-in, sign-out and usage per folder, independently) |
 | Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_MARK_ENV`, `WATCH_ENV_PREFIX`, `passed_session_vars` | a variable missing from the lists reaches the child: add it (inside a session the launcher names unlisted `CLAUDE_*` ones) | session variables 2.1.322, 2026-11-09 (the names a running session injects into its children; inherited, they stop the child saving a transcript; scrubbing fixes it); login-override variables not tested live |
-| Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `unwire`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
+| Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `wired`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
+| Share list: observed `projects/`, `history.jsonl`, `file-history/`, `paste-cache/`, `plugins/`, `skills/`, `tasks/`, `settings.json`, `sessions/`; documented user-level `CLAUDE.md`, `agents/`, `commands/`, `output-styles/`, `keybindings.json` | `SHARED` | an item missing from the list stays per account; one renamed leaves a stale link (harmless) | observed: 2.1.322 (real config dirs); documented: code.claude.com/docs/en/claude-directory, read 2026-11-09 |
+| Settings written through a symlinked `settings.json` | `SHARED` (the start check repairs either way) | a replaced link is repaired at the next launch, the difference shown | 2.1.322, 2026-11-09 (throwaway folder, first-run theme picker: link kept, target rewritten) |
+| `history.jsonl` written through a link | `SHARED` | as above (lines merged) | not provoked: needs a login |
+| Sign-in and sign-out: `auth login`, `auth logout` | `LOGIN_ARGS`, `LOGOUT_ARGS`, `login_command`, `logout_command` | `join` reports the sign-in did not finish; `leave --logout` changes nothing | documented (CLI reference, read 2026-11-09); not run live |
+| State file `.claude.json` inside the folder variable's folder (beside `~/.claude` in HOME without it), its lock folder `.claude.json.lock` | `STATE_FILE`, `STATE_LOCK`, `DEFAULT_DIR`, `state_file`, `state_lock` | `join --from` copies no state | location: docs (claude-directory) and 2.1.322 (created in the throwaway folder); lock: brief, not observed |
+| State keys `join` copies: `projects.<path>.hasTrustDialogAccepted`, `mcpServers`, `hasCompletedOnboarding`, `lastOnboardingVersion` | `STATE_PROJECTS`, `STATE_TRUST`, `STATE_MCP`, `STATE_ONBOARDING`, `merge_state` | the first-run screens or trust prompts show again | 2.1.322, 2026-11-09: a fresh folder's first-run screen set none of them before sign-in (the theme went to `settings.json`); the binary sets the two onboarding keys together when onboarding finishes. Not observed after a real sign-in |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
 | Login file (`.credentials.json`), existence only | `LOGIN_FILE`, `login_present` | only used when the sign-in check fails, and then only for an account last confirmed as a subscription login | 2.1.321, 2026-11-09 (present exactly in signed-in folders) |
-| Shell aliases that set the folder variable; the folders to look in | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `discover` | `init` finds fewer accounts; name them with `--account` | not applicable |
+| Shell aliases that set the folder variable; the folders to look in | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
 
 ## Cold review 2 (commit 0f67c67): what happened to each finding
@@ -247,15 +341,15 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Finding | Outcome |
 |---|---|
 | F1 expired fresh window overwrote the live one | fixed (`store.merge` never takes a window past its reset) |
-| F2 non-UTF-8 settings.json treated as absent and replaced | deferred to stage 3, which removes `apply`/`uninstall`'s file editing |
+| F2 non-UTF-8 settings.json treated as absent and replaced | retired by stage 3a: `apply`/`uninstall` file editing is gone; every file fairshare writes refuses what it cannot read (decision 9) |
 | F3 unknown plan name broke every command, capture stopped | fixed: decision 14 |
 | F4 concurrent captures rolled usage back | fixed (`store.record` holds a per-account lock) |
-| F5 symlinked settings.json replaced by a file | deferred to stage 3 (same reason as F2) |
-| F6 `apply` does not repair a hook at a moved `fairshare` | deferred to stage 3 (same reason); the Known limit above still says to re-run `apply`, which does not repair it until then |
-| F7 edit made while `apply` waits is overwritten | deferred to stage 3 (same reason) |
-| F8 `uninstall` reformats the file and leaves `{}` | deferred to stage 3 (same reason) |
+| F5 symlinked settings.json replaced by a file | retired by stage 3a (same reason); writes go through symlinks (decision 9) |
+| F6 `apply` does not repair a hook at a moved `fairshare` | retired by stage 3a: `setup`/`join` rewrite any older capture with the installed command |
+| F7 edit made while `apply` waits is overwritten | retired by stage 3a: writes re-read under a lock just before writing (decision 9) |
+| F8 `uninstall` reformats the file and leaves `{}` | retired by stage 3a: `uninstall` changes nothing |
 | F9 `usable_in` overstated the wait by the grace period | fixed (usable to the end of grace) |
-| F10 tracebacks on bad input | fixed: decision 14 and decision 13; an unreadable settings.json in `apply` is part of F2 and deferred with it |
+| F10 tracebacks on bad input | fixed: decision 14 and decision 13; an unreadable settings.json in `apply` went with F2 |
 | F11 fallback onto an unconfirmed login | fixed: decision 10 |
 | F12 scrub dropped user settings, passed other variables | fixed: decision 12 |
 | F13 detected plan dropped the capacity override | fixed: decision 2 |
@@ -263,7 +357,8 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | F14.4 `resets in 0h` | fixed: under an hour the reason reads in minutes (`resets in 9m`) |
 | F14.7 `pick` has no caller | fixed by removing it |
 | F14.8 `.claude*` literal in `discover` | fixed: `ACCOUNT_DIR_GLOB` |
-| F14.1, F14.2, F14.5, F14.6, F14.9 (init loses comments, signed-out folders not mentioned, `Suspended (signal)`, project-level statusLine, `model.py` reads files) | not part of this round; still open |
+| F14.1, F14.2 (init loses comments, signed-out folders not mentioned) | gone with `init` in stage 3a: config edits keep comments; `setup` lists signed-out folders, marked |
+| F14.5, F14.6, F14.9 (`Suspended (signal)`, project-level statusLine, `model.py` reads files) | not part of this round; still open |
 | §2 install needs network once | documented in the README |
 
 ## Not built yet

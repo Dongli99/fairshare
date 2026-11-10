@@ -35,7 +35,7 @@ class Launch(Fleet):
         self.assertEqual(code, 0)
         self.assertIn("fairshare -> a", err)
         self.assertEqual(args_seen(self, "a"), [])                 # the session, not the probe
-        self.assertEqual(env_seen(self, "a")["CLAUDE_CONFIG_DIR"], str(self.tmp / "accts/a"))
+        self.assertEqual(env_seen(self, "a")["CLAUDE_CONFIG_DIR"], str(self.tmp / "hub/accounts/a"))
 
     def test_run_passes_its_arguments_unchanged(self):
         for argv in (["run", "-p", "hi"], ["run", "--", "-p", "hi"], ["run", "-c"]):
@@ -72,7 +72,7 @@ class Launch(Fleet):
         for k in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE"):
             self.assertNotIn(k, seen)
         self.assertEqual((seen["CLAUDE_CONFIG_DIR"], seen["KEEP_ME"]),
-                         (str(self.tmp / "accts/a"), "yes"))
+                         (str(self.tmp / "hub/accounts/a"), "yes"))
 
     def test_dropped_login_variables_are_named_once_and_never_valued(self):
         hostile = {"ANTHROPIC_API_KEY": "key-value-1", "ANTHROPIC_AUTH_TOKEN": "tok-value-2",
@@ -111,7 +111,7 @@ class Account_(Fleet):
         for flag in ("-a", "--account"):
             with self.subTest(flag=flag):
                 self.go("run", flag, "a", "-c", real=True)
-                self.assertEqual(env_seen(self, "a")["CLAUDE_CONFIG_DIR"], str(self.tmp / "accts/a"))
+                self.assertEqual(env_seen(self, "a")["CLAUDE_CONFIG_DIR"], str(self.tmp / "hub/accounts/a"))
                 self.assertEqual(args_seen(self, "a"), ["-c"])
         self.go("run", "--account=a", "--", "-a", "x", real=True)
         self.assertEqual(args_seen(self, "a"), ["-a", "x"])
@@ -123,7 +123,7 @@ class Account_(Fleet):
                                     ("b", "five_hour 95% used", "usable at 12:00")):
             code, out, err = self.go("run", "-a", who, tty=True)
             self.assertEqual(code, 0)
-            self.assertEqual(self.launched_dir(), str(self.tmp / "accts" / who))
+            self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts" / who))
             warnings = [l for l in err.splitlines() if "warning" in l]
             self.assertEqual(len(warnings), 1)
             self.assertIn(reason, warnings[0])
@@ -191,16 +191,17 @@ class Doctor(Fleet):
         code, out, err = self.go(*argv or ("doctor",))
         return code, out.splitlines()
 
-    def wire(self, id, command):
-        d = self.tmp / "accts" / id
+    def wire(self, command):
+        """The hub's one settings file, which every account links to."""
+        d = self.tmp / "hub" / "shared"
+        d.mkdir(parents=True, exist_ok=True)
         (d / "settings.json").write_text(json.dumps(
             {"statusLine": {"type": "command", "command": command}}))
 
     def healthy(self):
         self.add("a", orgId=ORG + "a")
         self.add("b", orgId=ORG + "b")
-        for i in "ab":
-            self.wire(i, f"{self.bin}/fairshare capture {i}")
+        self.wire(f"{self.bin}/fairshare capture")
 
     def test_everything_passing_exits_0_with_one_line_per_check(self):
         self.healthy()
@@ -210,9 +211,8 @@ class Doctor(Fleet):
             "pass  claude: command found, version 9.9.9 (Fake Code)",
             "pass  a: sign-in check answers: signed in, plan claude-pro",
             "pass  b: sign-in check answers: signed in, plan claude-pro",
-            "pass  a: usage hook calls fairshare capture",
-            "pass  b: usage hook calls fairshare capture",
-            "pass  fairshare command (called by the usage hook of a, b) runs"])
+            "pass  claude: usage hook in the hub calls fairshare capture",
+            "pass  fairshare command (called by the claude usage hook) runs"])
 
     def test_a_missing_binary_fails(self):
         self.healthy()
@@ -226,8 +226,7 @@ class Doctor(Fleet):
     def test_an_unanswered_sign_in_check_fails_that_account_only(self):
         self.add("a", orgId=ORG + "a")
         self.add("b", auth=None)
-        for i in "ab":
-            self.wire(i, f"{self.bin}/fairshare capture {i}")
+        self.wire(f"{self.bin}/fairshare capture")
         code, lines = self.lines()
         self.assertEqual(code, 1)
         self.assertIn("pass  a: sign-in check answers: signed in, plan claude-pro", lines)
@@ -235,27 +234,28 @@ class Doctor(Fleet):
 
     def test_a_signed_out_account_still_answers(self):
         self.add("a", auth="logged-out")
-        self.wire("a", f"{self.bin}/fairshare capture a")
+        self.wire(f"{self.bin}/fairshare capture")
         self.assertIn("pass  a: sign-in check answers: signed out", self.lines()[1])
 
-    def test_a_statusline_that_no_longer_calls_capture_fails(self):
+    def test_a_hub_statusline_that_does_not_call_capture_fails(self):
         self.healthy()
-        self.wire("a", "~/bin/line.sh")
-        (self.tmp / "accts/b/settings.json").unlink()
-        code, lines = self.lines()
-        self.assertEqual(code, 1)
-        self.assertIn("FAIL  a: usage hook does not call fairshare capture (run `fairshare apply`)",
-                      lines)
-        self.assertIn("FAIL  b: usage hook does not call fairshare capture (run `fairshare apply`)",
-                      lines)
+        for broken in ("~/bin/line.sh", None):
+            with self.subTest(statusline=broken):
+                if broken:
+                    self.wire(broken)
+                else:
+                    (self.tmp / "hub/shared/settings.json").unlink()
+                code, lines = self.lines()
+                self.assertEqual(code, 1)
+                self.assertIn("FAIL  claude: usage hook in the hub does not call fairshare "
+                              "capture (run `fairshare setup`)", lines)
 
     def test_a_fairshare_command_that_does_not_run_fails(self):
         self.healthy()
-        for i in "ab":
-            self.wire(i, f"{self.tmp}/gone/fairshare capture {i}")
+        self.wire(f"{self.tmp}/gone/fairshare capture")
         code, lines = self.lines()
         self.assertEqual(code, 1)
-        self.assertIn("FAIL  fairshare command (called by the usage hook of a, b) runs", lines)
+        self.assertIn("FAIL  fairshare command (called by the claude usage hook) runs", lines)
 
     def test_a_command_that_runs_but_fails_also_fails(self):
         self.healthy()
@@ -264,15 +264,15 @@ class Doctor(Fleet):
 
     def test_the_older_command_form_is_checked_too(self):
         self.add("a", orgId=ORG + "a")
-        self.wire("a", f"{sys.executable} -I -c 'import sys; sys.exit(0)  # fairshare' capture a")
+        self.wire(f"{sys.executable} -I -c 'import sys; sys.exit(0)  # fairshare' capture a")
         code_, lines = self.lines()
         self.assertEqual(code_, 0, lines)
-        self.assertIn("pass  fairshare command (called by the usage hook of a) runs", lines)
+        self.assertIn("pass  fairshare command (called by the claude usage hook) runs", lines)
 
     def test_no_config_fails_and_still_checks_the_command(self):
         code, lines = self.lines()
         self.assertEqual(code, 1)
-        self.assertIn("FAIL  accounts.toml not found (run `fairshare init`)", lines)
+        self.assertIn("FAIL  accounts.toml not found (run `fairshare setup`)", lines)
         self.assertIn("pass  fairshare command (installed) runs", lines)
 
     def test_it_changes_nothing_and_prints_nothing_identifying(self):
@@ -350,7 +350,9 @@ class Boundary(unittest.TestCase):
         self.assertIsNone(re.search(r"claude|anthropic", self.SRC, re.I))   # of any case
         consts = [claude.BINARY, claude.CONFIG_DIR_ENV, claude.LOGIN_FILE, claude.SETTINGS_FILE,
                   claude.STATUS_LINE_KEY, claude.SESSION_MARK_ENV,
-                  claude.WATCH_ENV_PREFIX, claude.ACCOUNT_DIR_GLOB, *claude.LOGIN_OVERRIDE_ENV, *claude.SESSION_ENV, *claude.RC_FILES]
+                  claude.WATCH_ENV_PREFIX, claude.ACCOUNT_DIR_GLOB, *claude.LOGIN_OVERRIDE_ENV, *claude.SESSION_ENV, *claude.RC_FILES,
+                  claude.STATE_FILE, claude.STATE_LOCK, claude.STATE_TRUST, claude.STATE_MCP,
+                  *claude.STATE_ONBOARDING, *claude.SHARED]
         for c in consts:
             with self.subTest(constant=c):
                 self.assertFalse(c in self.SRC, f"cli.py spells {c!r}")
@@ -372,6 +374,14 @@ class Boundary(unittest.TestCase):
             self.assertFalse(hasattr(claude, n), n)
         for n in ("_write_shim", "cmd_shim_install", "_self_command", "_shim_dir"):
             self.assertFalse(hasattr(cli, n), n)
+
+    def test_nothing_writes_into_the_users_folders_any_more(self):
+        for n in ("cmd_init", "cmd_apply", "_offer", "_candidates", "_files"):
+            self.assertFalse(hasattr(cli, n), n)
+        for n in ("unwire", "_wrap", "_unwrap", "_settings"):
+            self.assertFalse(hasattr(claude, n), n)
+        from fairshare import hub
+        self.assertNotRegex(Path(hub.__file__).read_text(), r"(?i)claude|anthropic")
 
     def test_the_window_names_a_capture_may_carry_come_from_the_plan_files(self):
         self.assertEqual(model.window_names("claude"), {"five_hour", "seven_day"})

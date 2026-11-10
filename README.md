@@ -35,22 +35,36 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
 1. `pipx install .` (Python 3.11+). This puts a `fairshare` command on your PATH. fairshare has no
    dependencies when it runs, but installing needs network access once, to fetch the build
    backend (`hatchling`); an offline install fails.
-2. `fairshare init` lists the accounts it finds (shell aliases that set `CLAUDE_CONFIG_DIR`,
-   and signed-in `~/.claude*` directories), asks you to confirm each id and plan, shows the
-   resulting `accounts.toml` as a diff and writes it only on yes, keeping a backup. It proposes the
-   plan Claude Code reports for an account when it can tell, and never opens a login file.
-   Non-interactive: `--yes`, or `--account id=dir:plan` (repeatable) to name the accounts yourself.
-3. `fairshare apply --dry-run` prints every change as a diff; `fairshare apply` makes them,
-   asking per file and backing each up first. It adds a capture `statusLine` to each account's
-   settings.json, calling the installed `fairshare` by its full path. One you already have is
-   wrapped, not replaced: `fairshare capture <id> --then '<yours>'` records usage, then runs
-   yours on the same input and prints its line. It touches nothing else: no PATH entry, alias
-   or shell rc line.
+2. `fairshare setup` asks where to keep the hub (default `~/.local/share/fairshare/hub`), lists
+   the Claude Code folders it finds (shell aliases that set `CLAUDE_CONFIG_DIR`, and `~/.claude*`
+   folders; signed-out ones are marked) and joins each one you pick. Your own folders are only
+   ever read: fairshare copies from them and never changes them.
+3. `fairshare join [ID] [--from FOLDER]` adds one account: it makes the account's folder in the
+   hub, runs Claude Code's own sign-in there (your browser; fairshare never sees a token), and
+   checks who signed in. A login that is already another account's is "one quota", and you are
+   asked before it is kept. `--from` copies your folder's history, transcripts, settings,
+   CLAUDE.md, skills, plugins, commands and agents into the hub (a clashing file keeps both; the
+   first folder's settings win and later differences are shown), and, after asking, the
+   per-project trust, your MCP servers and the "first run done" flags, never your identity.
 4. `fairshare` starts a session on the best account. `fairshare run -p "hi"` (or any other
    arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` starts the account
    `work` instead, skipping the ranking (a warning if it is near a limit); this replaces a
    per-account alias. For a shorter name, make your own alias for `fairshare`.
 5. Use each account normally for a while. Every session refreshes that account's snapshot.
+
+**One assistant.** Every account's folder in the hub links to one shared set of settings,
+CLAUDE.md, skills, plugins, commands, agents, history, transcripts and project memory, so a
+session feels the same whichever account it runs on. Before each launch fairshare checks the
+account's links and repairs them without losing anything: a real folder Claude Code made is
+merged into the shared one (clashing files keep both), new history lines are appended, a
+differing settings file is set aside in `<hub>/backups/` with its diff shown, and it tells you
+in one line per item what it changed. fairshare never deletes. Move the hub by moving its folder
+and changing `hub` in `accounts.toml`: the links are relative. The usage hook lives in the hub's
+settings: `fairshare capture --then '<yours>'` records usage for the account whose folder the
+session runs in, then runs your own statusLine and prints its line.
+
+`fairshare leave ID` stops routing to an account; its folder and login stay (`--logout` signs it
+out too).
 
 `fairshare run` starts Claude Code as a child process and passes its exit code through; Ctrl-C
 and Ctrl-Z reach Claude Code as usual. It starts Claude Code without the variables that
@@ -69,12 +83,14 @@ is left out with the reason; the others keep working. A bad `accounts.toml` is r
 the file and line, not a traceback.
 
 `fairshare doctor` checks the setup and changes nothing: the `claude` command is found (with its
-version), `accounts.toml` loads, each account's plan exists, each account's sign-in check answers, the `fairshare` command a statusLine calls runs,
-and each account's statusLine still calls capture. One line per check; exit 0 when all pass.
+version), `accounts.toml` loads, each account's plan exists, each account's sign-in check answers,
+the hub's statusLine still calls capture, and the `fairshare` command it calls runs. One line per
+check; exit 0 when all pass.
 
-`fairshare uninstall` reverses step 3 the same way (diff, ask, back up): it unwraps each
-statusLine, and also removes a plain fairshare capture `statusLine` you added by hand.
-`accounts.toml` and snapshots stay.
+`fairshare uninstall` changes nothing (there is nothing to undo in your own folders): it says
+where the config, state and hub are and what the hub holds, how to remove the installed
+fairshare (`pipx uninstall fairshare`), and gives you a prompt for your own agent to merge the
+hub's history back into your own folders.
 
 Usage comes from Claude Code's documented statusLine input, so fairshare needs no tokens, no
 endpoint access and no keychain. A snapshot is only as fresh as that account's last session;

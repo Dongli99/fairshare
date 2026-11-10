@@ -1,8 +1,8 @@
-"""fairshare CLI: status | capture | run (the default) | init | apply | uninstall | doctor."""
+"""fairshare CLI: status | capture | run (the default) | setup | join | leave | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
-import difflib
+import contextlib
 import json
 import os
 import shlex
@@ -15,16 +15,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from . import hub as hub_mod
 from . import providers, session, store
-from .model import (Account, AccountStatus, ConfigError, Snapshot, Tuning, load_accounts,
-                    load_plan, plan_names, render_config)
+from .model import (ACCOUNT_ID, DEFAULT_HUB, Account, AccountStatus, ConfigError, Snapshot, Tuning,
+                    load_accounts, load_plan, with_account, with_hub, without_account)
 from .policy import HOUR, Verdict, rank
 
 
 def _load():
     path = store.config_path()
     if not path.exists():
-        raise SystemExit(f"fairshare: no config at {path} (see `fairshare init`)")
+        raise SystemExit(f"fairshare: no config at {path} (run `fairshare setup`)")
     try:
         return load_accounts(path)
     except ConfigError as e:
@@ -78,7 +79,7 @@ def _unconfirmed(a: Account) -> str | None:
 
 def _survey() -> Survey:
     """Check every account once, then rank those that can take work."""
-    accounts, tuning = _load()
+    accounts, tuning, _ = _load()
     now = _now()
     snaps = {a.id: s for a in accounts if (s := store.load(a.id))}
     live, twins, notes, failed = [], [], {}, []
@@ -161,17 +162,28 @@ def _nothing_to_rank(s: Survey) -> None:
         raise SystemExit(f"fairshare: no account can take work ({why})")
 
 
+def _session_account(accounts: list[Account]) -> Account | None:
+    """The account whose hub folder this process's session runs in, else None (a session started
+    some other way, outside the hub)."""
+    for a in accounts:
+        prov = providers.REGISTRY.get(a.provider)
+        d = prov and prov.session_dir()
+        if d and os.path.realpath(d) == os.path.realpath(a.config_dir):
+            return a
+    return None
+
+
 def cmd_capture(a) -> int:
-    """Runs as the provider's usage hook. Must never raise or print noise. With --then, the
-    user's own command for that hook gets the same stdin and prints the line."""
+    """Runs as the provider's usage hook. Must never raise or print noise. The account is the
+    session's own folder in the hub; a session outside the hub records nothing. With --then, the
+    user's own command for that hook gets the same stdin and prints the line. An account id after
+    `capture` (the form before the hub) is ignored."""
     raw = sys.stdin.buffer.read()
     try:
-        accounts, _ = _load()
-        acct = next(x for x in accounts if x.id == a.account)
-        fresh = providers.get(acct.provider).parse_capture(json.loads(raw))
+        acct = _session_account(_load()[0])
+        fresh = acct and providers.get(acct.provider).parse_capture(json.loads(raw))
         if fresh:
-            now = time.time()
-            store.record(acct.id, fresh, now)
+            store.record(acct.id, fresh, time.time())
             if not a.then:
                 print(" · ".join(f"{k} {w.used_pct:.0f}%" for k, w in fresh.items()))
     except (Exception, SystemExit):      # whatever is wrong, the user's own line must still run
@@ -201,10 +213,17 @@ def _grace_warning(v: Verdict, snaps: dict[str, Snapshot], tuning: Tuning, now: 
 
 
 def _launch(v: Verdict, args: list[str]) -> int:
-    """Start the provider as a child, in its clean environment, and return its exit code."""
+    """Run the start check on the account's hub folder, then start the provider as a child, in
+    its clean environment, and return its exit code."""
     prov = providers.get(v.account.provider)
-    cmd, env = prov.launch(v.account)
     print(f"fairshare -> {v.account.id} ({v.reason})", file=sys.stderr)
+    try:
+        for note in hub_mod.check(v.account.config_dir.parent.parent, v.account.id, prov):
+            _say(note)
+    except OSError as e:
+        _say(f"cannot prepare {v.account.id}'s folder in the hub ({e}); not started")
+        return 1
+    cmd, env = prov.launch(v.account)
     if dropped := prov.dropped_login_vars():
         _say(f"ignoring {', '.join(dropped)} from the environment; the account's own login is used")
     if passed := prov.passed_session_vars():
@@ -220,7 +239,7 @@ def _wait_until(t: float) -> None:
 def _run_account(account_id: str, args: list[str]) -> int:
     """The user's explicit choice: no ranking, no refusal, no prompt. Only an account that is
     not signed in with a subscription is stopped."""
-    accounts, tuning = _load()
+    accounts, tuning, _ = _load()
     acct = next((x for x in accounts if x.id == account_id), None)
     if acct is None:
         _say(f"no account '{account_id}' (configured: {', '.join(x.id for x in accounts)})")
@@ -300,120 +319,13 @@ def _tilde(p: Path, home: Path) -> str:
     return f"~/{p.relative_to(home)}" if p.is_relative_to(home) and p != home else str(p)
 
 
-def _candidates(old: dict, home: Path) -> list[tuple[dict, str]]:
-    """Accounts already configured, then discovered ones not yet in the config, each with the
-    plan its provider reports when it says (else the provider's default)."""
-    out = [(dict(a), "accounts.toml") for a in old.get("account", [])]
-    known = {Path(a["config_dir"]).expanduser() for a, _ in out}
-    new = [(prov, c) for prov in providers.REGISTRY.values()
-           for c in prov.discover(home) if c.config_dir not in known]
-    asked = [Account(c.id, c.provider, load_plan(prov.default_plan), c.config_dir)
-             for prov, c in new]
-    for (prov, c), st in zip(new, _probe(asked)):
-        out.append(({"id": c.id, "plan": (st and st.plan) or prov.default_plan,
-                     "config_dir": _tilde(c.config_dir, home)}, c.found))
-    return out
-
-
-def _ask(found: list[tuple[dict, str]]) -> list[dict]:
-    """Thin prompt layer: confirm or edit each id and plan; '-' drops an account."""
-    print("Found:" if found else "Found no accounts (name them with --account ID=DIR:PLAN).")
-    for a, where in found:
-        print(f"  {a['id']:<12} {a['config_dir']:<24} ({where})")
-    print(f"Plans: {', '.join(plan_names())}. Enter keeps [default]; id '-' drops the account.")
-    entries = []
-    for a, _ in found:
-        new_id = input(f"{a['config_dir']}  id [{a['id']}]: ").strip() or a["id"]
-        if new_id == "-":
-            continue
-        plan = input(f"{a['config_dir']}  plan [{a['plan']}]: ").strip() or a["plan"]
-        entries.append({**a, "id": new_id, "plan": plan})
-    return entries
-
-
-def _account_flag(s: str) -> dict:
-    ident, eq, rest = s.partition("=")
-    d, colon, plan = rest.rpartition(":")
-    if not (eq and colon and ident and d and plan):
-        raise SystemExit(f"fairshare: --account wants id=dir:plan, got {s!r}")
-    return {"id": ident, "plan": plan, "config_dir": d}
-
-
-def _needs_terminal() -> int:
-    _say("init asks questions and there is no terminal to answer them; "
-         "use --yes, or --account ID=DIR:PLAN")
-    return 2
-
-
-def _entries(a, old: dict, home: Path) -> list[dict]:
-    if a.account:
-        return [_account_flag(x) for x in a.account]
-    found = _candidates(old, home)
-    return [e for e, _ in found] if a.yes else _ask(found)
-
-
-def cmd_init(a) -> int:
-    """Shows what was found, asks, and writes only accounts.toml (with a backup)."""
-    path, home = store.config_path(), Path.home()
-    old_text = path.read_text() if path.exists() else ""
-    try:
-        old = tomllib.loads(old_text)
-    except tomllib.TOMLDecodeError as e:
-        _say(f"{path}: {e}")
-        if a.yes and not a.account:
-            _say("not starting fresh without asking: run `fairshare init` without --yes, "
-                 "or fix the file")
-            return 1
-        if not a.account:
-            try:
-                if not _yes("Start fresh? (the old file is backed up when the new one is written)"):
-                    print("Nothing written.")
-                    return 1
-            except EOFError:
-                return _needs_terminal()
-        old = {}          # the broken text stays as `old_text`: the diff shows it replaced
-    try:
-        entries = _entries(a, old, home)
-    except EOFError:
-        return _needs_terminal()
-    if not entries:
-        raise SystemExit("fairshare: no accounts; nothing written")
-    try:
-        new_text = render_config(entries, old.get("policy", {}))
-    except ValueError as e:
-        raise SystemExit(f"fairshare: {e}; nothing written")
-    if new_text == old_text:
-        print(f"{path} is already up to date.")
-        return 0
-    sys.stdout.writelines(difflib.unified_diff(
-        old_text.splitlines(True), new_text.splitlines(True), str(path), f"{path} (new)"))
-    try:
-        if not a.yes and not _yes(f"Write {path}?"):
-            print("Nothing written.")
-            return 1
-    except EOFError:
-        return _needs_terminal()
-    backup = store.write_with_backup(path, new_text)
-    print(f"Wrote {path}" + (f" (backup: {backup})" if backup else ""))
-    return 0
-
-
 def _yes(question: str) -> bool:
     return input(f"{question} [y/N] ").strip().lower() == "y"
 
 
-def _offer(changes: dict[Path, str], files: dict[Path, str | None], dry_run: bool) -> None:
-    """Show each change as a diff; write it, after a backup, only on a yes for that file."""
-    for p, new in changes.items():
-        sys.stdout.writelines(difflib.unified_diff(
-            (files.get(p) or "").splitlines(True), new.splitlines(True), str(p), f"{p} (new)"))
-        if dry_run:
-            continue
-        if _yes(f"Change {p}?"):
-            backup = store.write_with_backup(p, new)
-            print("  changed" + (f" (backup: {backup})" if backup else ""))
-        else:
-            print("  left as is")
+def _needs_terminal(command: str) -> int:
+    _say(f"{command} asks questions and there is no terminal to answer them")
+    return 2
 
 
 def _by_provider(accounts: list[Account]):
@@ -423,16 +335,17 @@ def _by_provider(accounts: list[Account]):
             yield prov, mine
 
 
+def _provider():
+    """The provider a new account joins. There is one; a second will need a flag on join."""
+    (prov,) = providers.REGISTRY.values()
+    return prov
+
+
 def _read(p: Path) -> str | None:
     try:
         return p.read_text()
     except (OSError, UnicodeDecodeError):
         return None
-
-
-def _files(accounts: list[Account]) -> dict[Path, str | None]:
-    return {p: _read(p) for prov, mine in _by_provider(accounts)
-            for p in (prov.capture_file(x) for x in mine)}
 
 
 def _installed() -> str | None:
@@ -441,34 +354,332 @@ def _installed() -> str | None:
     return os.path.abspath(found) if found else None
 
 
-def cmd_apply(a) -> int:
-    """Wire each account's usage hook to the installed fairshare command."""
-    accounts, _ = _load()
+def _need_installed(command: str) -> str:
     if not (installed := _installed()):
         raise SystemExit("fairshare: no installed `fairshare` found on PATH; install it first "
-                         "(pipx install .), then run `fairshare apply` again")
-    files = _files(accounts)
+                         f"(pipx install .), then run `fairshare {command}` again")
+    return installed
+
+
+def _config_text(path: Path) -> str:
+    """accounts.toml as text ("" when there is none). A file that cannot be read or parsed is
+    refused, never taken for empty."""
+    if not path.exists():
+        return ""
     try:
-        changes = {p: t for prov, mine in _by_provider(accounts)
-                   for p, t in prov.wire(files, mine, shlex.quote(installed)).items()}
-    except ValueError as e:
-        raise SystemExit(f"fairshare: {e}; nothing changed")
-    _offer(changes, files, a.dry_run)
-    if not a.dry_run:
-        print("`fairshare uninstall` reverses this.")
+        text = path.read_text(encoding="utf-8")
+        tomllib.loads(text)
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise SystemExit(f"fairshare: {path}: {e}; fix it or move it aside, then run this again")
+    return text
+
+
+def _edit_config(change) -> None:
+    """Apply `change` (text -> text) to accounts.toml: under a lock, re-read just before writing,
+    back up, write atomically, read back. Only the lines of the change differ."""
+    path = store.config_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        old = _config_text(path)
+        try:
+            new = change(old)
+        except ValueError as e:
+            raise SystemExit(f"fairshare: {path}: {e}; nothing written")
+        if new != old:
+            backup = store.write_with_backup(path, new)
+            print(f"Wrote {path}" + (f" (backup: {backup})" if backup else ""))
+
+
+def _wire_hub(prov, hub: Path, installed: str) -> None:
+    """The hub's settings carry the usage hook: the installed fairshare by absolute path, then
+    the user's own hook, if any (`--then`)."""
+    note = hub_mod.edit_shared(hub, prov.capture_file(hub_mod.shared_dir(hub)),
+                               lambda text: prov.wire(text, shlex.quote(installed)), "settings")
+    if note:
+        print(f"usage hook: {note}")
+
+
+@contextlib.contextmanager
+def _held(lock: Path, seconds: float = 10.0):
+    """Take the provider's own lock folder for its state file, as the provider does."""
+    end = time.monotonic() + seconds
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            if time.monotonic() > end:
+                raise OSError(f"{lock} is held by someone else; try again later")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        os.rmdir(lock)
+
+
+def _copy_state(prov, source: Path, account: Account, hub: Path) -> None:
+    """After asking, carry over the few keys of the user's folder's state file that the
+    provider allows (trust, user MCP servers, onboarding) into the new account's. The user's
+    file is only read."""
+    home = Path.home()
+    src_path, dest = prov.state_file(source, home), prov.state_file(account.config_dir, home)
+    if not src_path.exists():
+        return
+    try:
+        src = json.loads(src_path.read_text(encoding="utf-8"))
+        if not isinstance(src, dict):
+            raise ValueError("not an object")
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        _say(f"{src_path} cannot be read ({e}); nothing copied from it")
+        return
+
+    def current() -> dict:
+        if not dest.exists():
+            return {}
+        d = json.loads(dest.read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            raise ValueError("not an object")
+        return d
+
+    shown = None
+    try:
+        while True:
+            new, what = prov.merge_state(current(), src)
+            if not what:
+                return
+            if what != shown:
+                print(f"From {src_path}, {account.id} can take: {'; '.join(what)}.")
+                if not _yes("Copy these?"):
+                    print("  not copied")
+                    return
+                shown = what
+            with _held(prov.state_lock(dest)):
+                new, what = prov.merge_state(current(), src)
+                if what != shown:
+                    continue                     # it changed meanwhile: show it and ask again
+                store.write_with_backup(dest, json.dumps(new, indent=2, ensure_ascii=False)
+                                        + "\n", hub_mod.backup_dir(hub, account.id))
+                if json.loads(dest.read_text(encoding="utf-8")) != new:
+                    raise OSError(f"{dest} did not read back as written")
+                print("  copied")
+                return
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        _say(f"{dest}: {e}; nothing copied")
+
+
+def _default_id(source: Path | None, taken: set[str], hub: Path) -> str:
+    """The alias or folder name of `source` (as setup shows it), else the lowest free
+    account-N. Never anything from the login."""
+    if source is not None:
+        for prov in providers.REGISTRY.values():
+            for c in prov.discover(Path.home()):
+                if c.config_dir.resolve() == source.resolve():
+                    return c.id
+        return source.name.lstrip(".")
+    n = 1
+    while f"account-{n}" in taken or hub_mod.account_dir(hub, f"account-{n}").exists():
+        n += 1
+    return f"account-{n}"
+
+
+def _join(account_id: str | None, source: Path | None) -> int:
+    """Create the account's folder in the hub with its links, run the provider's own sign-in in
+    it, check who signed in, copy from the user's folder when asked, and add it to the config."""
+    accounts, _, hub = _load()
+    installed = _need_installed("join")
+    prov = _provider()
+    if source is not None:
+        if not source.is_dir():
+            _say(f"{source} is not a folder")
+            return 2
+        if source.resolve().is_relative_to(hub.resolve()):
+            _say(f"{source} is inside the hub; name one of your own folders")
+            return 2
+    taken = {a.id for a in accounts}
+    account_id = account_id or _default_id(source, taken, hub)
+    if not ACCOUNT_ID.fullmatch(account_id):
+        _say(f"account id {account_id!r}: use letters, digits, '.', '-' or '_'")
+        return 2
+    if account_id in taken:
+        _say(f"{account_id} is already joined (configured: {', '.join(sorted(taken))})")
+        return 2
+    folder = hub_mod.account_dir(hub, account_id)
+    if folder.exists():
+        print(f"{account_id}: using the folder already in the hub, {folder}")
+    for note in hub_mod.check(hub, account_id, prov):
+        print(note)
+    print(f"Signing in {account_id}: follow the sign-in the provider opens.")
+    cmd, env = prov.login_command(folder)
+    if code := session.run_child(cmd, env):
+        _say(f"the sign-in did not finish (exit {code}); {account_id} not added; its folder "
+             f"stays at {folder}")
+        return 1
+    acct = Account(account_id, prov.name, load_plan(prov.default_plan), folder)
+    st = prov.account_status(acct)
+    if st is not None:
+        store.record_subscription(account_id, st.logged_in and st.usable, _now())
+        if not (st.logged_in and st.usable):
+            _say(f"{account_id} is {'not a subscription login' if st.logged_in else 'not signed in'}"
+                 f"; not added; its folder stays at {folder}")
+            return 1
+        others = [a for a in accounts if a.provider == prov.name and a.plan is not None]
+        twins = [a.id for a, s in zip(others, _probe(others))
+                 if s and st.identity and s.identity == st.identity]
+        if twins:
+            print(f"same login as {twins[0]}: one quota")
+            if not _yes(f"Keep {account_id} anyway?"):
+                print(f"{account_id} not added; its folder stays at {folder}")
+                return 1
+    else:
+        _say(f"the sign-in check for {account_id} gave no answer; it is added with plan "
+             f"{prov.default_plan}, and `fairshare status` checks it again")
+    if source is not None:
+        settings = prov.capture_file(hub_mod.shared_dir(hub)).name
+        prepare = {settings: lambda text: prov.wire(text, shlex.quote(installed)) or text}
+        for note in hub_mod.seed(hub, source, account_id, prov, prepare):
+            print(f"from {_tilde(source, Path.home())}: {note}")
+    _wire_hub(prov, hub, installed)
+    if source is not None:
+        _copy_state(prov, source, acct, hub)
+    plan = (st and st.plan) or prov.default_plan
+    _edit_config(lambda text: with_account(text, {"id": account_id, "plan": plan}))
+    print(f"joined {account_id} ({plan})")
     return 0
 
 
-def cmd_uninstall(a) -> int:
-    """Reverse apply: unwrap each account's usage hook. accounts.toml and snapshots are kept."""
-    accounts = _load()[0] if store.config_path().exists() else []
-    files = _files(accounts)
+def cmd_join(a) -> int:
     try:
-        changes = {p: t for prov, mine in _by_provider(accounts)
-                   for p, t in prov.unwire(files, mine).items()}
-    except ValueError as e:
-        raise SystemExit(f"fairshare: {e}; nothing changed")
-    _offer(changes, files, a.dry_run)
+        return _join(a.id, Path(a.source).expanduser() if a.source else None)
+    except EOFError:
+        return _needs_terminal("join")
+
+
+def cmd_leave(a) -> int:
+    """Stop routing to an account. Its folder and login stay; --logout signs it out first."""
+    accounts, _, _ = _load()
+    acct = next((x for x in accounts if x.id == a.id), None)
+    if acct is None:
+        _say(f"no account '{a.id}' (configured: {', '.join(x.id for x in accounts)})")
+        return 2
+    if a.logout:
+        cmd, env = providers.get(acct.provider).logout_command(acct.config_dir)
+        if code := session.run_child(cmd, env):
+            _say(f"signing out {acct.id} failed (exit {code}); nothing changed")
+            return 1
+    _edit_config(lambda text: without_account(text, acct.id))
+    print(f"left {acct.id}: no session is routed to it. Its folder"
+          + (" stays" if a.logout else " and login stay") + f" at {acct.config_dir}")
+    return 0
+
+
+def _setup() -> int:
+    path, home = store.config_path(), Path.home()
+    installed = _need_installed("setup")
+    parsed = tomllib.loads(_config_text(path))
+    if "hub" in parsed:
+        print(f"Hub: {parsed['hub']}")
+    else:
+        hub_text = input(f"Hub folder (holds what every account shares) [{DEFAULT_HUB}]: ").strip()
+        _edit_config(lambda text: with_hub(text, hub_text or DEFAULT_HUB))
+    hub = _load()[2]
+    found = [c for prov in providers.REGISTRY.values() for c in prov.discover(home)
+             if not c.config_dir.resolve().is_relative_to(hub.resolve())]
+    print("Your own folders (fairshare copies from them and never changes them):" if found else
+          "Found none of your own folders. Add an account with `fairshare join`.")
+    for i, c in enumerate(found, 1):
+        signed = providers.get(c.provider).login_present(Account(c.id, c.provider, None,
+                                                                 c.config_dir))
+        print(f"  {i}  {c.id:<12} {_tilde(c.config_dir, home):<24} {c.found}"
+              + ("" if signed else "  (signed out)"))
+    answer = input("Join which? Numbers separated by spaces, 'all', or Enter for none: "
+                   ) if found else ""
+    words = answer.replace(",", " ").split()
+    try:
+        picked = found if words == ["all"] else [found[int(w) - 1] for w in words]
+    except (ValueError, IndexError):
+        _say(f"not a choice: {answer.strip()!r}; nothing joined")
+        return 2
+    failed = [c.id for c in picked if _join(c.id, c.config_dir) != 0]
+    for prov in providers.REGISTRY.values():         # each join did this; also with none picked
+        _wire_hub(prov, hub, installed)
+    if failed:
+        _say(f"not joined: {', '.join(failed)}")
+    return 1 if failed else 0
+
+
+def cmd_setup(_a) -> int:
+    """Ask where the hub goes, then join each of the user's own folders they pick."""
+    try:
+        return _setup()
+    except EOFError:
+        return _needs_terminal("setup")
+
+
+def _offer_setup() -> int:
+    """Bare `fairshare` with no config: offer setup on a terminal, else say how."""
+    how = f"no config at {store.config_path()}; run `fairshare setup` to set up your accounts"
+    if not _interactive():
+        _say(how)
+        return 2
+    try:
+        if input("fairshare is not set up yet. Run `fairshare setup` now? [Y/n] "
+                 ).strip().lower() in ("", "y", "yes"):
+            return cmd_setup(None)
+    except EOFError:
+        pass
+    _say(how)
+    return 2
+
+
+def _merge_back_prompt(prov, shared: Path, folders: list[str]) -> str:
+    dirs = [i.rstrip("/") + "/" for i in prov.shared if i.endswith("/")]
+    logs = [i for i in prov.shared if i.endswith(".jsonl")]
+    files = [i for i in prov.shared if not i.endswith("/") and not i.endswith(".jsonl")]
+    return "\n".join([
+        f"fairshare kept my {prov.name} history and settings in one shared folder, {shared}.",
+        "Merge it back into my own config folders ("
+        + (", ".join(folders) if folders else "ask me which") + ") without losing anything:",
+        f"- folders ({', '.join(dirs)}): copy every file my folder lacks; when a file is in both",
+        "  with different content, keep both and give the incoming one a new name;",
+        f"- {', '.join(logs)}: append the lines my file lacks, in their order;",
+        f"- {', '.join(files)}: show me the differences and ask before changing anything.",
+        f"Never delete or change anything in {shared}, never open or copy a login file, and show",
+        "me the plan and wait for my yes before you change anything."])
+
+
+def cmd_uninstall(_a) -> int:
+    """Changes nothing: says where everything is, how to remove fairshare, and gives a prompt
+    for the user's own agent to merge the hub's history back into their own folders."""
+    path, home = store.config_path(), Path.home()
+    hub, accounts = None, []
+    if path.exists():
+        try:
+            accounts, _, hub = load_accounts(path)
+        except ConfigError as e:
+            print(f"{path}: {e}")
+    print("fairshare never changed your own folders, so there is nothing to undo in them.")
+    print(f"Config: {path}" + ("" if path.exists() else " (none)"))
+    print(f"State (usage snapshots): {store.state_dir()}")
+    if hub is not None:
+        shared = hub_mod.shared_dir(hub)
+        print(f"Hub: {hub}" + ("" if hub.exists() else " (not created)"))
+        held = sorted(p.name + "/" * p.is_dir() for p in shared.iterdir()) if shared.is_dir() else []
+        print(f"  shared: {', '.join(held) or 'nothing'}")
+        configured = {a.id for a in accounts}
+        folders = sorted(p.name for p in (hub / "accounts").iterdir()) \
+            if (hub / "accounts").is_dir() else []
+        print("  accounts: " + (", ".join(f"{i}{'' if i in configured else ' (left)'}"
+                                          for i in folders) or "none"))
+        backups = hub / "backups"
+        print(f"  backups: {len(list(backups.iterdir())) if backups.is_dir() else 0} "
+              "folder(s) of things fairshare moved aside")
+    print("To remove the installed fairshare: pipx uninstall fairshare (or however you installed "
+          "it). The config, the state and the hub stay until you delete them yourself.")
+    if hub is not None:
+        for prov in providers.REGISTRY.values():
+            mine = [_tilde(c.config_dir, home) for c in prov.discover(home)]
+            print("To bring the hub's history back into your own folders, give your own agent "
+                  "this prompt:\n")
+            print(_merge_back_prompt(prov, hub_mod.shared_dir(hub), mine))
     return 0
 
 
@@ -495,14 +706,15 @@ def cmd_doctor(_a) -> int:
         check(found, f"{prov.name}: command " + (f"found, version {prov.version() or 'unknown'}"
                                                  if found else "not found on PATH"))
     accounts: list[Account] = []
+    hub = None
     path = store.config_path()
     if not path.exists():
-        check(False, "accounts.toml not found (run `fairshare init`)")
+        check(False, "accounts.toml not found (run `fairshare setup`)")
     else:
         try:
-            accounts = load_accounts(path)[0]
+            accounts, _, hub = load_accounts(path)
         except ConfigError as e:
-            check(False, f"{path.name}: {e} (fix it, or run `fairshare init`)")
+            check(False, f"{path.name}: {e} (fix it, or move it aside and run `fairshare setup`)")
     checkable = [a for a in accounts if a.plan is not None and a.provider in providers.REGISTRY]
     answers = iter(_probe(checkable))
     for a in accounts:
@@ -518,20 +730,19 @@ def cmd_doctor(_a) -> int:
                    ) if st else "gave no answer"
             check(st is not None, f"{a.id}: sign-in check {how}")
     callers: dict[tuple[str, ...], list[str]] = {}
-    for prov, mine in _by_provider(accounts):
-        for a in mine:
-            cap = prov.wired(_read(prov.capture_file(a)), a.id)
-            check(cap is not None, f"{a.id}: usage hook "
-                  + ("calls fairshare capture" if cap else "does not call fairshare capture "
-                                                           "(run `fairshare apply`)"))
-            if cap:
-                callers.setdefault(cap.runner, []).append(a.id)
+    for prov, _mine in _by_provider(accounts):
+        cap = prov.wired(_read(prov.capture_file(hub_mod.shared_dir(hub))))
+        check(cap is not None, f"{prov.name}: usage hook in the hub "
+              + ("calls fairshare capture" if cap else "does not call fairshare capture "
+                                                       "(run `fairshare setup`)"))
+        if cap:
+            callers.setdefault(cap.runner, []).append(prov.name)
     if not callers and (installed := _installed()):
         callers[(installed,)] = []
     if not callers:
         check(False, "fairshare command not found on PATH")
-    for runner, ids in callers.items():
-        who = f"called by the usage hook of {', '.join(ids)}" if ids else "installed"
+    for runner, names in callers.items():
+        who = f"called by the {', '.join(names)} usage hook" if names else "installed"
         check(_runs(runner), f"fairshare command ({who}) runs")
     return 1 if failed else 0
 
@@ -554,22 +765,30 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fairshare", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(f=cmd_status)
-    cp = sub.add_parser("capture"); cp.add_argument("account")
+    cp = sub.add_parser("capture", help="the usage hook; the account is the session's own folder")
+    cp.add_argument("account", nargs="?", help=argparse.SUPPRESS)   # the form before the hub
     cp.add_argument("--then", help="the user's own command for this hook, run after recording")
     cp.set_defaults(f=cmd_capture)
     sub.add_parser("run", help="start a session on the best account (also: no command at all); "
                    "`run [-a ID] [--] ARGS...` passes ARGS to the provider unchanged")
-    it = sub.add_parser("init")
-    it.add_argument("--yes", action="store_true", help="accept what was found; do not ask")
-    it.add_argument("--account", action="append", metavar="ID=DIR:PLAN",
-                    help="use exactly these accounts instead of discovery (repeatable)")
-    it.set_defaults(f=cmd_init)
-    for name, f in (("apply", cmd_apply), ("uninstall", cmd_uninstall)):
-        x = sub.add_parser(name)
-        x.add_argument("--dry-run", action="store_true", help="print the diffs, change nothing")
-        x.set_defaults(f=f)
+    sub.add_parser("setup", help="choose the hub and join your own folders"
+                   ).set_defaults(f=cmd_setup)
+    jp = sub.add_parser("join", help="add an account: sign in to it in its own hub folder")
+    jp.add_argument("id", nargs="?", help="default: the --from folder's alias or name, "
+                                          "else account-N")
+    jp.add_argument("--from", dest="source", metavar="FOLDER",
+                    help="copy (never move) history and settings from one of your own folders")
+    jp.set_defaults(f=cmd_join)
+    lp = sub.add_parser("leave", help="stop routing to an account; its folder and login stay")
+    lp.add_argument("id")
+    lp.add_argument("--logout", action="store_true", help="also sign that account out")
+    lp.set_defaults(f=cmd_leave)
+    sub.add_parser("uninstall", help="say how to remove fairshare; changes nothing"
+                   ).set_defaults(f=cmd_uninstall)
     sub.add_parser("doctor", help="check the setup, read-only").set_defaults(f=cmd_doctor)
     argv = sys.argv[1:] if argv is None else list(argv)
+    if not argv and not store.config_path().exists():
+        return _offer_setup()
     if not argv or argv[0] == "run":
         return cmd_run(_run_args(p, argv[1:]))
     if argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
