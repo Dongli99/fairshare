@@ -5,7 +5,7 @@ real usage, then starts your next session on the account that makes the best use
 left. It aims to use every account fully before its weekly reset and to avoid hitting a short
 limit unless that limit is about to reset anyway. It is a heuristic, not a guarantee.
 
-> Status: early. Claude Code on Pro and Max plans is the first supported provider.
+> Status: early. Claude Code on Pro, Max and Ultra plans is the first supported provider.
 
 ```
 $ fairshare status

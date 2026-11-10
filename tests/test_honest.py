@@ -270,25 +270,27 @@ class SameLogin(Fleet):
 
 class DetectedPlan(Fleet):
     def test_a_detected_plan_beats_the_config_and_the_mismatch_is_shown(self):
-        self.add("a", plan="claude-max5x")
+        self.add("a", plan="claude-max")
         s = cli._survey()
         self.assertEqual(s.verdicts[0].account.plan.name, "claude-pro")
         _, out, _ = self.go("status")
         self.assertIn("claude-pro", out.split("\n")[0])
-        self.assertIn("plan claude-max5x in config, detected claude-pro", out)
+        self.assertIn("plan claude-max in config, detected claude-pro", out)
 
     def test_a_matching_plan_says_nothing(self):
         self.add("a")
         self.assertNotIn("detected", self.go("status")[1])
 
     def test_an_unmapped_plan_leaves_the_config_alone(self):
-        self.add("a", plan="claude-max5x", planTier="max_5x")
-        self.assertEqual(cli._survey().verdicts[0].account.plan.name, "claude-max5x")
+        self.add("a", plan="claude-max", planTier="max_5x")
+        self.assertEqual(cli._survey().verdicts[0].account.plan.name, "claude-max")
         self.assertNotIn("detected", self.go("status")[1])
 
     def test_plan_names_are_data_in_the_plan_files(self):
         self.assertEqual(plan_for("claude", "pro"), "claude-pro")
-        self.assertIsNone(plan_for("claude", "max"))
+        self.assertEqual(plan_for("claude", "max"), "claude-max")
+        self.assertEqual(plan_for("claude", "ultra"), "claude-ultra")
+        self.assertIsNone(plan_for("claude", "max_5x"))
         self.assertIsNone(plan_for("other-provider", "pro"))
         self.assertIsNone(plan_for("claude", None))
 
@@ -297,23 +299,23 @@ class DetectedPlan(Fleet):
         d.mkdir()
         (d / claude.LOGIN_FILE).write_text("")
         (self.auth / ".claude-new.json").write_text(json.dumps(fixture(self.version, "auth-status-pro")))
-        with mock.patch.object(claude, "default_plan", "claude-max20x"):
+        with mock.patch.object(claude, "default_plan", "claude-ultra"):
             found = cli._candidates({}, self.tmp / "home")
         self.assertEqual([(a["id"], a["plan"]) for a, _ in found], [("claude-new", "claude-pro")])
         (self.auth / ".claude-new.json").unlink()          # no answer: the default stands
-        with mock.patch.object(claude, "default_plan", "claude-max20x"):
+        with mock.patch.object(claude, "default_plan", "claude-ultra"):
             found = cli._candidates({}, self.tmp / "home")
-        self.assertEqual([(a["id"], a["plan"]) for a, _ in found], [("claude-new", "claude-max20x")])
+        self.assertEqual([(a["id"], a["plan"]) for a, _ in found], [("claude-new", "claude-ultra")])
 
 
 class ProbeFails(Fleet):
     def test_falls_back_to_the_login_file_and_the_configured_plan(self):
-        self.add("a", plan="claude-max5x", auth=None)           # claude exits non-zero
+        self.add("a", plan="claude-max", auth=None)           # claude exits non-zero
         self.add("b", auth=None, login=False)
         self.add("c", orgId=ORG + "c")
         s = cli._survey()
         self.assertEqual({v.account.id: v.account.plan.name for v in s.verdicts},
-                         {"a": "claude-max5x", "c": "claude-pro"})
+                         {"a": "claude-max", "c": "claude-pro"})
         self.assertEqual([(a.id, why) for a, why in s.out], [("b", "not signed in")])
         self.assertEqual(s.failed, ["a", "b"])
 

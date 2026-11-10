@@ -93,14 +93,14 @@ class Init(Home):
     def test_rerun_keeps_existing_settings_and_backs_up(self):
         self.cfg.parent.mkdir(parents=True)
         self.cfg.write_text('[policy]\nshort_hot_pct = 80.0\n\n[[account]]\nid = "main"\n'
-                            'plan = "claude-max5x"\nconfig_dir = "~/.claude-alpha"\ncapacity = 6.0\n\n'
+                            'plan = "claude-max"\nconfig_dir = "~/.claude-alpha"\ncapacity = 6.0\n\n'
                             '[[account]]\nid = "gone"\nplan = "claude-pro"\nconfig_dir = "~/.gone"\n')
         before = self.cfg.read_text()
         self.assertEqual(self.init("--yes")[0], 0)
         d = tomllib.loads(self.cfg.read_text())
         self.assertEqual(d["policy"], {"short_hot_pct": 80.0})
         by_id = {a["id"]: a for a in d["account"]}
-        self.assertEqual(by_id["main"], {"id": "main", "plan": "claude-max5x",
+        self.assertEqual(by_id["main"], {"id": "main", "plan": "claude-max",
                                          "config_dir": "~/.claude-alpha", "capacity": 6.0})
         self.assertIn("gone", by_id)                     # configured, not found: still kept
         self.assertNotIn("alpha", by_id)                 # same dir as "main": not added twice
@@ -114,10 +114,10 @@ class Init(Home):
         self.assertEqual(list(self.cfg.parent.glob("*.bak-fairshare-*")), [])
 
     def test_account_flags_replace_discovery(self):
-        self.init("--yes", "--account", "a=~/.claude-alpha:claude-max20x", "--account", "b=/x:y:claude-pro")
+        self.init("--yes", "--account", "a=~/.claude-alpha:claude-ultra", "--account", "b=/x:y:claude-pro")
         d = tomllib.loads(self.cfg.read_text())
         self.assertEqual(d["account"], [
-            {"id": "a", "plan": "claude-max20x", "config_dir": "~/.claude-alpha"},
+            {"id": "a", "plan": "claude-ultra", "config_dir": "~/.claude-alpha"},
             {"id": "b", "plan": "claude-pro", "config_dir": "/x:y"}])
 
     def test_bad_input_writes_nothing(self):
@@ -130,7 +130,7 @@ class Init(Home):
 
     def test_interactive_edit_drop_and_confirm(self):
         # order shown: alpha, beta, claude-extra, w
-        answers = ["work", "claude-max5x",    # rename alpha, change plan
+        answers = ["work", "claude-max",    # rename alpha, change plan
                    "", "",                    # keep beta as found
                    "-",                       # drop claude-extra
                    "-",                       # drop w
@@ -140,7 +140,7 @@ class Init(Home):
         self.assertIn("alias in ~/.zshrc", out)
         d = tomllib.loads(self.cfg.read_text())
         self.assertEqual(d["account"], [
-            {"id": "work", "plan": "claude-max5x", "config_dir": "~/.claude-alpha"},
+            {"id": "work", "plan": "claude-max", "config_dir": "~/.claude-alpha"},
             {"id": "beta", "plan": "claude-pro", "config_dir": "~/.claude-beta"}])
 
     def test_interactive_decline_writes_nothing(self):
@@ -154,7 +154,7 @@ class Render(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "a.toml"
             p.write_text(render_config(
-                [{"id": "x", "plan": "claude-max5x", "config_dir": "/c/x", "capacity": 5.5}],
+                [{"id": "x", "plan": "claude-max", "config_dir": "/c/x", "capacity": 5.5}],
                 {"grace_hours": 2.0}))
             accounts, tuning = load_accounts(p)
             self.assertEqual((accounts[0].plan.capacity, tuning.grace_hours), (5.5, 2.0))

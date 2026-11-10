@@ -6,7 +6,7 @@ from fairshare.policy import rank
 
 H = 3600.0
 NOW = 1_000_000.0
-PRO, MAX20 = load_plan("claude-pro"), load_plan("claude-max20x")
+PRO, MAX, ULTRA = load_plan("claude-pro"), load_plan("claude-max"), load_plan("claude-ultra")
 
 
 def acct(id, plan=PRO):
@@ -34,7 +34,14 @@ class WeeklyPace(unittest.TestCase):
 
     def test_bigger_plan_outweighs_equal_percentage(self):
         snaps = {"p": snap((10, 3), (50, 80)), "m": snap((10, 3), (50, 80))}
-        self.assertEqual(order([acct("p"), acct("m", MAX20)], snaps), ["m", "p"])
+        self.assertEqual(order([acct("p"), acct("m", MAX)], snaps), ["m", "p"])
+
+    def test_ultra_without_a_five_hour_window_is_eligible_and_weighs_ten_pros(self):
+        snaps = {"u": snap(None, (50, 80)), "p": snap((10, 3), (5, 80))}
+        v = rank([acct("u", ULTRA), acct("p")], snaps, NOW)
+        self.assertEqual([x.account.id for x in v], ["u", "p"])
+        self.assertTrue(v[0].eligible)
+        self.assertAlmostEqual(v[0].score, 10 * 50 / 80)
 
     def test_rolled_over_window_counts_as_fresh(self):
         stale = Snapshot(NOW, {"seven_day": Window(99, NOW - 10)})
@@ -70,9 +77,9 @@ class FiveHourGuard(unittest.TestCase):
 
 class OneRuleNotTwoTiers(unittest.TestCase):
     def test_huge_expiring_budget_beats_a_nearly_empty_account_despite_hot_window(self):
-        # A: 20x plan, week untouched, resets in 3h, 5h window 90%. B: Pro, week 97% used.
+        # A: Max (5x), week untouched, resets in 3h, 5h window 90%. B: Pro, week 97% used.
         snaps = {"A": snap((90, 1.5), (0, 3)), "B": snap((5, 3), (97, 160))}
-        self.assertEqual(order([acct("A", MAX20), acct("B")], snaps), ["A", "B"])
+        self.assertEqual(order([acct("A", MAX), acct("B")], snaps), ["A", "B"])
 
     def test_blocked_week_is_not_rescued_by_a_short_window_reset(self):
         # exh: week 99% used for 100h (5h window nearly resets). hot: 5h window full, week free.

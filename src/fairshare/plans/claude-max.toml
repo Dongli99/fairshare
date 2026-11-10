@@ -1,0 +1,15 @@
+# Capacity is relative to Pro (= 1.0), so 10% of a bigger plan counts for more.
+# Anthropic, "What is the Max plan?" (support.claude.com, read 2026-11-09): "five times the Pro
+# plan's usage every five hours and every week". Also a separate weekly limit for Fable.
+name = "claude-max"
+provider = "claude"
+capacity = 5.0
+names = ["max"]   # unverified: only "pro" has been seen from `claude auth status`
+
+[windows.short]
+name = "five_hour"
+hours = 5
+
+[windows.long]
+name = "seven_day"
+hours = 168

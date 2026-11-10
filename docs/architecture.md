@@ -27,7 +27,9 @@ providers/<p>.account_status (once per command, in parallel) ──────�
    plan file names the provider's own window for each role. A provider with daily/monthly
    windows fits without touching the policy.
 2. **Capacity is data.** Percentages from different plan sizes are not comparable, so each
-   plan declares a relative capacity (Pro = 1). Override per account in `accounts.toml`.
+   plan declares a relative capacity (Pro = 1). Override per account in `accounts.toml`. The
+   Claude values are Anthropic's published weekly multiples (Max 5x, Ultra 10x; see the plan
+   files); Ultra has no five-hour window, and a missing window counts as unused.
 3. **Real usage only.** Percentages come from the provider. Estimating limits from token counts
    was measured as unreliable (reports of ±37 points) and is out of scope.
 4. **Start-time routing.** A running session is bound to one account. Routing happens when a
@@ -76,8 +78,8 @@ providers/<p>.account_status (once per command, in parallel) ──────�
     - several folders with one identity are one quota: ranked once, by the member with the
       newest snapshot; `status` shows the others as "same login as <id>";
     - the detected plan beats `accounts.toml` for ranking and `init`'s proposal; `status` marks a
-      mismatch. Detection reads the plan files' `names` list (claude-pro lists `"pro"`; the Max
-      files list none because only `"pro"` has been observed), never a table in code;
+      mismatch. Detection reads the plan files' `names` list (`"pro"`, `"max"`, `"ultra"`; only
+      `"pro"` has been observed so far), never a table in code;
     - when the check fails (non-zero exit, timeout, bad JSON, no binary) it fails soft: the
       account counts as signed in when its login file exists (existence only, never opened) and
       as signed out when not, takes its plan from `accounts.toml`, and is not grouped. `status`
@@ -110,8 +112,10 @@ providers/<p>.account_status (once per command, in parallel) ──────�
   the shim; re-running `fairshare apply` moves the block back to the end.
 - The shim and statusLine call fairshare through the Python that ran `apply`; if that Python
   moves, run `fairshare apply` again.
-- Plan detection knows only Claude Pro: Max values for `planTier` are unverified, so Max accounts
-  keep the plan in `accounts.toml`.
+- Plan detection has seen only Claude Pro: the `"max"` and `"ultra"` names are unverified; an
+  unmatched value leaves the plan in `accounts.toml`.
+- Max and Ultra also have a separate weekly limit for one model (Fable), which the ranking does
+  not read yet.
 - The sign-in check relies on `claude auth status --json` (Claude Code 2.1.321). If a release
   changes it, the check fails soft (see decision 10) until a fixture and the parser follow.
 - `run` waits by sleeping; it does not watch for a snapshot a running session writes meanwhile
