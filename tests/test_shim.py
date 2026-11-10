@@ -24,7 +24,9 @@ class Shim(unittest.TestCase):
         # The real binary is a symlink, as the auto-updater leaves it.
         target = self.tmp / "versions" / "real-claude"
         target.parent.mkdir()
-        target.write_text('#!/bin/sh\necho "REAL cfg=${CLAUDE_CONFIG_DIR:-} args=$*"\n')
+        target.write_text('#!/bin/sh\n'
+                          '[ "$1" = auth ] && { echo \'{"loggedIn": true, "authMethod": "claude.ai"}\'; exit 0; }\n'
+                          'echo "REAL cfg=${CLAUDE_CONFIG_DIR:-} args=$*"\n')
         target.chmod(0o755)
         self.real_dir = self.tmp / "bin"
         self.real_dir.mkdir()
@@ -67,17 +69,24 @@ class Shim(unittest.TestCase):
         self.assertEqual(r.returncode, 127)
         self.assertIn("no claude found on PATH", r.stderr)
 
-    def test_unset_routes_through_fairshare_run(self):
+    def account(self):
+        """One account whose folder holds a login file (existence only; never opened)."""
+        d = self.tmp / "acct-one"
+        d.mkdir()
+        (d / claude.LOGIN_FILE).write_text("")
         (self.tmp / "accounts.toml").write_text(
-            '[[account]]\nid = "one"\nplan = "claude-pro"\nconfig_dir = "/acct/one"\n')
+            f'[[account]]\nid = "one"\nplan = "claude-pro"\nconfig_dir = "{d}"\n')
+        return d
+
+    def test_unset_routes_through_fairshare_run(self):
+        d = self.account()
         r = self.run_shim(f"{self.shim_dir}:{self.real_dir}:{SYS}")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout.strip(), "REAL cfg=/acct/one args=-p hi there")
+        self.assertEqual(r.stdout.strip(), f"REAL cfg={d} args=-p hi there")
         self.assertIn("fairshare -> one", r.stderr)
 
     def test_routed_with_real_binary_missing_is_a_clear_error(self):
-        (self.tmp / "accounts.toml").write_text(
-            '[[account]]\nid = "one"\nplan = "claude-pro"\nconfig_dir = "/acct/one"\n')
+        self.account()
         r = self.run_shim(f"{self.shim_dir}:{SYS}")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no claude found on PATH", r.stderr)

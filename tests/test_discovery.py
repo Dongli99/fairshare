@@ -44,7 +44,9 @@ class Home(unittest.TestCase):
         (self.home / ".claude").mkdir()                   # default dir, not signed in
         (self.home / ".claude.json").write_text("{}")     # a file, not a dir
         self.cfg = self.home / ".config/fairshare/accounts.toml"
-        env = mock.patch.dict(os.environ, {"HOME": str(self.home), "FAIRSHARE_CONFIG": str(self.cfg)})
+        # PATH holds no claude: setup asks it who is signed in, and a test must never run the real one.
+        env = mock.patch.dict(os.environ, {"HOME": str(self.home), "FAIRSHARE_CONFIG": str(self.cfg),
+                                           "PATH": str(self.home / "no-bin")})
         env.start()
         self.addCleanup(env.stop)
 

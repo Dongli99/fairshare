@@ -17,6 +17,7 @@ class Verdict:
                                     # exhausted week is -(hours until it resets), below any usable
                                     # account
     reason: str
+    usable_in: float                # hours until it is eligible again; 0 when eligible now
 
 
 def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Verdict:
@@ -49,7 +50,8 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Ver
         why = f"5h window {short_used:.0f}% used, resets in {short_in:.1f}h"
     else:
         why = f"week {long_used:.0f}% used, resets in {long_in:.0f}h"
-    return Verdict(acct, not (hot or exhausted), score, why)
+    usable_in = max(short_in if hot else 0.0, long_in if exhausted else 0.0)
+    return Verdict(acct, not (hot or exhausted), score, why, usable_in)
 
 
 def rank(accounts: list[Account], snaps: dict[str, Snapshot], now: float,

@@ -5,7 +5,9 @@ statusLine / provider output ──► providers/<p>.parse_capture ──► sto
                                                                    │
 accounts.toml ──► model.load_accounts ───────────────┐             ▼
 plans/*.toml  ──► model.load_plan                    └──► policy.rank(accounts, snapshots, now)
-                                                                   │
+                                                                   ▲   │
+providers/<p>.account_status (once per command, in parallel) ──────┘   │
+   signed in? subscription? same login as another folder? plan?        ▼
                                                   cli: status | pick | run ◄──┘
                                                        run ──► providers/<p>.launch
 ```
@@ -56,6 +58,46 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
    alias keeps its text behind a `# fairshare-disabled: ` prefix. An existing statusLine is
    never replaced, only wrapped. Any plain fairshare capture counts as fairshare's to remove.
 
+10. **Ask the provider who is signed in.** `Provider.account_status(account)` returns a neutral
+    `AccountStatus` (`logged_in`, `usable`, `identity`, `plan`) or `None` when the question could
+    not be answered. For Claude Code it runs the installed binary as `claude auth status --json`
+    with the account's `CLAUDE_CONFIG_DIR`, at most 5 s, in an environment scrubbed of every
+    variable that could pick another login or carry another session's state
+    (`claude.clean_env`, which a launcher reuses). Verified on Claude Code 2.1.321 (2026-11-09):
+    the output is a JSON object with `loggedIn`, `authMethod`, `email`, `orgId`, `planTier` among
+    others. `cli.py` never names the command or a field; the adapter parses, and the parser is
+    tested against recorded outputs in `tests/fixtures/<version>/`. A new Claude Code version means
+    a new fixture folder, not new test code. Everything is held in memory: `identity` is a hash of
+    org id and email, used only to tell whether two folders are one login; the email, org id and
+    org name are never printed or stored. How the answer is used, in each of `status`, `pick`
+    and `run`:
+    - not signed in, or not a subscription login (`authMethod` other than `claude.ai`): left out
+      of the ranking; `status` says why, `run` prints one line;
+    - several folders with one identity are one quota: ranked once, by the member with the
+      newest snapshot; `status` shows the others as "same login as <id>";
+    - the detected plan beats `accounts.toml` for ranking and `init`'s proposal; `status` marks a
+      mismatch. Detection reads the plan files' `names` list (claude-pro lists `"pro"`; the Max
+      files list none because only `"pro"` has been observed), never a table in code;
+    - when the check fails (non-zero exit, timeout, bad JSON, no binary) it fails soft: the
+      account counts as signed in when its login file exists (existence only, never opened) and
+      as signed out when not, takes its plan from `accounts.toml`, and is not grouped. `status`
+      names the failure and the fallback; `run` prints one line. A failed check alone never
+      stops a launch.
+
+    The command's arguments are an adapter constant (`auth status --json`). To change them
+    without a release, give an account `status_args = "auth status --json"` in `accounts.toml`
+    (one string, split like a shell would; per account, so `init` rewrites it untouched).
+    Parsing stays code, so an override can change the command, not the output format.
+
+11. **`run` does not launch an account that cannot take work.** If the top verdict is eligible it
+    launches as before (with one warning line when it is eligible only because its hot short
+    window resets within the grace period). If none is eligible it prints one line per account
+    (reason, and when it is usable again, from `Verdict.usable_in`) and exits 75. On a terminal
+    it offers `[w]ait` for the soonest account, `[s]tart` on the top-ranked one after a warning,
+    or `[q]uit` (the default). Waiting sleeps to the target time in short naps, then checks
+    every account again and re-ranks from fresh snapshots: it never launches on the old
+    ranking. Ctrl-C exits 130 without launching. `pick` keeps its contract (exit 75).
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -68,6 +110,12 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
   the shim; re-running `fairshare apply` moves the block back to the end.
 - The shim and statusLine call fairshare through the Python that ran `apply`; if that Python
   moves, run `fairshare apply` again.
+- Plan detection knows only Claude Pro: Max values for `planTier` are unverified, so Max accounts
+  keep the plan in `accounts.toml`.
+- The sign-in check relies on `claude auth status --json` (Claude Code 2.1.321). If a release
+  changes it, the check fails soft (see decision 10) until a fixture and the parser follow.
+- `run` waits by sleeping; it does not watch for a snapshot a running session writes meanwhile
+  until it wakes and re-ranks.
 
 ## Not built yet
 

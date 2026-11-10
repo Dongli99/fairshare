@@ -2,6 +2,8 @@
 name = "claude-max5x"
 provider = "claude"
 capacity = 5.0
+# No `names` list: the provider's own name for this plan is unverified (only "pro" has been
+# observed), so it is not detected and accounts.toml decides.
 
 [windows.short]
 name = "five_hour"

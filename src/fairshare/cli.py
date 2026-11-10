@@ -11,14 +11,17 @@ import sys
 import tempfile
 import time
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import fairshare
 
 from . import providers, store
 from .providers import claude
-from .model import load_accounts, plan_names, render_config
-from .policy import rank
+from .model import (Account, AccountStatus, Snapshot, Tuning, load_accounts, load_plan,
+                    plan_names, render_config)
+from .policy import HOUR, Verdict, rank
 
 
 def _load():
@@ -28,27 +31,116 @@ def _load():
     return load_accounts(path)
 
 
-def _verdicts():
+def _now() -> float:
+    return time.time()
+
+
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _probe(accounts: list[Account]) -> list[AccountStatus | None]:
+    """Ask every account's provider who is signed in, all at once."""
+    if not accounts:
+        return []
+    with ThreadPoolExecutor(len(accounts)) as pool:
+        return list(pool.map(lambda a: providers.get(a.provider).account_status(a), accounts))
+
+
+@dataclass
+class Survey:
+    verdicts: list[Verdict]                  # ranked, one per quota
+    out: list[tuple[Account, str]]           # left out of the ranking, and why
+    twins: list[tuple[Account, str]]         # folders sharing a login, and the id ranked for them
+    notes: dict[str, list[str]]              # remarks per account id
+    failed: list[str]                        # ids whose sign-in check could not be answered
+    snaps: dict[str, Snapshot]
+    tuning: Tuning
+    now: float
+
+
+def _survey() -> Survey:
+    """Check every account once, then rank those that can take work."""
     accounts, tuning = _load()
+    now = _now()
     snaps = {a.id: s for a in accounts if (s := store.load(a.id))}
-    return rank(accounts, snaps, time.time(), tuning)
+    live, out, twins, notes, failed = [], [], [], {}, []
+    for a, st in zip(accounts, _probe(accounts)):
+        if st is None:
+            failed.append(a.id)
+            signed_in = (a.config_dir / claude.LOGIN_FILE).exists()
+            how = "found, counted as signed in" if signed_in else "not found, counted as signed out"
+            notes[a.id] = [f"sign-in check failed; login file {how}; plan {a.plan.name} from config"]
+            if signed_in:
+                live.append((a, None))
+            else:
+                out.append((a, "not signed in"))
+        elif not st.logged_in:
+            out.append((a, "not signed in"))
+        elif not st.usable:
+            out.append((a, "not a subscription login"))
+        else:
+            if st.plan and st.plan != a.plan.name:
+                notes[a.id] = [f"plan {a.plan.name} in config, detected {st.plan}"]
+                a = replace(a, plan=load_plan(st.plan))
+            live.append((a, st))
+    # One login in several folders is one quota: rank it once, by its freshest snapshot.
+    ranked, seen = [], {}
+    for a, st in sorted(live, key=lambda x: x[0].id):
+        if st is None or st.identity is None:
+            ranked.append(a)
+            continue
+        key = (a.provider, st.identity)
+        same = [m for m, ms in live if ms and (m.provider, ms.identity) == key]
+        rep = max(sorted(same, key=lambda m: m.id),
+                  key=lambda m: snaps[m.id].captured_at if m.id in snaps else -1.0)
+        if seen.setdefault(key, rep).id == a.id:
+            ranked.append(a)
+        else:
+            twins.append((a, seen[key].id))
+    return Survey(rank(ranked, snaps, now, tuning), out, twins, notes, failed, snaps, tuning, now)
 
 
 def _in(h: float | None) -> str:
     return "-" if h is None else f"{int(h)}h{int(h % 1 * 60):02d}m"
 
 
+def _usable(v: Verdict, now: float) -> str:
+    """When a spent account can take work again, as a local clock time; a day name when that
+    is not today."""
+    t = time.localtime(now + v.usable_in * HOUR)
+    same_day = t[:3] == time.localtime(now)[:3]
+    return f"usable at {time.strftime('%H:%M' if same_day else '%a %H:%M', t)}"
+
+
 def cmd_status(_a) -> int:
-    for i, v in enumerate(_verdicts()):
+    s = _survey()
+    for i, v in enumerate(s.verdicts):
         mark = ">" if i == 0 else " "
-        flag = "" if v.eligible else "  [avoid]"
+        flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
         print(f"{mark} {v.account.id:<12} {v.account.plan.name:<14} score {v.score:6.2f}  "
               f"{v.reason}{flag}")
+        for note in s.notes.get(v.account.id, []):
+            print(f"    {note}")
+    for a, why in s.out:
+        print(f"  {a.id:<12} {a.plan.name:<14} left out: {why}")
+        for note in s.notes.get(a.id, []):
+            print(f"    {note}")
+    for a, rep in s.twins:
+        print(f"  {a.id:<12} {a.plan.name:<14} same login as {rep}")
     return 0
 
 
+def _nothing_to_rank(s: Survey) -> None:
+    if not s.verdicts:
+        why = "; ".join(f"{a.id}: {w}" for a, w in s.out)
+        raise SystemExit(f"fairshare: no account can take work ({why})")
+
+
 def cmd_pick(a) -> int:
-    best = _verdicts()[0]
+    s = _survey()
+    _nothing_to_rank(s)
+    best = s.verdicts[0]
     if a.json:
         print(json.dumps({"account": best.account.id, "eligible": best.eligible,
                           "reason": best.reason, "config_dir": str(best.account.config_dir)}))
@@ -78,12 +170,73 @@ def cmd_capture(a) -> int:
     return 0
 
 
-def cmd_run(a) -> int:
-    best = _verdicts()[0]
-    cmd, env = providers.get(best.account.provider).launch(best.account)
-    print(f"fairshare -> {best.account.id} ({best.reason})", file=sys.stderr)
-    args = a.args[1:] if a.args[:1] == ["--"] else a.args
+def _say(text: str) -> None:
+    print(f"fairshare: {text}", file=sys.stderr)
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def _grace_warning(s: Survey, v: Verdict) -> None:
+    """An account that is eligible only because its hot short window resets soon."""
+    w = (snap := s.snaps.get(v.account.id)) and snap.windows.get(v.account.plan.short_name)
+    if w and w.used_pct >= s.tuning.short_hot_pct and 0 < w.resets_at - s.now:
+        left = (w.resets_at - s.now) / HOUR
+        if left < s.tuning.grace_hours:
+            _say(f"warning: {v.account.id} {v.account.plan.short_name} window "
+                 f"{w.used_pct:.0f}% used, resets in {int(left * 60)}m")
+
+
+def _launch(v: Verdict, args: list[str]):
+    cmd, env = providers.get(v.account.provider).launch(v.account)
+    print(f"fairshare -> {v.account.id} ({v.reason})", file=sys.stderr)
     os.execvpe(cmd[0], cmd + args, {**os.environ, **env})
+
+
+def _wait_until(t: float) -> None:
+    while (left := t - _now()) > 0:
+        _sleep(min(left, 60.0))      # short naps: a sleeping laptop must not oversleep the target
+
+
+def cmd_run(a) -> int:
+    args = a.args[1:] if a.args[:1] == ["--"] else a.args
+    try:
+        while True:
+            s = _survey()
+            if s.out:
+                _say("skipped " + ", ".join(f"{x.id} ({why})" for x, why in s.out))
+            if s.failed:
+                _say(f"sign-in check failed for {', '.join(s.failed)}; went by the login file "
+                     "and the plan in accounts.toml")
+            _nothing_to_rank(s)
+            top = s.verdicts[0]
+            if top.eligible:
+                _grace_warning(s, top)
+                return _launch(top, args)
+            _say("no account is eligible:")
+            for v in s.verdicts:
+                print(f"  {v.account.id:<12} {v.reason}; {_usable(v, s.now)} (in {_in(v.usable_in)})",
+                      file=sys.stderr)
+            if not _interactive():
+                return 75
+            soon = min(s.verdicts, key=lambda v: (v.usable_in, v.account.id))
+            print(f"[w]ait for {soon.account.id} ({_usable(soon, s.now)}), "
+                  f"[s]tart on {top.account.id} now, [q]uit [q]: ", end="", file=sys.stderr)
+            try:
+                choice = input().strip().lower()[:1]
+            except EOFError:
+                choice = "q"
+            if choice == "s":
+                _say(f"starting on {top.account.id}, which is near a limit")
+                return _launch(top, args)
+            if choice != "w":
+                return 75
+            _say(f"waiting for {soon.account.id}, {_usable(soon, s.now)} (Ctrl-C to quit)")
+            _wait_until(s.now + soon.usable_in * HOUR + 1)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
 
 
 def _tilde(p: Path, home: Path) -> str:
@@ -91,14 +244,17 @@ def _tilde(p: Path, home: Path) -> str:
 
 
 def _candidates(old: dict, home: Path) -> list[tuple[dict, str]]:
-    """Accounts already configured, then discovered ones not yet in the config."""
+    """Accounts already configured, then discovered ones not yet in the config, each with the
+    plan its provider reports when it says (else the provider's default)."""
     out = [(dict(a), "accounts.toml") for a in old.get("account", [])]
     known = {Path(a["config_dir"]).expanduser() for a, _ in out}
-    for prov in providers.REGISTRY.values():
-        for c in prov.discover(home):
-            if c.config_dir not in known:
-                out.append(({"id": c.id, "plan": prov.default_plan,
-                             "config_dir": _tilde(c.config_dir, home)}, c.found))
+    new = [(prov, c) for prov in providers.REGISTRY.values()
+           for c in prov.discover(home) if c.config_dir not in known]
+    asked = [Account(c.id, c.provider, load_plan(prov.default_plan), c.config_dir)
+             for prov, c in new]
+    for (prov, c), st in zip(new, _probe(asked)):
+        out.append(({"id": c.id, "plan": (st and st.plan) or prov.default_plan,
+                     "config_dir": _tilde(c.config_dir, home)}, c.found))
     return out
 
 

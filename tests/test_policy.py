@@ -100,6 +100,23 @@ class Reasons(unittest.TestCase):
             self.assertIn("assumed fresh", v.reason)
 
 
+class UsableIn(unittest.TestCase):
+    """Hours until an account is eligible again, for the all-spent prompt."""
+    def usable_in(self, sn):
+        return rank([acct("a")], {"a": sn}, NOW)[0].usable_in
+
+    def test_eligible_now_is_zero(self):
+        self.assertEqual(self.usable_in(snap((50, 3), (50, 20))), 0.0)
+        self.assertEqual(self.usable_in(snap((95, 0.5), (10, 20))), 0.0)   # within grace
+
+    def test_hot_waits_for_the_short_window(self):
+        self.assertAlmostEqual(self.usable_in(snap((95, 4), (10, 20))), 4.0)
+
+    def test_spent_week_waits_for_the_week_even_if_the_short_window_resets_first(self):
+        self.assertAlmostEqual(self.usable_in(snap((95, 4), (99, 30))), 30.0)
+        self.assertAlmostEqual(self.usable_in(snap((10, 4), (99, 30))), 30.0)
+
+
 class Capacity(unittest.TestCase):
     def test_zero_or_negative_capacity_is_rejected_not_defaulted(self):
         for bad in (0, 0.0, -1):

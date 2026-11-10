@@ -1,0 +1,9 @@
+{
+  "loggedIn": false,
+  "authMethod": "none",
+  "apiProvider": "firstParty",
+  "analyticsDisabled": false,
+  "projectsDirectory": "/example/home/.claude-two/projects",
+  "configDirectory": "/example/home/.claude-two",
+  "loginExpiresAt": null
+}

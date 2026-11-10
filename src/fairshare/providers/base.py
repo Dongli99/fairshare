@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..model import Account, Candidate, Window
+from ..model import Account, AccountStatus, Candidate, Window
 
 
 class Provider(Protocol):
@@ -20,3 +20,7 @@ class Provider(Protocol):
 
     def discover(self, home: Path) -> list[Candidate]:
         """Accounts already set up under `home`, for setup to show. Must not read a login."""
+
+    def account_status(self, account: Account) -> AccountStatus | None:
+        """Ask the provider whether `account` is signed in, with what kind of login, under which
+        identity and plan. None when the question could not be answered (never raise)."""

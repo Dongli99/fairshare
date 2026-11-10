@@ -6,7 +6,10 @@ fairshare routes between accounts **you own and pay for**. By design it:
   stays signed in through the provider's own flow in its own config directory;
 - never switches account inside a running session;
 - uses only data the provider hands to a user-configured command (for Claude Code, the
-  documented `statusLine` input). It calls no undocumented endpoint.
+  documented `statusLine` input) and what the provider's own command-line tool answers when
+  asked who is signed in (for Claude Code, `claude auth status`). It calls no undocumented
+  endpoint. That answer is read in memory to tell accounts apart; an email address, organisation
+  id or organisation name is never printed or stored.
 
 **Not settled, and yours to decide.** Providers' terms may treat deliberately spreading load
 across several subscriptions differently from ordinary use. At the time of writing, Anthropic's

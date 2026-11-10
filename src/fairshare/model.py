@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from importlib import resources
@@ -33,6 +34,16 @@ class Account:
     provider: str
     plan: Plan
     config_dir: Path
+    status_args: tuple[str, ...] | None = None   # overrides the provider's sign-in check command
+
+
+@dataclass(frozen=True)
+class AccountStatus:
+    """What the provider says about one account's sign-in. Held in memory only."""
+    logged_in: bool
+    usable: bool                  # a subscription login (the provider's own kind), not an API key
+    identity: str | None = None   # opaque: equal identities share one quota
+    plan: str | None = None       # a fairshare plan name, None when the provider's maps to none
 
 
 @dataclass(frozen=True)
@@ -58,9 +69,21 @@ class Tuning:
     min_hours: float = 1.0            # floor on time-to-reset, so a near reset stays finite
 
 
+def _plan_data(name: str) -> dict:
+    return tomllib.loads((resources.files("fairshare.plans") / f"{name}.toml").read_text())
+
+
+def plan_for(provider: str, native: str | None) -> str | None:
+    """The plan whose `names` list the provider's own name for it, else None."""
+    for name in plan_names():
+        d = _plan_data(name)
+        if d["provider"] == provider and native in d.get("names", []):
+            return d["name"]
+    return None
+
+
 def load_plan(name: str, capacity: float | None = None) -> Plan:
-    text = (resources.files("fairshare.plans") / f"{name}.toml").read_text()
-    d = tomllib.loads(text)
+    d = _plan_data(name)
     w = d["windows"]
     cap = float(d["capacity"]) if capacity is None else float(capacity)
     if cap <= 0:
@@ -75,8 +98,10 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning]:
     accounts = []
     for a in d.get("account", []):
         plan = load_plan(a["plan"], a.get("capacity"))
+        args = a.get("status_args")
         accounts.append(Account(a["id"], a.get("provider", plan.provider), plan,
-                                Path(a["config_dir"]).expanduser()))
+                                Path(a["config_dir"]).expanduser(),
+                                tuple(shlex.split(args)) if args else None))
     return accounts, Tuning(**d.get("policy", {}))
 
 

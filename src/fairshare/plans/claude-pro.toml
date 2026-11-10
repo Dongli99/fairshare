@@ -2,6 +2,7 @@
 name = "claude-pro"
 provider = "claude"
 capacity = 1.0
+names = ["pro"]   # what `claude auth status` calls this plan; used to detect it
 
 [windows.short]
 name = "five_hour"

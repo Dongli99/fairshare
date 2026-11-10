@@ -35,9 +35,9 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
 1. `pipx install .` (Python 3.11+, no dependencies).
 2. `fairshare init` lists the accounts it finds (shell aliases that set `CLAUDE_CONFIG_DIR`,
    and signed-in `~/.claude*` directories), asks you to confirm each id and plan, shows the
-   resulting `accounts.toml` as a diff and writes it only on yes, keeping a backup. It checks
-   that a login file exists and never opens it. Non-interactive: `--yes`, or
-   `--account id=dir:plan` (repeatable) to name the accounts yourself.
+   resulting `accounts.toml` as a diff and writes it only on yes, keeping a backup. It proposes the
+   plan Claude Code reports for an account when it can tell, and never opens a login file.
+   Non-interactive: `--yes`, or `--account id=dir:plan` (repeatable) to name the accounts yourself.
 3. `fairshare apply --dry-run` prints every change as a diff; `fairshare apply` makes them,
    asking per file and backing each up first:
    - writes the `claude` shim into its own directory (`~/.local/share/fairshare/bin`); the real
@@ -63,7 +63,8 @@ a window past its reset time is treated as unused.
 ## Adding a provider or plan
 
 - **Plan:** drop a TOML file in `src/fairshare/plans/` (windows and relative capacity).
-- **Provider:** implement `parse_capture` and `launch` in `src/fairshare/providers/`
+- **Provider:** implement `parse_capture`, `launch`, `discover` and `account_status` in
+  `src/fairshare/providers/`
   (see `providers/base.py`) and register it. The policy never changes.
 
 ## Please read

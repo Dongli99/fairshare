@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
-from ..model import Account, Candidate, Window
+from ..model import Account, AccountStatus, Candidate, Window, plan_for
 
 name = "claude"
 default_plan = "claude-pro"
@@ -18,6 +20,10 @@ RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".bash
 _ALIAS = re.compile(r"""^\s*alias\s+([\w.-]+)=["']?\s*(?:env\s+)?"""
                     r"""CLAUDE_CONFIG_DIR=("[^"]*"|'[^']*'|[^\s"';]+)""")
 SHIM_MARK = "fairshare-shim"     # in the first bytes of every shim; the lookup skips such files
+STATUS_ARGS = ("auth", "status", "--json")   # the sign-in check; accounts.toml may override it
+PROBE_TIMEOUT = 5.0                          # seconds
+_DROP_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+             "CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")
 
 
 def parse_capture(raw: dict) -> dict[str, Window]:
@@ -31,6 +37,38 @@ def parse_capture(raw: dict) -> dict[str, Window]:
 
 def launch(account: Account) -> tuple[list[str], dict[str, str]]:
     return [real_binary()], {"CLAUDE_CONFIG_DIR": str(account.config_dir)}
+
+
+def clean_env(config_dir: Path) -> dict[str, str]:
+    """The environment for a child claude of one account: this process's, minus every variable
+    that would pick another login or carry another session's state, with the account's dir."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in _DROP_ENV and not k.startswith("CLAUDE_CODE_")}
+    return {**env, "CLAUDE_CONFIG_DIR": str(config_dir)}
+
+
+def parse_account_status(raw: object) -> AccountStatus | None:
+    """The status JSON as an AccountStatus; None when it is not the shape we know."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("loggedIn"), bool):
+        return None
+    if not raw["loggedIn"]:
+        return AccountStatus(False, False)
+    org, email = raw.get("orgId"), raw.get("email")
+    who = hashlib.sha256(f"{org}\n{email}".encode()).hexdigest() if org and email else None
+    return AccountStatus(True, raw.get("authMethod") == "claude.ai", who,
+                         plan_for(name, raw.get("planTier")))
+
+
+def account_status(account: Account) -> AccountStatus | None:
+    """Ask the installed claude who `account` is. Reads no login file; the output is parsed in
+    memory and only its yes/no, a hash and a plan name survive. None on any failure."""
+    try:
+        r = subprocess.run([real_binary(), *(account.status_args or STATUS_ARGS)],
+                           env=clean_env(account.config_dir), stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+        return parse_account_status(json.loads(r.stdout)) if r.returncode == 0 else None
+    except (SystemExit, OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def discover(home: Path) -> list[Candidate]:
