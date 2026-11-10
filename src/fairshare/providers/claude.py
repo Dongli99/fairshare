@@ -27,13 +27,25 @@ PROBE_TIMEOUT = 5.0                          # seconds
 
 # Environment variables.
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"         # picks the account's folder
-LOGIN_OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
-SESSION_ENV = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT")   # state of a surrounding session
-SESSION_ENV_PREFIX = "CLAUDE_CODE_"
+# Variables that pick a login or a provider: dropped, and the launcher says so (names only).
+LOGIN_OVERRIDE_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                      "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                      "CLAUDE_CODE_USE_FOUNDRY")
+# What a running session injects into its children: dropped silently. Everything else, such as
+# CLAUDE_CODE_MAX_OUTPUT_TOKENS, is the user's and passes through. Verified on Claude Code
+# 2.1.322, 2026-11-09.
+SESSION_MARK_ENV = "CLAUDECODE"              # set in every child of a running session
+SESSION_ENV = (SESSION_MARK_ENV, "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_JOB_DIR",
+               "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+               "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_MESSAGING_SOCKET",
+               "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED",
+               "CLAUDE_CODE_SESSION_ID")
+WATCH_ENV_PREFIX = "CLAUDE_"                 # inside a session, other such variables are reported
 
 # Files and folders.
 LOGIN_FILE = ".credentials.json"     # its presence marks a signed-in dir; never opened
 SETTINGS_FILE = "settings.json"      # holds the statusLine hook
+ACCOUNT_DIR_GLOB = ".claude*"        # folders under HOME that may be accounts (discovery only)
 RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".bash_aliases",
             ".profile")              # read-only, for aliases that set CONFIG_DIR_ENV
 _ALIAS = re.compile(r"""^\s*alias\s+([\w.-]+)=["']?\s*(?:env\s+)?"""
@@ -66,8 +78,7 @@ def launch(account: Account) -> tuple[list[str], dict[str, str]]:
 
 def _scrubbed_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items()
-            if k not in LOGIN_OVERRIDE_ENV and k not in SESSION_ENV
-            and not k.startswith(SESSION_ENV_PREFIX)}
+            if k not in LOGIN_OVERRIDE_ENV and k not in SESSION_ENV}
 
 
 def clean_env(config_dir: Path) -> dict[str, str]:
@@ -78,6 +89,16 @@ def clean_env(config_dir: Path) -> dict[str, str]:
 
 def dropped_login_vars() -> list[str]:
     return [k for k in LOGIN_OVERRIDE_ENV if k in os.environ]
+
+
+def passed_session_vars() -> list[str]:
+    """Inside a running session: names of the other CLAUDE_* variables the child will inherit,
+    so a session variable a new release adds shows up instead of silently misleading the child.
+    Empty outside a session."""
+    if SESSION_MARK_ENV not in os.environ:
+        return []
+    return sorted(k for k in os.environ if k.startswith(WATCH_ENV_PREFIX)
+                  and k not in SESSION_ENV and k not in LOGIN_OVERRIDE_ENV and k != CONFIG_DIR_ENV)
 
 
 def parse_account_status(raw: object) -> AccountStatus | None:
@@ -134,7 +155,7 @@ def version() -> str | None:
 
 def discover(home: Path) -> list[Candidate]:
     """Accounts set up under `home`: aliases of the form `alias X="CONFIG_DIR_ENV=P ..."` in
-    shell rc files (best effort), and ~/.claude* dirs holding a login file. Reads no login."""
+    shell rc files (best effort), and ACCOUNT_DIR_GLOB dirs holding a login file. Reads no login."""
     found: dict[Path, Candidate] = {}
     for rc in RC_FILES:
         try:
@@ -145,7 +166,7 @@ def discover(home: Path) -> list[Candidate]:
             if m := _ALIAS.match(line):
                 d = _expand(m.group(2).strip("\"'"), home)
                 found.setdefault(d, Candidate(m.group(1), name, d, f"alias in ~/{rc}"))
-    for d in sorted(home.glob(".claude*")):
+    for d in sorted(home.glob(ACCOUNT_DIR_GLOB)):
         if d not in found and d.is_dir() and (d / LOGIN_FILE).is_file():
             found[d] = Candidate(d.name.lstrip("."), name, d, f"login file in ~/{d.name}")
     return sorted(found.values(), key=lambda c: c.id)

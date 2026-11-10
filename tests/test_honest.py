@@ -65,6 +65,8 @@ class Fleet(unittest.TestCase):
             "FAKE_AUTH": str(self.auth), "FAKE_LOG": str(self.log)})
         env.start()
         self.addCleanup(env.stop)
+        for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC"))]:
+            del os.environ[k]              # restored by env.stop; a surrounding session's own
         time.tzset()
         self.addCleanup(time.tzset)      # runs after env.stop restores TZ
         for tool in ("claude", "fairshare"):                                  # never the real ones
@@ -100,6 +102,10 @@ class Fleet(unittest.TestCase):
         if seven:
             w["seven_day"] = Window(seven[0], NOW + seven[1] * H)
         store.save(id, Snapshot(at, w))
+
+    def confirm(self, id, subscription=True, at=NOW - 100):
+        """Record that a past sign-in check called `id` a subscription login (or not)."""
+        store.record_subscription(id, subscription, at)
 
     def go(self, *argv, tty=False, answers=(), real=False):
         """Run the CLI. A launch is recorded and not made, unless `real`: then the fake claude
@@ -148,9 +154,8 @@ class Refusal(Fleet):
         _, _, err = self.go("run")
         self.assertIn("usable at Sat 14:00 (in 30h00m)", err)
 
-    def test_pick_keeps_exit_75_and_status_shows_when(self):
+    def test_status_shows_when_each_account_is_usable(self):
         self.spent_pair()
-        self.assertEqual(self.go("pick")[0], 75)
         code, out, _ = self.go("status")
         self.assertEqual(code, 0)
         self.assertIn("usable at 12:00", [l for l in out.splitlines() if " b " in l][0])
@@ -233,7 +238,6 @@ class Excluded(Fleet):
         self.assertTrue(lines["ok"].startswith(">"))
         self.assertIn("left out: not signed in", lines["out"])
         self.assertIn("left out: not a subscription login", lines["key"])
-        self.assertEqual(self.go("pick")[1].strip(), "ok")
 
     def test_run_prints_one_line_about_what_it_skipped(self):
         _, _, err = self.go("run")
@@ -275,7 +279,7 @@ class SameLogin(Fleet):
         self.assertEqual(len([l for l in out.splitlines() if "score" in l]), 2)
 
     def test_nothing_identifying_is_printed(self):
-        for cmd in ("status", "pick", "run"):
+        for cmd in ("status", "run"):
             _, out, err = self.go(cmd)
             for secret in (EMAIL, ORG, "Example Org", "person@example"):
                 self.assertNotIn(secret, out + err)
@@ -326,6 +330,8 @@ class ProbeFails(Fleet):
         self.add("a", plan="claude-max", auth=None)           # claude exits non-zero
         self.add("b", auth=None, login=False)
         self.add("c", orgId=ORG + "c")
+        self.confirm("a")
+        self.confirm("b")             # confirmed once, but the login file is gone now
         s = cli._survey()
         self.assertEqual({v.account.id: v.account.plan.name for v in s.verdicts},
                          {"a": "claude-max", "c": "claude-pro"})
@@ -335,14 +341,17 @@ class ProbeFails(Fleet):
     def test_status_says_what_failed_and_what_was_used(self):
         self.add("a", auth=None)
         self.add("b", auth=None, login=False)
+        self.confirm("a")
         out = self.go("status")[1]
-        self.assertIn("sign-in check failed; login file found, counted as signed in; "
-                      "plan claude-pro from config", out)
+        self.assertIn("sign-in check failed; login file found, last confirmed as a subscription "
+                      "login on 2027-01-15; plan claude-pro from config", out)
         self.assertIn("login file not found, counted as signed out", out)
 
     def test_run_prints_one_line_and_still_launches(self):
         self.add("a", auth=None)
         self.add("b", auth=None)
+        self.confirm("a")
+        self.confirm("b")
         _, _, err = self.go("run")
         self.assertEqual(len([l for l in err.splitlines() if "sign-in check failed" in l]), 1)
         self.assertIn("a, b", err)
@@ -351,6 +360,8 @@ class ProbeFails(Fleet):
     def test_same_login_is_not_grouped_when_the_check_failed(self):
         self.add("a", auth=None)
         self.add("b", auth=None)
+        self.confirm("a")
+        self.confirm("b")
         self.assertEqual(len(cli._survey().verdicts), 2)
 
     def test_timeout_bad_json_and_missing_binary_all_mean_none(self):
@@ -370,29 +381,42 @@ class ProbeFails(Fleet):
 
 
 class Probe(Fleet):
+    SESSION_STATE = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_JOB_DIR",
+                     "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+                     "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
+                     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+                     "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_SESSION_ID")
+    LOGIN_OVERRIDES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                       "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                       "CLAUDE_CODE_USE_FOUNDRY")
+
+    def test_the_scrub_is_exactly_these_names(self):
+        """The lists are the brief's, spelled out here on purpose: a change to one is a change
+        to what reaches every child."""
+        self.assertEqual(set(claude.SESSION_ENV), set(self.SESSION_STATE))
+        self.assertEqual(set(claude.LOGIN_OVERRIDE_ENV), set(self.LOGIN_OVERRIDES))
+
     def test_the_environment_is_scrubbed_and_points_at_the_account(self):
         d = self.add("a")
-        hostile = {"ANTHROPIC_API_KEY": "k", "ANTHROPIC_AUTH_TOKEN": "t",
-                   "CLAUDE_CODE_OAUTH_TOKEN": "o", "CLAUDECODE": "1", "CLAUDE_PID": "9",
-                   "CLAUDE_EFFORT": "max", "CLAUDE_CODE_ENTRYPOINT": "cli",
-                   "CLAUDE_CODE_SOMETHING_NEW": "x", "CLAUDE_CONFIG_DIR": "/somewhere/else",
-                   "KEEP_ME": "yes"}
-        with mock.patch.dict(os.environ, hostile):
+        mine = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1000", "CLAUDE_CODE_SOMETHING_NEW": "x",
+                "CLAUDE_CONFIG_DIR": "/somewhere/else", "KEEP_ME": "yes"}
+        hostile = {k: "v" for k in self.SESSION_STATE + self.LOGIN_OVERRIDES}
+        with mock.patch.dict(os.environ, {**hostile, **mine}):
             status = claude.account_status(Account("a", "claude", load_plan("claude-pro"), d))
         self.assertTrue(status.logged_in)
         seen = dict(l.split("=", 1) for l in (self.log / "env-a").read_text().splitlines() if "=" in l)
         for k in hostile:
-            if k not in ("KEEP_ME", "CLAUDE_CONFIG_DIR"):
-                self.assertNotIn(k, seen)
+            self.assertFalse(k in seen, f"{k} reached the child")
         self.assertEqual(seen["CLAUDE_CONFIG_DIR"], str(d))
-        self.assertEqual(seen["KEEP_ME"], "yes")
+        for k in ("KEEP_ME", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_SOMETHING_NEW"):
+            self.assertEqual(seen[k], mine[k], k)       # everything else passes through
 
     def test_clean_env_is_the_one_helper_for_children(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_X": "1", "ANTHROPIC_API_KEY": "k"}):
             env = claude.clean_env(Path("/acct"))
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/acct")
-        self.assertNotIn("CLAUDE_CODE_X", env)
-        self.assertNotIn("ANTHROPIC_API_KEY", env)
+        self.assertEqual(env["CLAUDE_CODE_X"], "1")
+        self.assertFalse("ANTHROPIC_API_KEY" in env)
         self.assertEqual(env["HOME"], os.environ["HOME"])
 
     def test_default_command_and_the_per_account_override(self):

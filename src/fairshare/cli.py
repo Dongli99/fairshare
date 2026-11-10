@@ -1,4 +1,4 @@
-"""fairshare CLI: status | pick | capture | run (the default) | init | apply | uninstall | doctor."""
+"""fairshare CLI: status | capture | run (the default) | init | apply | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -16,8 +16,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import providers, session, store
-from .model import (Account, AccountStatus, Snapshot, Tuning, load_accounts, load_plan,
-                    plan_names, render_config)
+from .model import (Account, AccountStatus, ConfigError, Snapshot, Tuning, load_accounts,
+                    load_plan, plan_names, render_config)
 from .policy import HOUR, Verdict, rank
 
 
@@ -25,7 +25,10 @@ def _load():
     path = store.config_path()
     if not path.exists():
         raise SystemExit(f"fairshare: no config at {path} (see `fairshare init`)")
-    return load_accounts(path)
+    try:
+        return load_accounts(path)
+    except ConfigError as e:
+        raise SystemExit(f"fairshare: {path}: {e}")
 
 
 def _now() -> float:
@@ -56,30 +59,54 @@ class Survey:
     now: float
 
 
+def _with_detected_plan(a: Account, plan_name: str) -> Account:
+    """`a` on the plan the provider reported, keeping the account's own capacity override."""
+    return replace(a, plan=load_plan(plan_name, a.capacity))
+
+
+def _unconfirmed(a: Account) -> str | None:
+    """Why an account whose sign-in check failed cannot be used on its login file alone, or None
+    when it can: the login file must exist and the last successful check must have said
+    "subscription". A login never confirmed as one might be billed per use."""
+    if not providers.get(a.provider).login_present(a):
+        return "not signed in"
+    seen = store.subscription_seen(a.id)
+    if not (seen and seen[0]):
+        return f"sign-in check failed and {a.id} was never confirmed as a subscription login"
+    return None
+
+
 def _survey() -> Survey:
     """Check every account once, then rank those that can take work."""
     accounts, tuning = _load()
     now = _now()
     snaps = {a.id: s for a in accounts if (s := store.load(a.id))}
-    live, out, twins, notes, failed = [], [], [], {}, []
-    for a, st in zip(accounts, _probe(accounts)):
+    live, twins, notes, failed = [], [], {}, []
+    out = [(a, a.plan_error) for a in accounts if a.plan is None]     # no plan file: not ranked
+    planned = [a for a in accounts if a.plan is not None]
+    for a, st in zip(planned, _probe(planned)):
         if st is None:
             failed.append(a.id)
-            signed_in = providers.get(a.provider).login_present(a)
-            how = "found, counted as signed in" if signed_in else "not found, counted as signed out"
-            notes[a.id] = [f"sign-in check failed; login file {how}; plan {a.plan.name} from config"]
-            if signed_in:
-                live.append((a, None))
+            if why := _unconfirmed(a):
+                out.append((a, why))
+                if why == "not signed in":
+                    notes[a.id] = ["sign-in check failed; login file not found, counted as "
+                                   "signed out"]
             else:
-                out.append((a, "not signed in"))
-        elif not st.logged_in:
+                when = time.strftime("%Y-%m-%d", time.localtime(store.subscription_seen(a.id)[1]))
+                notes[a.id] = [f"sign-in check failed; login file found, last confirmed as a "
+                               f"subscription login on {when}; plan {a.plan.name} from config"]
+                live.append((a, None))
+            continue
+        store.record_subscription(a.id, st.logged_in and st.usable, now)
+        if not st.logged_in:
             out.append((a, "not signed in"))
         elif not st.usable:
             out.append((a, "not a subscription login"))
         else:
             if st.plan and st.plan != a.plan.name:
                 notes[a.id] = [f"plan {a.plan.name} in config, detected {st.plan}"]
-                a = replace(a, plan=load_plan(st.plan))
+                a = _with_detected_plan(a, st.plan)
             live.append((a, st))
     # One login in several folders is one quota: rank it once, by its freshest snapshot.
     ranked, seen = [], {}
@@ -120,7 +147,7 @@ def cmd_status(_a) -> int:
         for note in s.notes.get(v.account.id, []):
             print(f"    {note}")
     for a, why in s.out:
-        print(f"  {a.id:<12} {a.plan.name:<14} left out: {why}")
+        print(f"  {a.id:<12} {a.plan.name if a.plan else '-':<14} left out: {why}")
         for note in s.notes.get(a.id, []):
             print(f"    {note}")
     for a, rep in s.twins:
@@ -132,18 +159,6 @@ def _nothing_to_rank(s: Survey) -> None:
     if not s.verdicts:
         why = "; ".join(f"{a.id}: {w}" for a, w in s.out)
         raise SystemExit(f"fairshare: no account can take work ({why})")
-
-
-def cmd_pick(a) -> int:
-    s = _survey()
-    _nothing_to_rank(s)
-    best = s.verdicts[0]
-    if a.json:
-        print(json.dumps({"account": best.account.id, "eligible": best.eligible,
-                          "reason": best.reason, "config_dir": str(best.account.config_dir)}))
-    else:
-        print(best.account.id)
-    return 0 if best.eligible else 75   # 75: every account is near a limit
 
 
 def cmd_capture(a) -> int:
@@ -159,7 +174,7 @@ def cmd_capture(a) -> int:
             store.record(acct.id, fresh, now)
             if not a.then:
                 print(" · ".join(f"{k} {w.used_pct:.0f}%" for k, w in fresh.items()))
-    except Exception:
+    except (Exception, SystemExit):      # whatever is wrong, the user's own line must still run
         pass
     if a.then:
         sys.stdout.flush()
@@ -192,6 +207,8 @@ def _launch(v: Verdict, args: list[str]) -> int:
     print(f"fairshare -> {v.account.id} ({v.reason})", file=sys.stderr)
     if dropped := prov.dropped_login_vars():
         _say(f"ignoring {', '.join(dropped)} from the environment; the account's own login is used")
+    if passed := prov.passed_session_vars():
+        _say(f"passing {', '.join(passed)} through from the surrounding session")
     return session.run_child(cmd + args, env)
 
 
@@ -208,22 +225,26 @@ def _run_account(account_id: str, args: list[str]) -> int:
     if acct is None:
         _say(f"no account '{account_id}' (configured: {', '.join(x.id for x in accounts)})")
         return 2
-    prov = providers.get(acct.provider)
-    st = prov.account_status(acct)
+    if acct.plan is None:
+        _say(f"{acct.id}: {acct.plan_error}")
+        return 1
+    st = providers.get(acct.provider).account_status(acct)
     if st is None:
-        if not prov.login_present(acct):
-            _say(f"{acct.id} is not signed in (the sign-in check failed and no login was found)")
+        if why := _unconfirmed(acct):
+            _say(f"{acct.id}: {why}")
             return 1
-        _say(f"sign-in check failed for {acct.id}; went by the login file and the plan in "
-             "accounts.toml")
-    elif not st.logged_in:
-        _say(f"{acct.id} is not signed in")
-        return 1
-    elif not st.usable:
-        _say(f"{acct.id} is not a subscription login")
-        return 1
-    elif st.plan and st.plan != acct.plan.name:
-        acct = replace(acct, plan=load_plan(st.plan))
+        _say(f"sign-in check failed for {acct.id}; went by the login file (last confirmed as a "
+             "subscription login) and the plan in accounts.toml")
+    else:
+        store.record_subscription(acct.id, st.logged_in and st.usable, _now())
+        if not st.logged_in:
+            _say(f"{acct.id} is not signed in")
+            return 1
+        if not st.usable:
+            _say(f"{acct.id} is not a subscription login")
+            return 1
+        if st.plan and st.plan != acct.plan.name:
+            acct = _with_detected_plan(acct, st.plan)
     now = _now()
     snaps = {acct.id: s} if (s := store.load(acct.id)) else {}
     v = rank([acct], snaps, now, tuning)[0]
@@ -242,9 +263,9 @@ def cmd_run(a) -> int:
             s = _survey()
             if s.out:
                 _say("skipped " + ", ".join(f"{x.id} ({why})" for x, why in s.out))
-            if s.failed:
-                _say(f"sign-in check failed for {', '.join(s.failed)}; went by the login file "
-                     "and the plan in accounts.toml")
+            if fallback := [v.account.id for v in s.verdicts if v.account.id in s.failed]:
+                _say(f"sign-in check failed for {', '.join(fallback)}; went by the login file "
+                     "(last confirmed as a subscription login) and the plan in accounts.toml")
             _nothing_to_rank(s)
             top = s.verdicts[0]
             if top.eligible:
@@ -318,17 +339,43 @@ def _account_flag(s: str) -> dict:
     return {"id": ident, "plan": plan, "config_dir": d}
 
 
+def _needs_terminal() -> int:
+    _say("init asks questions and there is no terminal to answer them; "
+         "use --yes, or --account ID=DIR:PLAN")
+    return 2
+
+
+def _entries(a, old: dict, home: Path) -> list[dict]:
+    if a.account:
+        return [_account_flag(x) for x in a.account]
+    found = _candidates(old, home)
+    return [e for e, _ in found] if a.yes else _ask(found)
+
+
 def cmd_init(a) -> int:
     """Shows what was found, asks, and writes only accounts.toml (with a backup)."""
     path, home = store.config_path(), Path.home()
     old_text = path.read_text() if path.exists() else ""
-    old = tomllib.loads(old_text)
-    if a.account:
-        entries = [_account_flag(x) for x in a.account]
-    elif a.yes:
-        entries = [e for e, _ in _candidates(old, home)]
-    else:
-        entries = _ask(_candidates(old, home))
+    try:
+        old = tomllib.loads(old_text)
+    except tomllib.TOMLDecodeError as e:
+        _say(f"{path}: {e}")
+        if a.yes and not a.account:
+            _say("not starting fresh without asking: run `fairshare init` without --yes, "
+                 "or fix the file")
+            return 1
+        if not a.account:
+            try:
+                if not _yes("Start fresh? (the old file is backed up when the new one is written)"):
+                    print("Nothing written.")
+                    return 1
+            except EOFError:
+                return _needs_terminal()
+        old = {}          # the broken text stays as `old_text`: the diff shows it replaced
+    try:
+        entries = _entries(a, old, home)
+    except EOFError:
+        return _needs_terminal()
     if not entries:
         raise SystemExit("fairshare: no accounts; nothing written")
     try:
@@ -340,9 +387,12 @@ def cmd_init(a) -> int:
         return 0
     sys.stdout.writelines(difflib.unified_diff(
         old_text.splitlines(True), new_text.splitlines(True), str(path), f"{path} (new)"))
-    if not a.yes and input(f"Write {path}? [y/N] ").strip().lower() != "y":
-        print("Nothing written.")
-        return 1
+    try:
+        if not a.yes and not _yes(f"Write {path}?"):
+            print("Nothing written.")
+            return 1
+    except EOFError:
+        return _needs_terminal()
     backup = store.write_with_backup(path, new_text)
     print(f"Wrote {path}" + (f" (backup: {backup})" if backup else ""))
     return 0
@@ -445,17 +495,28 @@ def cmd_doctor(_a) -> int:
         check(found, f"{prov.name}: command " + (f"found, version {prov.version() or 'unknown'}"
                                                  if found else "not found on PATH"))
     accounts: list[Account] = []
-    try:
-        accounts = _load()[0]
-    except SystemExit:
+    path = store.config_path()
+    if not path.exists():
         check(False, "accounts.toml not found (run `fairshare init`)")
-    except (OSError, ValueError, KeyError):
-        check(False, "accounts.toml is not valid (run `fairshare init`)")
-    for a, st in zip(accounts, _probe(accounts)):
-        how = ("answers: " + ("signed out" if not st.logged_in else
-                              "not a subscription login" if not st.usable else
-                              f"signed in, plan {st.plan or a.plan.name}")) if st else "gave no answer"
-        check(st is not None, f"{a.id}: sign-in check {how}")
+    else:
+        try:
+            accounts = load_accounts(path)[0]
+        except ConfigError as e:
+            check(False, f"{path.name}: {e} (fix it, or run `fairshare init`)")
+    checkable = [a for a in accounts if a.plan is not None and a.provider in providers.REGISTRY]
+    answers = iter(_probe(checkable))
+    for a in accounts:
+        if a.plan is None:
+            check(False, f"{a.id}: {a.plan_error}")
+        elif a.provider not in providers.REGISTRY:
+            check(False, f"{a.id}: unknown provider {a.provider}")
+        else:
+            st = next(answers)
+            how = ("answers: " + ("signed out" if not st.logged_in else
+                                  "not a subscription login" if not st.usable else
+                                  f"signed in, plan {st.plan or a.plan.name}")
+                   ) if st else "gave no answer"
+            check(st is not None, f"{a.id}: sign-in check {how}")
     callers: dict[tuple[str, ...], list[str]] = {}
     for prov, mine in _by_provider(accounts):
         for a in mine:
@@ -493,7 +554,6 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fairshare", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(f=cmd_status)
-    pk = sub.add_parser("pick"); pk.add_argument("--json", action="store_true"); pk.set_defaults(f=cmd_pick)
     cp = sub.add_parser("capture"); cp.add_argument("account")
     cp.add_argument("--then", help="the user's own command for this hook, run after recording")
     cp.set_defaults(f=cmd_capture)
@@ -512,6 +572,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     if not argv or argv[0] == "run":
         return cmd_run(_run_args(p, argv[1:]))
+    if argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
+        _say(f"'{argv[0]}' is not a command; did you mean: fairshare run {shlex.join(argv)}")
+        return 2
     a = p.parse_args(argv)
     return a.f(a)
 

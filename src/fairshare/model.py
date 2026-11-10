@@ -31,9 +31,11 @@ class Plan:
 class Account:
     id: str
     provider: str
-    plan: Plan
+    plan: Plan | None              # None: the configured plan has no plan file (see plan_error)
     config_dir: Path
     status_args: tuple[str, ...] | None = None   # overrides the provider's sign-in check command
+    capacity: float | None = None  # the account's own override; it survives plan detection
+    plan_error: str | None = None  # why `plan` is None: the account is left out of ranking
 
 
 @dataclass(frozen=True)
@@ -107,16 +109,59 @@ def load_plan(name: str, capacity: float | None = None) -> Plan:
                 w["short"]["name"] if "short" in w else None)
 
 
+class ConfigError(ValueError):
+    """accounts.toml cannot be used. The message says what is wrong and where; callers add the
+    file's name."""
+
+
+def _sole_provider() -> str | None:
+    """The one provider the plan files serve, or None when there are several."""
+    found = {_plan_data(n)["provider"] for n in plan_names()}
+    return found.pop() if len(found) == 1 else None
+
+
+def _account(a: dict) -> Account:
+    capacity = None if a.get("capacity") is None else float(a["capacity"])
+    try:
+        plan, error = load_plan(a["plan"], capacity), None
+    except FileNotFoundError:     # a renamed or removed plan file must not take the rest down
+        plan, error = None, f"plan {a['plan']} not found; known: {', '.join(plan_names())}"
+    provider = a.get("provider") or (plan.provider if plan else _sole_provider())
+    if not provider:
+        raise ValueError(f"{error}, and no provider is named")
+    args = a.get("status_args")
+    return Account(a["id"], provider, plan, Path(a["config_dir"]).expanduser(),
+                   tuple(shlex.split(args)) if args else None, capacity, error)
+
+
 def load_accounts(path: Path) -> tuple[list[Account], Tuning]:
-    d = tomllib.loads(path.read_text())
+    """Raises ConfigError, never anything else, for a file that cannot be used. An account whose
+    plan has no plan file loads with `plan` None and `plan_error` set."""
+    try:
+        d = tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(str(e)) from None
+    except (OSError, UnicodeDecodeError):
+        raise ConfigError("cannot be read as text") from None
+    if not isinstance(d.get("account", []), list):
+        raise ConfigError("account must be a list of [[account]] tables")
     accounts = []
-    for a in d.get("account", []):
-        plan = load_plan(a["plan"], a.get("capacity"))
-        args = a.get("status_args")
-        accounts.append(Account(a["id"], a.get("provider", plan.provider), plan,
-                                Path(a["config_dir"]).expanduser(),
-                                tuple(shlex.split(args)) if args else None))
-    return accounts, Tuning(**d.get("policy", {}))
+    for i, a in enumerate(d.get("account", []), 1):
+        try:
+            accounts.append(_account(a))
+        except KeyError as e:
+            raise ConfigError(f"account {i}: missing {e}") from None
+        except (TypeError, ValueError, AttributeError) as e:
+            raise ConfigError(f"account {i}: {e}") from None
+    policy, valid = d.get("policy", {}), ", ".join(Tuning.__dataclass_fields__)
+    if not isinstance(policy, dict):
+        raise ConfigError("[policy] must be a table")
+    for k, v in policy.items():
+        if k not in Tuning.__dataclass_fields__:
+            raise ConfigError(f"[policy] unknown key {k!r}; valid keys: {valid}")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ConfigError(f"[policy] {k} must be a number")
+    return accounts, Tuning(**policy)
 
 
 def plan_names() -> list[str]:

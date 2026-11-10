@@ -133,6 +133,16 @@ class UsableIn(unittest.TestCase):
         self.assertAlmostEqual(self.usable_in(snap((10, 4), (99, 30))), 30.0)
 
 
+class ReasonDurations(unittest.TestCase):
+    def test_under_an_hour_reads_in_minutes(self):
+        v = rank([acct("a")], {"a": snap((10, 3), (50, 0.15))}, NOW)[0]
+        self.assertIn("resets in 9m", v.reason)
+
+    def test_hours_stay_hours(self):
+        self.assertIn("resets in 20h", rank([acct("a")], {"a": snap((10, 3), (50, 20))}, NOW)[0].reason)
+        self.assertIn("resets in 4.0h", rank([acct("a")], {"a": snap((95, 4), (10, 20))}, NOW)[0].reason)
+
+
 class Capacity(unittest.TestCase):
     def test_zero_or_negative_capacity_is_rejected_not_defaulted(self):
         for bad in (0, 0.0, -1):

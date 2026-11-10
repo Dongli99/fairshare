@@ -26,6 +26,10 @@ class Provider(Protocol):
         """Names (never values) of variables set in this process that could override an account's
         own login and that launch() leaves out of the environment."""
 
+    def passed_session_vars(self) -> list[str]:
+        """Inside a running session of this provider: names (never values) of other variables
+        that look like session state and that launch() passes through. Empty otherwise."""
+
     def discover(self, home: Path) -> list[Candidate]:
         """Accounts already set up under `home`, for setup to show. Must not read a login."""
 

@@ -163,6 +163,8 @@ class Account_(Fleet):
     def test_a_failed_check_falls_back_to_the_login_file(self):
         self.add("c", auth=None)                    # the check fails, a login file exists
         self.add("d", auth=None, login=False)       # the check fails, no login
+        self.confirm("c")
+        self.confirm("d")
         code, _, err = self.go("run", "-a", "c")
         self.assertEqual(code, 0)
         self.assertIn("sign-in check failed for c", err)
@@ -347,8 +349,8 @@ class Boundary(unittest.TestCase):
     def test_no_claude_specific_name_is_left_in_cli(self):
         self.assertIsNone(re.search(r"claude|anthropic", self.SRC, re.I))   # of any case
         consts = [claude.BINARY, claude.CONFIG_DIR_ENV, claude.LOGIN_FILE, claude.SETTINGS_FILE,
-                  claude.STATUS_LINE_KEY, claude.SESSION_ENV_PREFIX,
-                  *claude.LOGIN_OVERRIDE_ENV, *claude.SESSION_ENV, *claude.RC_FILES]
+                  claude.STATUS_LINE_KEY, claude.SESSION_MARK_ENV,
+                  claude.WATCH_ENV_PREFIX, claude.ACCOUNT_DIR_GLOB, *claude.LOGIN_OVERRIDE_ENV, *claude.SESSION_ENV, *claude.RC_FILES]
         for c in consts:
             with self.subTest(constant=c):
                 self.assertFalse(c in self.SRC, f"cli.py spells {c!r}")

@@ -20,6 +20,11 @@ class Verdict:
     usable_in: float                # hours until it is eligible again; 0 when eligible now
 
 
+def _dur(hours: float, digits: int = 0) -> str:
+    """A time to reset for people: minutes under an hour, else hours."""
+    return f"{max(0, round(hours * 60))}m" if hours < 1 else f"{hours:.{digits}f}h"
+
+
 def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Verdict:
     p = acct.plan
     wins = snap.windows if snap else {}
@@ -47,9 +52,9 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Ver
     if long_ is None:
         why = f"no active {p.long_name} window, assumed fresh"
     elif hot and not exhausted:
-        why = f"{p.short_name} {short_used:.0f}% used, resets in {short_in:.1f}h"
+        why = f"{p.short_name} {short_used:.0f}% used, resets in {_dur(short_in, 1)}"
     else:
-        why = f"{p.long_name} {long_used:.0f}% used, resets in {long_in:.0f}h"
+        why = f"{p.long_name} {long_used:.0f}% used, resets in {_dur(long_in)}"
     # A hot short window stops counting once its reset is within the grace period.
     usable_in = max(short_in - t.grace_hours if hot else 0.0, long_in if exhausted else 0.0)
     return Verdict(acct, not (hot or exhausted), score, why, usable_in)

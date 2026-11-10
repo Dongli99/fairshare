@@ -32,7 +32,9 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
 
 ## Setup
 
-1. `pipx install .` (Python 3.11+, no dependencies). This puts a `fairshare` command on your PATH.
+1. `pipx install .` (Python 3.11+). This puts a `fairshare` command on your PATH. fairshare has no
+   dependencies when it runs, but installing needs network access once, to fetch the build
+   backend (`hatchling`); an offline install fails.
 2. `fairshare init` lists the accounts it finds (shell aliases that set `CLAUDE_CONFIG_DIR`,
    and signed-in `~/.claude*` directories), asks you to confirm each id and plan, shows the
    resulting `accounts.toml` as a diff and writes it only on yes, keeping a backup. It proposes the
@@ -51,13 +53,23 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
 5. Use each account normally for a while. Every session refreshes that account's snapshot.
 
 `fairshare run` starts Claude Code as a child process and passes its exit code through; Ctrl-C
-and Ctrl-Z reach Claude Code as usual. It starts Claude Code without `ANTHROPIC_API_KEY`,
-`ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, so the account's own login is used, and
-prints one line naming any of them it dropped. Model and effort are yours: your Claude defaults
-apply.
+and Ctrl-Z reach Claude Code as usual. It starts Claude Code without the variables that
+pick a login or a provider (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`,
+`CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`), so the account's own login is used, and
+prints one line naming any of them it dropped. It also drops the state a surrounding Claude Code
+session leaves in its children (silently). Everything else passes through, so model, effort and
+your other Claude settings are yours; started from inside a Claude Code session, it names any
+other `CLAUDE_*` variable it passes on.
+
+If the sign-in check fails, an account is used only when its login file exists and an earlier
+check confirmed it as a subscription login (fairshare keeps a yes/no and a time per account,
+nothing else). An account whose plan has no plan file, or whose `accounts.toml` entry is wrong,
+is left out with the reason; the others keep working. A bad `accounts.toml` is reported with
+the file and line, not a traceback.
 
 `fairshare doctor` checks the setup and changes nothing: the `claude` command is found (with its
-version), each account's sign-in check answers, the `fairshare` command a statusLine calls runs,
+version), `accounts.toml` loads, each account's plan exists, each account's sign-in check answers, the `fairshare` command a statusLine calls runs,
 and each account's statusLine still calls capture. One line per check; exit 0 when all pass.
 
 `fairshare uninstall` reverses step 3 the same way (diff, ask, back up): it unwraps each
@@ -71,7 +83,8 @@ a window past its reset time is treated as unused.
 ## Adding a provider or plan
 
 - **Plan:** drop a TOML file in `src/fairshare/plans/` (windows and relative capacity; the
-  short window is optional). Adding, removing or renaming a subscription changes only plan files.
+  short window is optional). Adding, removing or renaming a subscription changes only plan files;
+  an account that still names a missing plan is left out with a message.
 - **Provider:** implement the protocol in `providers/base.py` in a new file under
   `src/fairshare/providers/` and register it. Everything the vendor may rename is a named constant
   in that file. The policy never changes.
