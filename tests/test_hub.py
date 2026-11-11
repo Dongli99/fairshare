@@ -89,8 +89,14 @@ class Base(unittest.TestCase):
         self.addCleanup(env.stop)
         for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC")) or k == "BROWSER"]:
             del os.environ[k]                # restored by env.stop
+        for k in [k for k in os.environ if k.startswith("FAIRSHARE_")
+                  and k not in ("FAIRSHARE_CONFIG", "FAIRSHARE_STATE")]:
+            del os.environ[k]              # a surrounding launcher's own
         for tool in ("claude", "fairshare"):                                 # never the real ones
             self.assertEqual(shutil.which(tool), str(self.bin / tool))
+        p = mock.patch.object(cli, "_fairshare_argv", lambda: [str(self.bin / "fairshare")])
+        p.start()                        # a background probe starts the fake, never a real one
+        self.addCleanup(p.stop)
         self.hub = self.home / ".local/share/fairshare/hub"
         cwd = os.getcwd()                # launches run in HOME, where no trust question is asked
         os.chdir(self.home)
@@ -297,7 +303,11 @@ class Join(UserFolders):
         self.assert_linked("account-1")
         self.assertEqual(json.loads((hub.shared_dir(self.hub) / "settings.json").read_text()),
                          {"statusLine": {"type": "command",
-                                         "command": f"{self.bin}/fairshare capture"}})
+                                         "command": f"{self.bin}/fairshare capture",
+                                         "refreshInterval": 60},
+                          "hooks": {"StopFailure": [{"matcher": "rate_limit", "hooks": [
+                              {"type": "command",
+                               "command": f"{self.bin}/fairshare hook stop-failure"}]}]}})
         self.assertEqual(store.subscription_seen("account-1")[0], True)
         self.asked.assert_not_called()
         self.assert_untouched()
@@ -740,15 +750,25 @@ class Pure(unittest.TestCase):
     def test_wire_wraps_theirs_and_keeps_every_other_byte(self):
         new = claude.wire(self.THEIRS, "/bin/fairshare")
         self.assertEqual(new, self.THEIRS.replace('"~/l.sh \'a b\'"',
-                                                  '"/bin/fairshare capture --then \'~/l.sh \'\\"\'\\"\'a b\'\\"\'\\"\'\'"'))
+                                                  '"/bin/fairshare capture --then \'~/l.sh \'\\"\'\\"\'a b\'\\"\'\\"\'\'"')
+                         .replace('"padding": 0}', '"padding": 0, "refreshInterval": 60}')
+                         .replace('}\n}\n', '},\n  "hooks": {"StopFailure": [{"matcher": "rate_limit", '
+                                  '"hooks": [{"type": "command", "command": "/bin/fairshare hook '
+                                  'stop-failure"}]}]}\n}\n'))
         self.assertEqual(claude.wired(new), Capture(("/bin/fairshare",), "~/l.sh 'a b'"))
         self.assertIsNone(claude.wire(new, "/bin/fairshare"))             # already wired
 
     def test_wire_adds_a_hook_where_there_is_none(self):
-        self.assertEqual(claude.wire('{\n  "theme": "dark"\n}\n', "f"),
-                         '{\n  "statusLine": {"type": "command", "command": "f capture"},\n  "theme": "dark"\n}\n')
+        self.assertEqual(claude.wire('{\n  "theme": "dark"\n}\n', "fairshare"),
+                         '{\n  "theme": "dark",\n  "statusLine": {"type": "command", "command": '
+                         '"fairshare capture", "refreshInterval": 60},\n  "hooks": {"StopFailure": '
+                         '[{"matcher": "rate_limit", "hooks": [{"type": "command", "command": '
+                         '"fairshare hook stop-failure"}]}]}\n}\n')
         self.assertEqual(json.loads(claude.wire(None, "f")),
-                         {"statusLine": {"type": "command", "command": "f capture"}})
+                         {"statusLine": {"type": "command", "command": "f capture",
+                                         "refreshInterval": 60},
+                          "hooks": {"StopFailure": [{"matcher": "rate_limit", "hooks": [
+                              {"type": "command", "command": "f hook stop-failure"}]}]}})
         self.assertEqual(json.loads(claude.wire("{}", "f"))["statusLine"]["command"], "f capture")
 
     def test_an_older_capture_is_replaced_and_keeps_what_it_wrapped(self):

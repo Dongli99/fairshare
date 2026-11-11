@@ -1,17 +1,22 @@
-"""fairshare CLI: status | capture | run (the default) | prefer | setup | join | leave | uninstall |
-doctor."""
+"""fairshare CLI: status | capture | run (the default) | prefer | pickup | transcript | setup |
+join | leave | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import shlex
+import select
 import shutil
+import signal
 import subprocess
 import sys
+import termios
 import time
 import tomllib
+import tty
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -20,8 +25,8 @@ from . import browser
 from . import hub as hub_mod
 from . import providers, session, store
 from .model import (ACCOUNT_ID, DEFAULT_HUB, USAGE_MODEL_TURN, Account, AccountStatus, ConfigError,
-                    Snapshot, Tuning, Window, load_accounts, load_plan, window_model, with_account,
-                    with_hub, without_account)
+                    SessionRecord, Snapshot, Tuning, Window, load_accounts, load_plan,
+                    window_model, with_account, with_hub, without_account)
 from .policy import HOUR, Verdict, prefer, rank
 
 
@@ -70,7 +75,7 @@ def _record_usage(acct: Account, use: dict[str, Window] | str | None, now: float
     if not isinstance(use, dict):
         return use
     try:
-        store.record(acct.id, use, now)
+        store.record(acct.id, use, now, probe=True)
     except OSError as e:
         return f"not recorded: {e.strerror or type(e).__name__}"
     return None
@@ -308,6 +313,11 @@ def _span(hours: float) -> str:
     return f"{hours / 24:g}d" if hours % 24 == 0 else f"{hours:g}h"
 
 
+def _stale(snap: Snapshot | None, t: Tuning, now: float) -> bool:
+    """Whether an account's usage is old enough to ask for again (or unknown)."""
+    return snap is None or now - snap.captured_at > t.refresh_minutes * 60
+
+
 def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
                  t: Tuning) -> str:
     """The account and its windows, shortest first, named by their length (`5h 23%`). A window
@@ -316,7 +326,8 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
     seen yet, or reset since: nothing is known until the next exchange) shows `-`, so the line
     keeps its shape. A per-model week shows only once hot, named by its model (`Fable 96%`). A
     session's first redraws carry no usage yet, so the saved snapshot stands in, marked with
-    when it was taken."""
+    when it was taken; so are numbers older than `refresh_minutes` (an idle session redraws
+    them unchanged)."""
     p = acct.plan
     hours = {p.short_name: p.short_hours, p.long_name: p.long_hours} if p else {}
     known = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > now}
@@ -334,7 +345,7 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
             colour = SPENT if w.used_pct >= t.long_exhausted_pct else TIGHT
             text = f"{colour}{text} ({_clock(w.resets_at, now)}){PLAIN}"
         parts.append(text)
-    if known and not live:
+    if known and (not live or _stale(snap, t, now)):
         parts.append(f"as of {_clock(snap.captured_at, now)}")
     return " · ".join(parts)
 
@@ -343,22 +354,180 @@ def cmd_capture(a) -> int:
     """Runs as the provider's usage hook. Must never raise or print noise. The account is the
     session's own folder in the hub; a session outside the hub records nothing. With --then, the
     user's own command for that hook gets the same stdin and prints the line. An account id after
-    `capture` (the form before the hub) is ignored."""
+    `capture` (the form before the hub) is ignored. When the session was stopped by its
+    account's limit and that account still cannot take work, the line ends in the pickup hint
+    (on a line of its own after the user's)."""
     raw = sys.stdin.buffer.read()
+    out = None
     try:
         accounts, tuning, _ = _load()
         acct = _session_account(accounts)
-        fresh = acct and providers.get(acct.provider).parse_capture(json.loads(raw))
-        now = time.time()
+        prov = acct and providers.get(acct.provider)
+        payload = json.loads(raw)
+        fresh = acct and prov.parse_capture(payload)
+        now = _now()
         snap = store.record(acct.id, fresh, now) if fresh else acct and store.load(acct.id)
+        seen = acct and prov.session_of(payload)
+        if seen:
+            with contextlib.suppress(OSError):
+                out = _stranded(acct, seen, snap, tuning, now)
+        if acct and _stale(snap, tuning, now):
+            _start_probe(acct, seen and seen.cwd, now)
         if acct and not a.then:
-            print(_status_line(acct, snap, now, bool(fresh), tuning))
+            print(_status_line(acct, snap, now, bool(fresh), tuning) + (f" · {out}" if out else ""))
     except (Exception, SystemExit):      # whatever is wrong, the user's own line must still run
         pass
     if a.then:
         sys.stdout.flush()
-        return subprocess.run(a.then, shell=True, input=raw).returncode
+        code = subprocess.run(a.then, shell=True, input=raw).returncode
+        if out:
+            print(out)
+        return code
     return 0
+
+
+PICKUP_MARK = f"{SPENT}out · ! fairshare pickup{PLAIN}"
+
+
+def _spent_now(acct: Account, snap: Snapshot | None, t: Tuning, now: float) -> bool:
+    """Whether one of the account's plan windows is spent and not yet reset. The policy calls a
+    full short window usable inside its grace hour; for a session the provider already stopped,
+    that is still out: it should be picked up, not wait for the reset."""
+    p = acct.plan
+    return bool(p and snap) and any(
+        w.used_pct >= t.long_exhausted_pct and w.resets_at > now
+        for k, w in snap.windows.items() if k in (p.short_name, p.long_name))
+
+
+def _stranded(acct: Account, seen, snap: Snapshot | None, t: Tuning, now: float) -> str | None:
+    """Record the session; the pickup hint when its limit stopped it and its account still
+    cannot take work by the policy. Numbers newer than the stop that say it can work again (a
+    window reset) clear the mark."""
+    rec = store.note_session(seen, acct.id, now)
+    if rec is None or rec.stranded_at is None or acct.plan is None:
+        return None
+    if (_spent_now(acct, snap, t, now)
+            or not rank([acct], {acct.id: snap} if snap else {}, now, t)[0].eligible):
+        return PICKUP_MARK
+    if snap and snap.captured_at > rec.stranded_at:
+        store.note_session(seen, acct.id, now, stranded=False)
+    return None
+
+
+def _fairshare_argv() -> list[str]:
+    """This very fairshare, as a command a child process can run (not through PATH; `-P`: not
+    from the folder it runs in)."""
+    return [sys.executable, "-P", "-m", "fairshare.cli"]
+
+
+def _start_probe(acct: Account, cwd: str | None, now: float) -> bool:
+    """Start one detached `fairshare probe <id>` and never wait for it: its own session, stdin
+    and output on /dev/null, in the session's folder (as the launch probe runs in the launch's).
+    At most one per account at a time (`store.claim_probe`). True when one was started."""
+    try:
+        if not store.claim_probe(acct.id, now, 2 * providers.get(acct.provider).usage_timeout):
+            return False
+        subprocess.Popen([*_fairshare_argv(), "probe", acct.id],
+                         cwd=cwd if cwd and os.path.isdir(cwd) else None,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return False
+    return True
+
+
+def _quietly(work) -> int:
+    """Run `work()` printing nothing and raising nothing; exit 0. For what the provider runs on
+    its own (hooks) and what runs detached (the background probe)."""
+    with open(os.devnull, "w") as quiet, contextlib.redirect_stdout(quiet), \
+            contextlib.redirect_stderr(quiet):
+        try:
+            work()
+        except (Exception, SystemExit):
+            pass
+    return 0
+
+
+def cmd_probe(a) -> int:
+    """Hidden, started by capture: ask the provider for one account's usage now and record it
+    as a probe. A probe that fails records nothing, so the bar ages honestly."""
+    def work():
+        accounts, _, hub = _load()
+        acct = next(x for x in accounts if x.id == a.id)
+        if not hub_mod.present(hub, acct.id):        # it would create folders at the old path
+            return
+        now = _now()
+        if (use := providers.get(acct.provider).read_usage(acct, now)) and isinstance(use, dict):
+            store.record(acct.id, use, now, probe=True)
+    return _quietly(work)
+
+
+def cmd_hook(a) -> int:
+    """Runs as one of fairshare's own hooks in the provider's settings (`hook <name>`), with the
+    hook's input on stdin. Never raises, prints nothing, exits 0: the provider may ignore or show
+    whatever a hook says."""
+    def work():
+        raw = json.loads(sys.stdin.buffer.read())
+        if handle := HOOKS.get(a.name):
+            handle(a.name, raw)
+    return _quietly(work)
+
+
+LAUNCHER_ENV = "FAIRSHARE_LAUNCHER"   # set by the launcher for its child: its own process id
+
+
+def _ancestors() -> set[int]:
+    """The process ids above this one, up to (not including) init. Empty when `ps` cannot say."""
+    try:
+        r = subprocess.run([shutil.which("ps", path="/bin:/usr/bin") or "ps", "-A", "-o",
+                            "pid=,ppid="], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    parent = {int(a): int(b) for a, b in (line.split() for line in r.stdout.splitlines()
+                                          if len(line.split()) == 2) if a.isdigit() and b.isdigit()}
+    found, p = set(), os.getppid()
+    while p > 1 and p not in found:
+        found.add(p)
+        p = parent.get(p, 0)
+    return found
+
+
+def _launcher() -> int | None:
+    """The fairshare launcher this process runs under: LAUNCHER_ENV, when it names one of this
+    process's ancestors (so a stale or inherited value never signals a stranger)."""
+    try:
+        pid = int(os.environ.get(LAUNCHER_ENV, ""))
+    except ValueError:
+        return None
+    return pid if pid > 1 and pid in _ancestors() else None
+
+
+def _request(launcher: int, session_id: str, manual: bool, pid: int | None) -> None:
+    """Ask the launcher to stop its child and continue the session elsewhere."""
+    store.save_request(launcher, session_id, manual, pid)
+    os.kill(launcher, signal.SIGUSR1)
+
+
+def _stop_failure(name: str, raw: object) -> None:
+    """`hook stop-failure`: the account's limit ended a turn. Mark the session stranded, ask for
+    the account's usage in the background (the bar's mark and the launcher's check need it), and
+    when a launcher started this session, ask it for a pickup. Says nothing."""
+    accounts, _, _ = _load()
+    if (acct := _session_account(accounts)) is None:
+        return
+    prov = providers.get(acct.provider)
+    if (seen := prov.hook_session(name, raw)) is None:
+        return
+    now = _now()
+    store.note_session(seen, acct.id, now, stranded=True)
+    _start_probe(acct, seen.cwd, now)
+    if launcher := _launcher():
+        _request(launcher, seen.id, False, prov.session_pid())
+
+
+STOP_FAILURE = "stop-failure"
+HOOKS = {STOP_FAILURE: _stop_failure}   # fairshare's hook name -> handler(name, input)
 
 
 def _say(text: str) -> None:
@@ -444,7 +613,9 @@ def _offer_trust(start: Account, explicit: bool) -> bool:
 def _launch(v: Verdict, args: list[str], explicit: bool = False) -> int:
     """Check the hub is there, offer folder trust, run the start check on the account's hub
     folder, then start the provider as a child, in its clean environment (with the account's
-    browser), and return its exit code."""
+    browser and LAUNCHER_ENV naming this process), and return its exit code. A pickup request
+    (SIGUSR1, `_pickup_request`) stops the child and continues its session on the best account,
+    with this process still the parent, so a later limit picks up again."""
     prov, acct = providers.get(v.account.provider), v.account
     hub = acct.config_dir.parent.parent
     if not hub_mod.present(hub, acct.id):
@@ -465,7 +636,123 @@ def _launch(v: Verdict, args: list[str], explicit: bool = False) -> int:
         _say(f"ignoring {', '.join(dropped)} from the environment; the account's own login is used")
     if passed := prov.passed_session_vars():
         _say(f"passing {', '.join(passed)} through from the surrounding session")
-    return session.run_child(cmd + args, env)
+    asked: list[tuple[SessionRecord, Survey | None]] = []
+
+    def requested(child: int) -> bool:
+        if got := _pickup_request(child):
+            asked.append(got)
+        return bool(got)
+    code = session.run_child(cmd + args, {**env, LAUNCHER_ENV: str(os.getpid())}, requested)
+    if code != session.PICKUP:
+        return code
+    return _continue(*asked[-1])
+
+
+COUNTDOWN_S = 10       # seconds the launcher shows before an automatic pickup starts
+
+
+def _can_work(s: Survey, acct_id: str) -> bool:
+    """Whether the account (or the twin ranked for its login) can take work in the survey. A plan
+    window spent right now says no even inside the policy's grace hour: the provider is already
+    refusing, so a session stopped by it should not wait for the reset."""
+    rep = next((r for a, r in s.twins if a.id == acct_id), acct_id)
+    v = next((v for v in s.verdicts if v.account.id == rep and v.eligible), None)
+    return v is not None and not _spent_now(v.account, s.snaps.get(rep), s.tuning, s.now)
+
+
+def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None] | None:
+    """Called in the launcher's wait on SIGUSR1. The request for this launcher, when it is for
+    its own child's session and stands: a manual one (`fairshare pickup`) as it is; an automatic
+    one only when the session is marked stranded and a fresh survey (probes included) confirms
+    its account cannot take work. Otherwise None: back to waiting, nothing printed (the session
+    owns the terminal)."""
+    try:
+        got = store.take_request(os.getpid())
+        if got is None or (got[2] is not None and got[2] != child):
+            return None
+        rec = store.session(got[0])
+        if rec is None or got[1]:
+            return (rec, None) if rec else None
+        if rec.stranded_at is None:
+            return None
+        s = _survey()
+        return None if _can_work(s, rec.account) else (rec, s)
+    except (Exception, SystemExit):
+        return None
+
+
+def _limit_text(s: Survey, acct_id: str) -> str:
+    """Which window stopped the account and when it resets, for the countdown line."""
+    v = next((v for v in s.verdicts if v.account.id == acct_id), None)
+    if v is None:
+        return next((why for a, why in s.out if a.id == acct_id), "no usage known")
+    p, snap = v.account.plan, s.snaps.get(acct_id)
+    for name, hours, full in ((p.long_name, p.long_hours, s.tuning.long_exhausted_pct),
+                              (p.short_name, p.short_hours, s.tuning.short_hot_pct)):
+        w = name and snap and snap.windows.get(name)
+        if w and w.resets_at > s.now and w.used_pct >= full:
+            return f"{_span(hours) if hours else name} resets {_clock(w.resets_at, s.now)}"
+    return _usable(v, s.now)
+
+
+def _countdown(text, seconds: int = COUNTDOWN_S) -> bool:
+    """On the terminal: `text(seconds left)` on one line, counting down. False when the user
+    types `c`; True on Enter or when the time is up. Keys are read one by one (cbreak mode, what
+    was typed before is dropped) and the terminal is always restored."""
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        for left in range(seconds, 0, -1):
+            print(f"\r{text(left)}", end="", file=sys.stderr, flush=True)
+            end = time.monotonic() + 1
+            while (wait := end - time.monotonic()) > 0:
+                if select.select([fd], [], [], wait)[0]:
+                    key = os.read(fd, 1)
+                    if key in (b"\r", b"\n"):
+                        return True
+                    if key in (b"c", b"C"):
+                        return False
+        return True
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        print(file=sys.stderr)
+
+
+def _pickup_prompt(rec: SessionRecord, now: float) -> str:
+    """The first prompt of the session that continues `rec`. Provider-neutral. `first` is the
+    one place a step that comes before the rest goes."""
+    if rec.stranded_at is not None:
+        why = (f"which stopped at {_clock(rec.stranded_at, now)} because account {rec.account} "
+               "hit its usage limit")
+    else:
+        why = f"which was stopped at {_clock(now, now)} on account {rec.account} to move it"
+    first: list[str] = []
+    return " ".join([
+        f"This session continues session {rec.id}, {why}. Its folder: {rec.cwd}.", *first,
+        f"Run `fairshare transcript {rec.id} --tail 40` to see where it stopped; read the full "
+        f"transcript at {rec.transcript} only if something is unclear. Then continue the work. "
+        "First say in one line what you are picking up."])
+
+
+def _continue(rec: SessionRecord, s: Survey | None) -> int:
+    """After the launcher stopped its child: for an automatic pickup on a terminal, a countdown
+    (cancel says how to resume later); then the pickup through the normal launch path, in the
+    session's folder, with the pickup prompt as the first prompt."""
+    if s is not None and _interactive():
+        best = next((v.account.id for v in s.verdicts if v.eligible), None)
+        where = f"on {best}" if best else "(no account can take work now)"
+        if not _countdown(lambda left: f"{rec.account} hit its limit ({_limit_text(s, rec.account)}"
+                          f"). Continuing {where} in {left} s · Enter = now · c = cancel"):
+            prov = next((providers.get(a.provider) for a in _load()[0] if a.id == rec.account),
+                        _provider())
+            _say(f"not continued; to resume it later: fairshare run -a {rec.account} -- "
+                 f"{shlex.join(prov.resume_args(rec.id))}")
+            return 0
+    if rec.cwd and os.path.isdir(rec.cwd):
+        os.chdir(rec.cwd)
+    return _route([_pickup_prompt(rec, _now())], moving=None if s else rec.account)
 
 
 def _browser_env(hub: Path, acct: Account) -> dict[str, str]:
@@ -537,9 +824,18 @@ def _run_account(account_id: str, args: list[str]) -> int:
 def cmd_run(a) -> int:
     if a.account:
         return _run_account(a.account, a.args)
+    return _route(a.args)
+
+
+def _route(args: list[str], moving: str | None = None) -> int:
+    """Start a session with `args` on the best account (decision 11). `moving`: the account of a
+    session picked up by request, named in one note when it could still take work."""
     try:
         while True:
             s = _survey()
+            if moving and _can_work(s, moving):
+                _say(f"note: {moving} can still take work; the session is picked up as asked")
+                moving = None
             if s.out:
                 _say("skipped " + ", ".join(f"{x.id} ({why})" for x, why in s.out))
             if signed_out := [x.id for x, why in s.out if why == NOT_SIGNED_IN]:
@@ -558,7 +854,7 @@ def cmd_run(a) -> int:
                 _grace_warning(top, s.snaps, s.tuning, s.now)
                 for line in spent:
                     _say(line)
-                return _launch(top, a.args)
+                return _launch(top, args)
             _say("no account is eligible:")
             for v in s.verdicts:
                 print(f"  {v.account.id:<12} {v.reason}; {_usable(v, s.now)} (in {_in(v.usable_in)})"
@@ -576,7 +872,7 @@ def cmd_run(a) -> int:
                 _say(f"starting on {top.account.id}, which is near a limit")
                 for line in spent:
                     _say(line)
-                return _launch(top, a.args)
+                return _launch(top, args)
             if choice != "w":
                 return 75
             _say(f"waiting for {soon.account.id}, {_usable(soon, s.now)} (Ctrl-C to quit)")
@@ -584,6 +880,111 @@ def cmd_run(a) -> int:
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return 130
+
+
+def _find_session(text: str) -> SessionRecord | None:
+    """The session record whose id is `text`, or the only one it starts; None (said why, with the
+    matches) otherwise."""
+    recs = store.sessions()
+    found = [r for r in recs if r.id == text] or [r for r in recs if r.id.startswith(text)]
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        _say(f"no session recorded starts with {text!r}")
+    else:
+        _say(f"{text!r} matches {len(found)} sessions; give more of the id:")
+        now = _now()
+        for r in found:
+            print(f"  {r.id}  {r.account:<12} {r.cwd}  (seen {_clock(r.seen, now)})",
+                  file=sys.stderr)
+    return None
+
+
+def cmd_pickup(a) -> int:
+    """Continue a session on the best account. Inside a session with no SESSION: this one; its
+    launcher, when it has one, stops it and continues (a manual request: no check that the
+    account is out), otherwise a background session takes it over. A SESSION (full id or unique
+    prefix) from a terminal outside a session starts in the foreground in its folder; inside a
+    session or with --bg, in the background. fairshare never stops a session it did not start."""
+    prov = _provider()
+    here = prov.current_session()
+    if a.session is None:
+        if here is None:
+            _say("not inside a session; name one: fairshare pickup SESSION")
+            return 2
+        if (rec := store.session(here)) is None:
+            _say(f"no record of this session ({here}) yet; it appears once its status line ran")
+            return 1
+        if launcher := _launcher():
+            _request(launcher, rec.id, True, prov.session_pid())
+            print("the launcher will stop this session and continue on the best account")
+            return 0
+        return _pickup_background(rec)
+    if (rec := _find_session(a.session)) is None:
+        return 2
+    if here or a.bg or not _interactive():
+        return _pickup_background(rec)
+    if not (rec.cwd and os.path.isdir(rec.cwd)):
+        _say(f"the session's folder {rec.cwd} is gone; not picked up")
+        return 1
+    os.chdir(rec.cwd)
+    return _route([_pickup_prompt(rec, _now())], moving=rec.account)
+
+
+def _pickup_background(rec: SessionRecord) -> int:
+    """Start the pickup with no terminal, in the session's folder, on the top eligible account
+    that already trusts that folder (nothing can ask), and pass the tool's own output through."""
+    if not (rec.cwd and os.path.isdir(rec.cwd)):
+        _say(f"the session's folder {rec.cwd} is gone; not picked up")
+        return 1
+    s = _survey()
+    if _can_work(s, rec.account):
+        _say(f"note: {rec.account} can still take work; the session is picked up as asked")
+    here = Path(rec.cwd).resolve()
+    eligible = [v for v in s.verdicts if v.eligible]
+    trusting = [v for v in eligible
+                if providers.get(v.account.provider).trusts(v.account.config_dir, here) is True]
+    if not trusting:
+        _say("no account can take it in the background: "
+             + (f"eligible: {', '.join(v.account.id for v in eligible)}, none of which trusts "
+                f"{here} (start it once from a terminal there, or use `fairshare pickup "
+                f"{rec.id}` from a terminal)" if eligible else "none is eligible now"))
+        return 1
+    v = trusting[0]
+    acct, prov = v.account, providers.get(v.account.provider)
+    hub = acct.config_dir.parent.parent
+    if not hub_mod.present(hub, acct.id):
+        _say(_no_hub(hub))
+        return 1
+    try:
+        for note in hub_mod.check(hub, acct.id, prov):
+            _say(note)
+    except OSError as e:
+        _say(f"cannot prepare {acct.id}'s folder in the hub ({e}); not started")
+        return 1
+    cmd, env = prov.background(acct, f"pickup-{rec.id[:8]}", _pickup_prompt(rec, s.now))
+    env = {k: v for k, v in {**env, **_browser_env(hub, acct)}.items() if k != LAUNCHER_ENV}
+    _say(f"picking up {rec.id} on {acct.id} ({v.reason}), in the background")
+    try:
+        return subprocess.run(cmd, env=env, cwd=rec.cwd, stdin=subprocess.DEVNULL).returncode
+    except OSError as e:
+        _say(f"cannot start {cmd[0]}: {e.strerror}")
+        return 127 if isinstance(e, FileNotFoundError) else 126
+
+
+def cmd_transcript(a) -> int:
+    """The main conversation of a recorded session, oldest first: one block per message, the
+    last N, each prefixed `user:` or `assistant:`. Never a raw record."""
+    if (rec := _find_session(a.session)) is None:
+        return 2
+    path = Path(rec.transcript) if rec.transcript else None
+    said = path and _provider().transcript_text(path)
+    if not said:
+        _say(f"{rec.transcript}: could not be read, or its layout was not understood; "
+             "nothing shown")
+        return 1
+    print("\n\n".join(f"{role}: {text}" for role, text in said[-a.tail:]))
+    return 0
 
 
 def _duration(text: str) -> float:
@@ -1158,13 +1559,13 @@ def _fix(hub_arg: Path | None) -> bool:
         text = _read(settings)
         if installed is None:
             report(False, "no installed `fairshare` on PATH; the usage hook cannot be rewired")
-        elif (cap := prov.wired(text)) is None or cap.runner != (installed,):
+        else:
             try:
                 if new_text := prov.wire(text, shlex.quote(installed)):
                     _show(prov, settings.name, text, new_text, f"{settings.name} (rewired)")
-                note = _wire(prov, hub, installed)
-                report(note is not None and note.startswith("updated"),
-                       f"usage hook: {note or 'unchanged'}")
+                    note = _wire(prov, hub, installed)
+                    report(note is not None and note.startswith("updated"),
+                           f"usage hook: {note or 'unchanged'}")
             except ValueError as e:
                 report(False, f"usage hook: {settings} {e}; left as it is")
         if old is not None:
@@ -1257,12 +1658,19 @@ def _doctor() -> int:
                 *providers.get(a.provider).check_state(a.config_dir)))
     callers: dict[tuple[str, ...], list[str]] = {}
     for prov, _mine in _by_provider(accounts):
-        cap = prov.wired(_read(prov.capture_file(hub_mod.shared_dir(hub))))
+        text = _read(prov.capture_file(hub_mod.shared_dir(hub)))
+        cap = prov.wired(text)
         check(cap is not None, f"{prov.name}: usage hook in the hub "
               + ("calls fairshare capture" if cap else "does not call fairshare capture "
                                                        "(run `fairshare setup`)"))
         if cap:
             callers.setdefault(cap.runner, []).append(prov.name)
+        runner = prov.hooked(text)
+        check(runner is not None, f"{prov.name}: stop-failure hook in the hub "
+              + ("calls fairshare hook" if runner else "does not call fairshare hook "
+                                                      "(run `fairshare doctor --fix`)"))
+        if runner and runner not in callers:
+            callers[runner] = []
     if not callers and (installed := _installed()):
         callers[(installed,)] = []
     if not callers:
@@ -1271,6 +1679,12 @@ def _doctor() -> int:
         who = f"called by the {', '.join(names)} usage hook" if names else "installed"
         check(_runs(runner), f"fairshare command ({who}) runs")
     return 1 if failed else 0
+
+
+def _positive(text: str) -> int:
+    if not text.isdigit() or int(text) < 1:
+        raise argparse.ArgumentTypeError(f"a whole number of 1 or more, not {text!r}")
+    return int(text)
 
 
 def _run_args(parser: argparse.ArgumentParser, rest: list[str]) -> argparse.Namespace:
@@ -1317,6 +1731,22 @@ def main(argv: list[str] | None = None) -> int:
     lp.set_defaults(f=cmd_leave)
     sub.add_parser("uninstall", help="say how to remove fairshare; changes nothing"
                    ).set_defaults(f=cmd_uninstall)
+    kp = sub.add_parser("pickup", help="continue a session on the best account (inside a "
+                        "session: this one)")
+    kp.add_argument("session", nargs="?", metavar="SESSION", help="a session id or its start")
+    kp.add_argument("--bg", action="store_true", help="in the background, with no terminal")
+    kp.set_defaults(f=cmd_pickup)
+    tp = sub.add_parser("transcript", help="show what a recorded session said, as text")
+    tp.add_argument("session", metavar="SESSION", help="a session id or its start")
+    tp.add_argument("--tail", type=_positive, default=40, metavar="N",
+                    help="the last N messages (default 40)")
+    tp.set_defaults(f=cmd_transcript)
+    rp = sub.add_parser("probe", help=argparse.SUPPRESS)  # capture starts it in the background
+    rp.add_argument("id")
+    rp.set_defaults(f=cmd_probe)
+    hp = sub.add_parser("hook", help=argparse.SUPPRESS)   # fairshare's own hooks call it
+    hp.add_argument("name")
+    hp.set_defaults(f=cmd_hook)
     dp = sub.add_parser("doctor", help="check the setup, read-only; --fix repairs what it can")
     dp.add_argument("--fix", action="store_true", help="repair: find a moved hub, relink, rewire")
     dp.add_argument("--hub", metavar="PATH", help="with --fix: where the hub is now")

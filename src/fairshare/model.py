@@ -93,6 +93,26 @@ class Capture:
 
 
 @dataclass(frozen=True)
+class SessionSeen:
+    """A running session as the provider describes it to a usage hook or a hook: its id, and its
+    folder and transcript when given."""
+    id: str
+    cwd: str | None = None
+    transcript: str | None = None
+
+
+@dataclass(frozen=True)
+class SessionRecord:
+    """What fairshare keeps of one session (`store.note_session`)."""
+    id: str
+    account: str
+    cwd: str | None
+    transcript: str | None
+    seen: float                       # when a usage hook or a hook last saw it
+    stranded_at: float | None = None  # when its account's limit stopped it, if it did
+
+
+@dataclass(frozen=True)
 class Snapshot:
     captured_at: float
     windows: dict[str, Window] = field(default_factory=dict)
@@ -104,6 +124,7 @@ class Tuning:
     long_exhausted_pct: float = 98.0  # a long window this full cannot take work
     grace_hours: float = 1.0          # a hot account resetting this soon is still usable
     min_hours: float = 1.0            # floor on time-to-reset, so a near reset stays finite
+    refresh_minutes: float = 5.0      # usage this old is asked for again (the usage probe)
 
 
 def _plan_data(name: str) -> dict:
@@ -210,6 +231,8 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
             raise ConfigError(f"[policy] unknown key {k!r}; valid keys: {valid}")
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ConfigError(f"[policy] {k} must be a number")
+    if policy.get("refresh_minutes", 1) < 1:
+        raise ConfigError("[policy] refresh_minutes must be at least 1")
     return accounts, Tuning(**policy), hub
 
 

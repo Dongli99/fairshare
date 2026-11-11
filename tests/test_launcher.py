@@ -2,6 +2,7 @@
 boundary. Same fleet as test_honest: temp HOME, temp PATH, a fake claude and a fake fairshare;
 the real ones are never run (Fleet.setUp proves the fakes come first on PATH)."""
 import json
+import os
 import re
 import sys
 import unittest
@@ -64,10 +65,11 @@ class Launch(Fleet):
         with mock.patch.dict("os.environ", hostile), mock.patch("os.execvpe") as execed:
             self.go(real=True)
         execed.assert_not_called()                      # a child, not a replaced process
-        cmd, env = self.launched.call_args.args
+        cmd, env, _ = self.launched.call_args.args
         self.assertEqual(cmd, [str(self.bin / "claude")])
         self.assertNotIn("ANTHROPIC_API_KEY", env)
         seen = env_seen(self, "a")
+        self.assertEqual(seen["FAIRSHARE_LAUNCHER"], str(os.getpid()))   # the launcher: us
         for k in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE"):
             self.assertNotIn(k, seen)
         self.assertEqual((seen["CLAUDE_CONFIG_DIR"], seen["KEEP_ME"]),
@@ -190,12 +192,17 @@ class Doctor(Fleet):
         code, out, err = self.go(*argv or ("doctor",))
         return code, out.splitlines()
 
-    def wire(self, command):
-        """The hub's one settings file, which every account links to."""
+    def wire(self, command, hook=True):
+        """The hub's one settings file, which every account links to: the usage hook, and the
+        stop-failure hook running the same fairshare command (unless not `hook`)."""
         d = self.tmp / "hub" / "shared"
         d.mkdir(parents=True, exist_ok=True)
+        runner = command.partition(" capture")[0]
+        hooks = {"StopFailure": [{"matcher": "rate_limit", "hooks": [
+            {"type": "command", "command": f"{runner} hook stop-failure"}]}]}
         (d / "settings.json").write_text(json.dumps(
-            {"statusLine": {"type": "command", "command": command}}))
+            {"statusLine": {"type": "command", "command": command}, **({"hooks": hooks} if hook
+                                                                      else {})}))
 
     def healthy(self):
         self.add("a", orgId=ORG + "a")
@@ -217,6 +224,7 @@ class Doctor(Fleet):
             "pass  b: usage probe answers (five_hour, seven_day, 1 model week), local command",
             "pass  b: no state file yet",
             "pass  claude: usage hook in the hub calls fairshare capture",
+            "pass  claude: stop-failure hook in the hub calls fairshare hook",
             "pass  fairshare command (called by the claude usage hook) runs"])
 
     def test_a_missing_binary_fails(self):

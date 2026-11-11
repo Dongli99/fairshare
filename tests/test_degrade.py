@@ -343,7 +343,7 @@ class Smalls(Fleet):
         self.assertFalse(hasattr(cli, "cmd_pick"))
         code, _, err = self.go("pick")
         self.assertEqual(code, 2)
-        self.assertNotIn("pick", cli.__doc__)
+        self.assertNotRegex(cli.__doc__, r"\bpick\b")          # `pickup` is another command
         self.spent_pair()
         self.assertEqual(self.go("run")[0], 75)
 

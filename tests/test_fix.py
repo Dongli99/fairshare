@@ -99,8 +99,8 @@ class Moved(Base):
 
     def hook_naming_the_old_hub(self):
         d = json.loads(self.settings.read_text())
-        d["hooks"] = {"SessionStart": [{"hooks": [
-            {"type": "command", "command": f"{self.hub}/shared/start.sh --x"}]}]}
+        d.setdefault("hooks", {})["SessionStart"] = [{"hooks": [
+            {"type": "command", "command": f"{self.hub}/shared/start.sh --x"}]}]
         d["other"] = f"{self.hub}2/kept"               # a different folder: never renamed
         self.settings.write_text(json.dumps(d, indent=2) + "\n")
         return self.settings.read_text()

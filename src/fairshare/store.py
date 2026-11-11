@@ -5,12 +5,14 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 
-from .model import Snapshot, Window
+from .model import SessionRecord, SessionSeen, Snapshot, Window
 
 
 def config_path() -> Path:
@@ -89,31 +91,139 @@ def preference(now: float) -> tuple[str, float] | None:
 SAME_WINDOW_S = 3600   # resets this close together belong to the same window
 
 
-def merge(old: Snapshot | None, fresh: dict[str, Window], now: float) -> Snapshot:
+def merge(old: Snapshot | None, fresh: dict[str, Window], now: float,
+          probe: bool = False) -> Snapshot:
     """A payload may omit a window that is still running; keep the old one until it expires.
     Idle sessions redraw with the last values they received, and usage never falls within one
-    window, so a lower value for the same window is stale: keep the stored one. The snapshot's
-    time moves only when something was taken, so stale redraws cannot make it look fresh. A
-    fresh window already past its reset is a redraw from before the reset: never taken."""
+    window, so a lower value for the same window is stale: keep the stored one. A fresh window
+    already past its reset is a redraw from before the reset: never taken. The snapshot's time
+    says when its numbers were last known to be current: it moves when a window's value or
+    reset changed or a window appeared, or when they came from the provider's own usage probe
+    (`probe`), never for a redraw of equal values, so idle redraws cannot make it look fresh."""
     kept = {k: w for k, w in (old.windows if old else {}).items() if w.resets_at > now}
     taken = {k: w for k, w in fresh.items()
              if w.resets_at > now                  # a redraw of a window that already reset
              and not (k in kept and w.used_pct < kept[k].used_pct
                      and abs(w.resets_at - kept[k].resets_at) <= SAME_WINDOW_S)}
-    return Snapshot(now if taken or old is None else old.captured_at, {**kept, **taken})
+    changed = any(kept.get(k) != w for k, w in taken.items())
+    return Snapshot(now if probe or changed or old is None else old.captured_at,
+                    {**kept, **taken})
 
-
-
-def record(account_id: str, fresh: dict[str, Window], now: float) -> Snapshot:
+def record(account_id: str, fresh: dict[str, Window], now: float,
+           probe: bool = False) -> Snapshot:
     """Merge `fresh` into the stored snapshot and save it, holding the account's lock, so two
-    captures arriving together cannot both read the old snapshot and the last one win."""
+    captures arriving together cannot both read the old snapshot and the last one win. `probe`:
+    the windows came from the provider's own usage probe (see `merge`)."""
     dest = state_dir() / "snapshots"
     dest.mkdir(parents=True, exist_ok=True)
     with open(dest / f"{account_id}.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        snap = merge(load(account_id), fresh, now)
+        snap = merge(load(account_id), fresh, now, probe)
         save(account_id, snap)
     return snap
+
+
+def claim_probe(account_id: str, now: float, max_age: float) -> bool:
+    """Whether a background usage probe for the account may start now; if so, it is marked as
+    started. One whose mark is under `max_age` seconds old is taken to be running still."""
+    dest = state_dir() / "probes"
+    dest.mkdir(parents=True, exist_ok=True)
+    mark = dest / f"{account_id}.started"
+    with locked(dest / ".lock"):
+        try:
+            if now - mark.stat().st_mtime < max_age:
+                return False
+        except FileNotFoundError:
+            pass
+        mark.touch()
+        os.utime(mark, (now, now))
+    return True
+
+
+SESSION_KEEP_S = 7 * 24 * 3600   # a session record unseen this long is dropped
+SESSION_WRITE_S = 60             # an unchanged record is rewritten at most this often
+_SESSION_ID = re.compile(r"[\w][\w.-]*")   # a session id is also a file name here
+
+
+def _sessions() -> Path:
+    return state_dir() / "sessions"
+
+
+def _read_session(path: Path) -> SessionRecord | None:
+    try:
+        d = json.loads(path.read_text())
+        return SessionRecord(path.stem, str(d["account"]), d.get("cwd"), d.get("transcript"),
+                             float(d["seen"]), None if d.get("stranded_at") is None
+                             else float(d["stranded_at"]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def session(session_id: str) -> SessionRecord | None:
+    """The record of one session, or None."""
+    if not _SESSION_ID.fullmatch(session_id):
+        return None
+    return _read_session(_sessions() / f"{session_id}.json")
+
+
+def sessions() -> list[SessionRecord]:
+    """Every session record that reads."""
+    found = sorted(_sessions().glob("*.json")) if _sessions().is_dir() else []
+    return [r for p in found if (r := _read_session(p))]
+
+
+def note_session(seen: SessionSeen, account_id: str, now: float,
+                 stranded: bool | None = None) -> SessionRecord | None:
+    """Record that `seen` runs on `account_id`, keeping its folder and transcript (a field the
+    provider left out keeps its old value). `stranded` True marks it stopped by its account's
+    limit now, False clears that, None leaves it. Written only when it is new or changed, or
+    last seen SESSION_WRITE_S ago or more, so a redraw costs no write; each write drops the
+    records unseen for SESSION_KEEP_S. Under a lock: a hook and a usage hook may arrive
+    together. None for an id that cannot be a file name."""
+    if not _SESSION_ID.fullmatch(seen.id):
+        return None
+    dest = _sessions()
+    dest.mkdir(parents=True, exist_ok=True)
+    with locked(dest / ".lock"):
+        old = _read_session(dest / f"{seen.id}.json")
+        new = SessionRecord(seen.id, account_id, seen.cwd or (old and old.cwd),
+                            seen.transcript or (old and old.transcript), now,
+                            now if stranded else None if stranded is False
+                            else old and old.stranded_at)
+        if old and replace(old, seen=now) == new and now - old.seen < SESSION_WRITE_S:
+            return old
+        _write_json(dest, f"{seen.id}.json", {k: v for k, v in vars(new).items() if k != "id"})
+        for p in dest.glob("*.json"):
+            if (r := _read_session(p)) and now - r.seen > SESSION_KEEP_S:
+                with contextlib.suppress(OSError):
+                    p.unlink()
+    return new
+
+
+def _requests() -> Path:
+    return state_dir() / "requests"
+
+
+def save_request(launcher: int, session_id: str, manual: bool, pid: int | None) -> None:
+    """Ask the launcher `launcher` (a process id) to continue `session_id` elsewhere: one file
+    per launcher, replaced atomically. `pid` is the session's own process, when known, so the
+    launcher acts only for its own child; `manual` skips its check that the account is out."""
+    _write_json(_requests(), f"{launcher}.json",
+                {"session": session_id, "manual": manual, "pid": pid})
+
+
+def take_request(launcher: int) -> tuple[str, bool, int | None] | None:
+    """(session id, manual, pid) of the launcher's pending request, removed as it is read; None
+    when there is none or it does not read."""
+    path = _requests() / f"{launcher}.json"
+    try:
+        d = json.loads(path.read_text())
+        path.unlink()
+        pid = d.get("pid")
+        return str(d["session"]), d.get("manual") is True, pid if isinstance(pid, int) else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
 
 @contextlib.contextmanager
 def locked(path: Path):

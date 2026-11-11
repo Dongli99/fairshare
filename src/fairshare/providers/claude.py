@@ -19,8 +19,8 @@ from zoneinfo import ZoneInfo
 
 from .. import store
 from ..model import (USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT,
-                     Account, AccountStatus, Candidate, Capture, Window, model_window, plan_for,
-                     window_names)
+                     Account, AccountStatus, Candidate, Capture, SessionSeen, Window, model_window,
+                     plan_for, window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
 tool = "Claude Code"                 # the tool as users know it, for messages
@@ -41,6 +41,10 @@ PROBE_TIMEOUT = 5.0                          # seconds
 USAGE_ARGS = ("-p", "--no-session-persistence", "--output-format", "json",
               "--settings", '{"disableAllHooks":true}', "/usage")
 USAGE_TIMEOUT = 6.0                          # seconds; measured 1.1-2.4 s
+usage_timeout = USAGE_TIMEOUT
+# A pickup in the background: `claude --bg --name <name> <prompt>` starts a session with no
+# terminal and prints how to attach to it; `--resume <id>` continues a session in a new one.
+BG_ARGS, NAME_ARGS, RESUME_ARGS = ("--bg",), ("--name",), ("--resume",)
 
 # Environment variables.
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"         # picks the account's folder
@@ -58,6 +62,9 @@ SESSION_ENV = (SESSION_MARK_ENV, "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_JOB_DIR"
                "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED",
                "CLAUDE_CODE_SESSION_ID")
 WATCH_ENV_PREFIX = "CLAUDE_"                 # inside a session, other such variables are reported
+# Of those, what a command run inside a session (a tool's shell, `!`) learns of it: the session's
+# full id, and the session's own process (2.1.322, planner).
+SESSION_ID_ENV, SESSION_PID_ENV = "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"
 
 # Files and folders.
 SETTINGS_FILE = "settings.json"      # holds the statusLine hook
@@ -95,6 +102,22 @@ HOOK_TYPE_KEY, HOOK_TYPE = "type", "command"
 HOOK_COMMAND_KEY = "command"
 SETTINGS_ENV = "env"                 # variables the settings file sets: values never shown
 CAPTURE_LIMITS, CAPTURE_USED, CAPTURE_RESET = "rate_limits", "used_percentage", "resets_at"
+# The session, in the statusLine payload and in every hook's input alike (documented:
+# code.claude.com/docs/en/statusline and /hooks, read 2026-11-11).
+SESSION_ID, SESSION_TRANSCRIPT, SESSION_CWD = "session_id", "transcript_path", "cwd"
+# The statusLine re-runs on a timer as well as on events (seconds, minimum 1; documented). The bar
+# then re-reads the local snapshot once a minute, which costs nothing.
+STATUS_REFRESH_KEY, STATUS_REFRESH_S = "refreshInterval", 60
+
+# fairshare's own hooks in the settings file: `hooks.<event>` is a list of groups, each a
+# `matcher` and a `hooks` list of commands (documented, read 2026-11-11). Keyed by fairshare's
+# name for the hook (`fairshare hook <name>`): the tool's event and the matcher. StopFailure
+# fires instead of Stop when an API error ended the turn; its output and exit code are ignored,
+# and its input names the error in HOOK_ERROR.
+HOOKS_KEY, HOOK_MATCHER_KEY, HOOK_LIST_KEY = "hooks", "matcher", "hooks"
+STOP_FAILURE, RATE_LIMIT = "StopFailure", "rate_limit"
+HOOK_ERROR = "error"
+FAIRSHARE_HOOKS = {"stop-failure": (STOP_FAILURE, RATE_LIMIT)}
 
 # JSON fields of STATE_FILE that join may carry over from a user's folder, after asking, and nothing
 # else (never identity, tokens or account fields). Onboarding is marked done by these two keys, set
@@ -160,6 +183,90 @@ def parse_capture(raw: dict) -> dict[str, Window]:
         if key in known and isinstance(w, dict) and CAPTURE_USED in w and CAPTURE_RESET in w:
             out[key] = Window(float(w[CAPTURE_USED]), float(w[CAPTURE_RESET]))
     return out
+
+
+def session_of(raw: object) -> SessionSeen | None:
+    """The session a statusLine payload or a hook input describes, else None."""
+    if not isinstance(raw, dict) or not isinstance(sid := raw.get(SESSION_ID), str) or not sid:
+        return None
+    text = {k: v if isinstance(v := raw.get(k), str) and v else None
+            for k in (SESSION_CWD, SESSION_TRANSCRIPT)}
+    return SessionSeen(sid, text[SESSION_CWD], text[SESSION_TRANSCRIPT])
+
+
+def current_session() -> str | None:
+    """The id of the session this process runs inside, else None."""
+    return os.environ.get(SESSION_ID_ENV) or None
+
+
+def session_pid() -> int | None:
+    """The process id of the session this process runs inside, else None."""
+    try:
+        return int(os.environ[SESSION_PID_ENV])
+    except (KeyError, ValueError):
+        return None
+
+
+def resume_args(session_id: str) -> list[str]:
+    return [*RESUME_ARGS, session_id]
+
+
+def background(account: Account, name: str, prompt: str) -> tuple[list[str], dict[str, str]]:
+    """The command and environment that start a session of `account` with no terminal, named
+    `name`, with `prompt` as its first message."""
+    return [real_binary(), *BG_ARGS, *NAME_ARGS, name, prompt], clean_env(account.config_dir)
+
+
+# The transcript (`transcript_path`, internal and per version: one JSON record per line; fixture
+# tests/fixtures/claude-2.1.322/transcript.jsonl). Only records of these types that are not on a
+# side chain (a subagent's) are the conversation; their text is the message's content, a string
+# or a list of blocks of which only the text blocks are words (thinking, tool use and tool results
+# are not). Every other record type (copies of requests among them) is never shown.
+T_TYPE, T_SIDECHAIN, T_MESSAGE, T_CONTENT = "type", "isSidechain", "message", "content"
+T_ROLES = {"user": "user", "assistant": "assistant"}     # record type -> fairshare's role
+T_BLOCK_TYPE, T_TEXT_BLOCK, T_TEXT = "type", "text", "text"
+
+
+def _text_of(content: object) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n\n".join(b[T_TEXT] for b in content if isinstance(b, dict)
+                            and b.get(T_BLOCK_TYPE) == T_TEXT_BLOCK and isinstance(b.get(T_TEXT), str))
+    return None
+
+
+def transcript_text(path: Path) -> list[tuple[str, str]] | None:
+    """The main conversation of a transcript, oldest first, as (role, text) pairs with role
+    "user" or "assistant": only words, never tool calls, tool results, thinking, side chains or
+    other records. [] when it holds no such message; None when it cannot be read."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    out = []
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or r.get(T_TYPE) not in T_ROLES \
+                or r.get(T_SIDECHAIN) is not False or not isinstance(r.get(T_MESSAGE), dict):
+            continue
+        if (text := _text_of(r[T_MESSAGE].get(T_CONTENT))) and text.strip():
+            out.append((T_ROLES[r[T_TYPE]], text.strip()))
+    return out
+
+
+def hook_session(hook: str, raw: object) -> SessionSeen | None:
+    """For fairshare's hook `hook`: the session its input describes, when the input is the event
+    fairshare wired it for (an input naming another error is not); else None."""
+    if hook not in FAIRSHARE_HOOKS or not isinstance(raw, dict):
+        return None
+    error = raw.get(HOOK_ERROR)
+    if error is not None and error != FAIRSHARE_HOOKS[hook][1]:
+        return None
+    return session_of(raw)
 
 
 def launch(account: Account) -> tuple[list[str], dict[str, str]]:
@@ -598,35 +705,117 @@ def wired(text: str | None) -> Capture | None:
         return None
 
 
+def hook_of(command: str) -> tuple[tuple[str, ...], str | None] | None:
+    """(runner, hook name) when a hook `command` is fairshare's `<runner> hook <name>`, else
+    None; recognised as `capture_of` recognises the capture."""
+    try:
+        t = shlex.split(command)
+    except ValueError:
+        return None
+    i = t.index("hook") if "hook" in t else -1
+    if i < 1 or not any("fairshare" in x for x in t[:i]):
+        return None
+    return tuple(t[:i]), t[i + 1] if len(t) > i + 1 else None
+
+
+def _own_hooks(d: dict) -> dict[str, tuple[int, int, dict, str]]:
+    """fairshare's hooks found in the settings object `d`: for each of its hook names, where it
+    is in its event's list (group, command) and that group and command."""
+    found = {}
+    hooks = d.get(HOOKS_KEY)
+    for name, (event, _) in FAIRSHARE_HOOKS.items():
+        groups = hooks.get(event) if isinstance(hooks, dict) else None
+        for gi, g in enumerate(groups if isinstance(groups, list) else []):
+            cmds = g.get(HOOK_LIST_KEY) if isinstance(g, dict) else None
+            for hi, h in enumerate(cmds if isinstance(cmds, list) else []):
+                cmd = h.get(HOOK_COMMAND_KEY) if isinstance(h, dict) else None
+                if (name not in found and isinstance(cmd, str) and (own := hook_of(cmd))
+                        and own[1] == name):
+                    found[name] = (gi, hi, g, cmd)
+    return found
+
+
+def hooked(text: str | None) -> tuple[str, ...] | None:
+    """The fairshare command that every one of fairshare's hooks in that settings text runs, with
+    its matcher; None when one is missing (or they run different commands)."""
+    try:
+        d = json.loads(text) if text and text.strip() else {}
+    except ValueError:
+        return None
+    found = _own_hooks(d) if isinstance(d, dict) else {}
+    runners = {hook_of(cmd)[0] for name, (_, _, g, cmd) in found.items()
+               if g.get(HOOK_MATCHER_KEY) == FAIRSHARE_HOOKS[name][1]}
+    return runners.pop() if len(found) == len(FAIRSHARE_HOOKS) and len(runners) == 1 else None
+
+
 def wire(text: str | None, command: str) -> str | None:
     """Settings text whose statusLine runs `<command> capture`, after which it runs the user's
-    own statusLine (`--then`); None when it already does. An older capture is replaced by this
-    one and keeps the user's command it wrapped. Only the statusLine's command (and its type,
-    when that is not a command) change: every other byte of `text` stays. Raises ValueError for
-    a text that is not a settings object."""
+    own statusLine (`--then`), re-run every STATUS_REFRESH_S seconds unless it already names an
+    interval, and which holds fairshare's hooks (`<command> hook <name>` under each one's event
+    and matcher); None when it already does all that. An older capture is replaced by this one
+    and keeps the user's command it wrapped; an older hook of fairshare's is changed in place.
+    A missing hook is added at the end of its event's list: no other hook is changed, moved or
+    removed, and every byte outside what changes stays. Raises ValueError for a text that is not
+    a settings object of the expected layout."""
     d = json.loads(text) if text and text.strip() else {}
-    if not isinstance(d, dict) or not isinstance(d.get(STATUS_LINE_KEY, {}), dict):
+    if not isinstance(d, dict) or not isinstance(d.get(STATUS_LINE_KEY, {}), dict) \
+            or not isinstance(d.get(HOOKS_KEY, {}), dict) \
+            or any(not isinstance(d.get(HOOKS_KEY, {}).get(ev, []), list)
+                   for ev, _ in FAIRSHARE_HOOKS.values()):
         raise ValueError("unexpected layout")
     sl = d.get(STATUS_LINE_KEY) or {}
     theirs = sl.get(HOOK_COMMAND_KEY) if isinstance(sl.get(HOOK_COMMAND_KEY), str) else None
     if theirs and (cap := capture_of(theirs)):
         theirs = cap.then
     cmd = f"{command} capture" + (f" --then {shlex.quote(theirs)}" if theirs else "")
-    if sl.get(HOOK_COMMAND_KEY) == cmd and sl.get(HOOK_TYPE_KEY) == HOOK_TYPE:
-        return None
-    hook = {HOOK_TYPE_KEY: HOOK_TYPE, HOOK_COMMAND_KEY: cmd}
-    if not (text and text.strip()):
-        return json.dumps({STATUS_LINE_KEY: hook}, indent=2) + "\n"
-    if STATUS_LINE_KEY not in d:
-        new = _json_set(text, [STATUS_LINE_KEY], hook)
+    line = {HOOK_TYPE_KEY: HOOK_TYPE, HOOK_COMMAND_KEY: cmd}
+    empty = not (text and text.strip())
+    if empty:
+        text = new = "{}"
+        new = _json_set(new, [STATUS_LINE_KEY], {**line, STATUS_REFRESH_KEY: STATUS_REFRESH_S})
+    elif STATUS_LINE_KEY not in d:
+        new = _json_set(text, [STATUS_LINE_KEY], {**line, STATUS_REFRESH_KEY: STATUS_REFRESH_S})
     else:
         new = text
         if sl.get(HOOK_TYPE_KEY) != HOOK_TYPE:
             new = _json_set(new, [STATUS_LINE_KEY, HOOK_TYPE_KEY], HOOK_TYPE)
-        new = _json_set(new, [STATUS_LINE_KEY, HOOK_COMMAND_KEY], cmd)
-    want = {**d, STATUS_LINE_KEY: {**sl, HOOK_TYPE_KEY: HOOK_TYPE, HOOK_COMMAND_KEY: cmd}}
+        if sl.get(HOOK_COMMAND_KEY) != cmd:
+            new = _json_set(new, [STATUS_LINE_KEY, HOOK_COMMAND_KEY], cmd)
+        if STATUS_REFRESH_KEY not in sl:
+            new = _json_set(new, [STATUS_LINE_KEY, STATUS_REFRESH_KEY], STATUS_REFRESH_S)
+    want = {**d, STATUS_LINE_KEY: {**sl, **line}}
+    want[STATUS_LINE_KEY].setdefault(STATUS_REFRESH_KEY, STATUS_REFRESH_S)
+    found = _own_hooks(json.loads(new))
+    hooks = dict(want.get(HOOKS_KEY) or {})
+    for name, (event, matcher) in FAIRSHARE_HOOKS.items():
+        hook_cmd = f"{command} hook {name}"
+        groups = list(hooks.get(event) or [])
+        if name in found:
+            gi, hi, g, old = found[name]
+            if old != hook_cmd:
+                new = _json_set(new, [HOOKS_KEY, event, gi, HOOK_LIST_KEY, hi, HOOK_COMMAND_KEY],
+                                hook_cmd)
+            if g.get(HOOK_MATCHER_KEY) != matcher:
+                new = _json_set(new, [HOOKS_KEY, event, gi, HOOK_MATCHER_KEY], matcher)
+            cmds = list(g[HOOK_LIST_KEY])
+            cmds[hi] = {**cmds[hi], HOOK_COMMAND_KEY: hook_cmd}
+            groups[gi] = {**g, HOOK_MATCHER_KEY: matcher, HOOK_LIST_KEY: cmds}
+        else:
+            group = {HOOK_MATCHER_KEY: matcher,
+                     HOOK_LIST_KEY: [{HOOK_TYPE_KEY: HOOK_TYPE, HOOK_COMMAND_KEY: hook_cmd}]}
+            if event in hooks:
+                new = _json_append(new, [HOOKS_KEY, event], group)
+            else:
+                new = _json_set(new, [HOOKS_KEY, event], [group])
+            groups.append(group)
+        hooks[event] = groups
+    want[HOOKS_KEY] = hooks
+    if empty:
+        return json.dumps(want, indent=2) + "\n"
+    if new == text:
+        return None
     if json.loads(new) != want:
-        raise ValueError("could not change the statusLine alone")
+        raise ValueError("could not change fairshare's own entries alone")
     return new
 
 
@@ -689,23 +878,61 @@ def _members(text: str, start: int) -> list[tuple[str, int, int, int]]:
         i = _WS.match(text, i + 1).end()
 
 
-def _json_set(text: str, keys: list[str], value) -> str:
-    """`text` with the value at `keys` replaced, or added as the first member of the innermost
-    object that exists; every other byte stays."""
+def _elements(text: str, start: int) -> list[tuple[int, int]]:
+    """(value start, value end) of each element of the JSON array at `start`."""
+    if text[start:start + 1] != "[":
+        raise ValueError("not an array")
+    out, i = [], _WS.match(text, start + 1).end()
+    if text[i:i + 1] == "]":
+        return out
+    while True:
+        _, end = _DECODER.raw_decode(text, i)
+        out.append((i, end))
+        i = _WS.match(text, end).end()
+        if text[i:i + 1] == "]":
+            return out
+        if text[i:i + 1] != ",":
+            raise ValueError("bad array")
+        i = _WS.match(text, i + 1).end()
+
+
+def _json_set(text: str, keys: list, value) -> str:
+    """`text` with the value at `keys` (member names, or indexes of array elements that exist)
+    replaced, or added as the last member of the innermost object that exists, laid out like its
+    first member; every other byte stays."""
     start = _WS.match(text).end()
     for depth, key in enumerate(keys):
-        members = _members(text, start)
-        hit = [m for m in members if m[0] == key]
-        if not hit:
-            for k in reversed(keys[depth + 1:]):
-                value = {k: value}
-            member = f"{json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}"
-            if not members:
-                return text[:start + 1] + member + text[start + 1:]
-            lead = text[start + 1:members[0][1]]
-            return text[:members[0][1]] + member + "," + lead + text[members[0][1]:]
-        _, _, v0, v1 = hit[-1]                       # the last of duplicate keys is the one read
+        if isinstance(key, int):
+            v0, v1 = _elements(text, start)[key]
+        else:
+            members = _members(text, start)
+            hit = [m for m in members if m[0] == key]
+            if not hit:
+                for k in reversed(keys[depth + 1:]):
+                    value = {k: value}
+                member = f"{json.dumps(key)}: {json.dumps(value, ensure_ascii=False)}"
+                if not members:
+                    return text[:start + 1] + member + text[start + 1:]
+                lead = text[start + 1:members[0][1]] or " "
+                return text[:members[-1][3]] + "," + lead + member + text[members[-1][3]:]
+            _, _, v0, v1 = hit[-1]                   # the last of duplicate keys is the one read
         if depth == len(keys) - 1:
             return text[:v0] + json.dumps(value, ensure_ascii=False) + text[v1:]
         start = v0
     return text
+
+
+def _json_append(text: str, keys: list, value) -> str:
+    """`text` with `value` added as the last element of the array at `keys` (which exists), laid
+    out like its first element; every other byte stays."""
+    start = _WS.match(text).end()
+    for key in keys:
+        if isinstance(key, int):
+            start = _elements(text, start)[key][0]
+        else:
+            start = [m for m in _members(text, start) if m[0] == key][-1][2]
+    items, item = _elements(text, start), json.dumps(value, ensure_ascii=False)
+    if not items:
+        return text[:start + 1] + item + text[start + 1:]
+    lead = text[start + 1:items[0][0]]
+    return text[:items[-1][1]] + "," + lead + item + text[items[-1][1]:]

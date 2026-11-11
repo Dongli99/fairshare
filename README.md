@@ -83,6 +83,38 @@ then ranks on its snapshot alone. `usage_args` can also replace the command (a s
 a shell would, or a list), as `status_args` does for the sign-in check; without
 `--output-format json` fairshare can no longer tell whether the answer came from the model.
 
+**When an account runs out.** Several sessions on one account share its limit, and the last
+few percent can go in minutes, so fairshare does not try to hand work over before the limit.
+When Claude Code stops a turn because the account hit its limit (its `StopFailure` hook, which
+fairshare wires in the hub's settings), the session is marked as stopped, and:
+- in a session started by `fairshare`, the launcher checks that the account really is out (it
+  asks every account's usage again; a passing rate-limit error changes nothing), stops the old
+  session and shows `work hit its limit (5h resets 15:40). Continuing on play in 10 s · Enter =
+  now · c = cancel`. A new session then starts on the best account, in the same folder, with a
+  first prompt telling it which session it continues and how to read where that one stopped.
+  `c` stops there and prints how to resume the old session later (`fairshare run -a work --
+  --resume <id>`). Without a terminal it continues at once. The launcher stays in charge, so the
+  next limit is picked up the same way;
+- the status bar ends in a red `out · ! fairshare pickup` while that account cannot take work.
+  Typing `! fairshare pickup` in the session asks its launcher to move it now (no check that the
+  account is out: you asked); in a session not started by `fairshare`, it starts the
+  continuation in the background instead (`claude --bg`, on the best account that already
+  trusts the folder; Claude Code prints how to attach to it) and leaves your session alone;
+- from a terminal, `fairshare pickup <id>` (the session id or its first characters) continues a
+  recorded session in the foreground, in its folder; `--bg` does it in the background.
+
+fairshare never stops a session it did not start. `fairshare transcript <id> [--tail N]` prints
+what a recorded session said (the last 40 messages by default), words only: no tool calls,
+tool output or thinking.
+
+**Fresher usage in a session.** A snapshot's time now says when its numbers were last known to
+be current: a status bar that redraws the same numbers no longer makes them look fresh. When
+an account's numbers are older than `refresh_minutes` (default 5, at least 1; set it under
+`[policy]` in `accounts.toml`), the status bar asks Claude Code's `/usage` for them again in the
+background (one at a time per account, never slowing the bar) and shows `as of 14:05` until
+they arrive. The bar also redraws once a minute (`refreshInterval`, added to the hub's
+statusLine when it has none).
+
 **One assistant.** Every account's folder in the hub links to one shared set of settings,
 CLAUDE.md, skills, plugins, commands, agents, history, transcripts and project memory, so a
 session feels the same whichever account it runs on. Before each launch fairshare checks the
@@ -154,9 +186,9 @@ the file and line, not a traceback.
 `fairshare doctor` checks the setup and changes nothing: the `claude` command is found (with its
 version), `accounts.toml` loads, the hub is where it is configured, each account's plan exists,
 its sign-in check answers (with the date the sign-in ends), its usage probe answers (or is off)
-and its `.claude.json` still holds folder trust where fairshare expects it, the hub's statusLine still calls capture, and the `fairshare` command it calls runs.
+and its `.claude.json` still holds folder trust where fairshare expects it, the hub's statusLine still calls capture, its stop-failure hook still calls `fairshare hook`, and the `fairshare` command they call runs.
 One line per check; exit 0 when all pass. `fairshare doctor --fix` repairs what it can first
-(a moved hub, missing links, a stale usage hook), one line per fix.
+(a moved hub, missing links, a stale or missing hook), one line per fix.
 
 `fairshare uninstall` changes nothing (there is nothing to undo in your own folders): it says
 where the config, state and hub are and what the hub holds, how to remove the installed

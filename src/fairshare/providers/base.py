@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..model import Account, AccountStatus, Candidate, Capture, Window
+from ..model import Account, AccountStatus, Candidate, Capture, SessionSeen, Window
 
 
 class Provider(Protocol):
@@ -16,10 +16,36 @@ class Provider(Protocol):
     default_plan: str        # proposed at join when the sign-in check names no plan
     shared: tuple[str, ...]  # what every account shares through the hub; "x/" names a folder
     not_copied: tuple[str, ...]  # of those, what join never copies in: live state, keys
+    usage_timeout: float     # seconds read_usage waits at most
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.
         Return {} when the payload carries no usage."""
+
+    def session_of(self, raw: object) -> SessionSeen | None:
+        """The session (id, folder, transcript) the usage payload `raw` describes, else None."""
+
+    def hook_session(self, hook: str, raw: object) -> SessionSeen | None:
+        """For fairshare's hook named `hook` (`fairshare hook <name>`): the session its input
+        `raw` describes, when the input is the event that hook is wired for; else None."""
+
+    def current_session(self) -> str | None:
+        """The id of the session this process runs inside (a command run by it), else None."""
+
+    def session_pid(self) -> int | None:
+        """The process id of that session, when the provider says, else None."""
+
+    def resume_args(self, session_id: str) -> list[str]:
+        """Arguments that continue the session `session_id` in a new one."""
+
+    def background(self, account: Account, name: str, prompt: str
+                   ) -> tuple[list[str], dict[str, str]]:
+        """The command and the clean environment (as `launch`) that start a session of
+        `account` with no terminal, named `name`, whose first message is `prompt`."""
+
+    def transcript_text(self, path: Path) -> list[tuple[str, str]] | None:
+        """A session transcript's main conversation, oldest first, as ("user" | "assistant",
+        text) pairs: words only. [] when it has none; None when it cannot be read."""
 
     def launch(self, account: Account) -> tuple[list[str], dict[str, str]]:
         """The command and the complete environment that start this provider as `account`: the
@@ -106,5 +132,11 @@ class Provider(Protocol):
 
     def wire(self, text: str | None, command: str) -> str | None:
         """New text for that file so that it records usage through the shell command `command`
-        and then runs the user's own hook; None when it already does. Every byte outside the
-        hook stays. Raises ValueError for a text it cannot change safely."""
+        and then runs the user's own hook, redraws on a timer, and runs fairshare's own hooks
+        (`<command> hook <name>`); None when it already does. Every byte outside fairshare's own
+        entries stays, and no other hook is changed, moved or removed. Raises ValueError for a
+        text it cannot change safely."""
+
+    def hooked(self, text: str | None) -> tuple[str, ...] | None:
+        """The fairshare command all of fairshare's own hooks in that file's text run, else
+        None (one is missing)."""

@@ -88,6 +88,9 @@ class Fleet(unittest.TestCase):
         self.addCleanup(env.stop)
         for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC")) or k == "BROWSER"]:
             del os.environ[k]              # restored by env.stop; a surrounding session's own
+        for k in [k for k in os.environ if k.startswith("FAIRSHARE_")
+                  and k not in ("FAIRSHARE_CONFIG", "FAIRSHARE_STATE")]:
+            del os.environ[k]              # a surrounding launcher's own
         time.tzset()
         self.addCleanup(time.tzset)      # runs after env.stop restores TZ
         for tool in ("claude", "fairshare"):                                  # never the real ones
@@ -97,6 +100,9 @@ class Fleet(unittest.TestCase):
             p = mock.patch.object(cli, target, fn)
             p.start()
             self.addCleanup(p.stop)
+        p = mock.patch.object(cli, "_fairshare_argv", lambda: [str(self.bin / "fairshare")])
+        p.start()                        # a background probe starts the fake, never a real one
+        self.addCleanup(p.stop)
         self.accounts = []
         (self.tmp / "hub" / "shared").mkdir(parents=True)
         cwd = os.getcwd()                # launches run in HOME, where no trust question is asked
