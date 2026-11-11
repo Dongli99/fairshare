@@ -54,7 +54,34 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
    arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` starts the account
    `work` instead, skipping the ranking (a warning if it is near a limit); this replaces a
    per-account alias. For a shorter name, make your own alias for `fairshare`.
-5. Use each account normally for a while. Every session refreshes that account's snapshot.
+5. Use each account normally. Every launch asks each account for its usage (below), and every
+   session refreshes its account's snapshot as it goes.
+
+**Usage at launch.** `fairshare`, `fairshare run` and `fairshare status` ask Claude Code for each
+account's usage before ranking: one `claude -p "/usage"` per account, all at once, about a
+second in total. It is Claude Code's own local `/usage` command, so no model call is made and
+nothing is spent; your own hooks are switched off for it (`--settings
+'{"disableAllHooks":true}'`), so they do not run once per account at every launch. Usage spent
+anywhere (the web app, the desktop app, a session started outside fairshare) is therefore seen.
+What it means when you see:
+- `usage probe failed for <id> (<reason>); using its snapshot from 14:05`: that account could not
+  be asked (a timeout, signed out, an answer fairshare did not understand), so it is ranked on
+  what its last session recorded (or as a fresh window, with no snapshot). The launch goes on.
+- `(usage as of 14:05)` on a `status` row: those numbers are from a snapshot taken then, not
+  from this launch.
+- `warning: the usage probe for <id> ran as a model turn ...`: a Claude Code release stopped
+  treating `/usage` as a local command, so asking spends usage. fairshare does not use the
+  answer and says so every time until you turn the probe off.
+- `warning: <id>'s Fable week is spent until Thu 03:00; other models are unaffected`: a
+  per-model weekly limit is used up on the account that is starting. The ranking does not
+  change: which model you use is up to you.
+- `<id>: sign-in ends Fri 10:50; \`fairshare join <id>\` signs it in again`: that account's
+  sign-in ends within three days.
+
+To turn the probe off for an account, add `usage_args = []` to its table in `accounts.toml`; it
+then ranks on its snapshot alone. `usage_args` can also replace the command (a string, split like
+a shell would, or a list), as `status_args` does for the sign-in check; without
+`--output-format json` fairshare can no longer tell whether the answer came from the model.
 
 **One assistant.** Every account's folder in the hub links to one shared set of settings,
 CLAUDE.md, skills, plugins, commands, agents, history, transcripts and project memory, so a
@@ -126,8 +153,8 @@ the file and line, not a traceback.
 
 `fairshare doctor` checks the setup and changes nothing: the `claude` command is found (with its
 version), `accounts.toml` loads, the hub is where it is configured, each account's plan exists,
-its sign-in check answers and its `.claude.json` still holds folder trust where fairshare
-expects it, the hub's statusLine still calls capture, and the `fairshare` command it calls runs.
+its sign-in check answers (with the date the sign-in ends), its usage probe answers (or is off)
+and its `.claude.json` still holds folder trust where fairshare expects it, the hub's statusLine still calls capture, and the `fairshare` command it calls runs.
 One line per check; exit 0 when all pass. `fairshare doctor --fix` repairs what it can first
 (a moved hub, missing links, a stale usage hook), one line per fix.
 
@@ -136,9 +163,10 @@ where the config, state and hub are and what the hub holds, how to remove the in
 fairshare (`pipx uninstall fairshare`), and gives you a prompt for your own agent to merge the
 hub's history back into your own folders.
 
-Usage comes from Claude Code's documented statusLine input, so fairshare needs no tokens, no
-endpoint access and no keychain. A snapshot is only as fresh as that account's last session;
-a window past its reset time is treated as unused.
+Usage comes from Claude Code's own `/usage` command at launch and its documented statusLine
+input during a session, so fairshare needs no tokens, no endpoint access and no keychain. A
+window past its reset time is treated as unused. A session's status bar also shows a per-model
+weekly limit once it is nearly used up (`Fable 96% (Thu 03:00)`).
 
 ## Adding a provider or plan
 

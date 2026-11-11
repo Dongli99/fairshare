@@ -37,6 +37,7 @@ class Account:
     plan: Plan | None              # None: the configured plan has no plan file (see plan_error)
     config_dir: Path
     status_args: tuple[str, ...] | None = None   # overrides the provider's sign-in check command
+    usage_args: tuple[str, ...] | None = None    # overrides its usage probe; () turns it off
     capacity: float | None = None  # the account's own override; it survives plan detection
     plan_error: str | None = None  # why `plan` is None: the account is left out of ranking
     browser: str | None = None     # how its sign-in link opens (`browser.parse`); None: default
@@ -49,6 +50,29 @@ class AccountStatus:
     usable: bool                  # a subscription login (the provider's own kind), not an API key
     identity: str | None = None   # opaque: equal identities share one quota
     plan: str | None = None       # a fairshare plan name, None when the provider's maps to none
+    expires_at: float | None = None   # when the sign-in ends (unix seconds), when the provider says
+
+
+# Why a usage probe read nothing: short and value-free. A provider may add a detail after
+# USAGE_NO_ANSWER only (`no answer: timed out`); the CLI tells USAGE_MODEL_TURN apart (it spends
+# usage, so it is said loudly).
+USAGE_NO_ANSWER = "no answer"
+USAGE_SIGNED_OUT = "not signed in"
+USAGE_NOT_UNDERSTOOD = "not understood"
+USAGE_MODEL_TURN = "ran as a model turn"
+
+MODEL_WINDOW_SEP = ":"
+
+
+def model_window(long_name: str, model: str) -> str:
+    """The snapshot key of a per-model week (`seven_day:Fable`): kept beside the plan's windows,
+    never read by the policy."""
+    return f"{long_name}{MODEL_WINDOW_SEP}{model}"
+
+
+def window_model(key: str) -> str | None:
+    """The model a snapshot key names a week for, else None (a plan window)."""
+    return key.partition(MODEL_WINDOW_SEP)[2] or None
 
 
 @dataclass(frozen=True)
@@ -141,11 +165,16 @@ def _account(a: dict, hub: Path) -> Account:
     provider = a.get("provider") or (plan.provider if plan else _sole_provider())
     if not provider:
         raise ValueError(f"{error}, and no provider is named")
-    args = a.get("status_args")
+    args, usage = a.get("status_args"), a.get("usage_args")
+    if isinstance(usage, list) and not all(isinstance(x, str) for x in usage):
+        raise ValueError("usage_args must be a string or a list of strings")
     if (spec := a.get("browser")) is not None:
         browser.parse(spec)                  # raises ValueError saying what is accepted
     return Account(a["id"], provider, plan, hub / "accounts" / a["id"],
-                   tuple(shlex.split(args)) if args else None, capacity, error, spec)
+                   tuple(shlex.split(args)) if args else None,
+                   None if usage is None else tuple(usage if isinstance(usage, list)
+                                                    else shlex.split(usage)),
+                   capacity, error, spec)
 
 
 def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:

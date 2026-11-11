@@ -68,7 +68,8 @@ class UnknownPlan(Fleet):
         lines = out.splitlines()
         self.assertEqual(code, 1)
         self.assertIn(f"FAIL  b: {self.reason}", lines)
-        self.assertIn("pass  a: sign-in check answers: signed in, plan claude-pro", lines)
+        self.assertIn("pass  a: sign-in check answers: signed in until 2030-01-02, plan claude-pro",
+                      lines)
         self.assertIn("pass  claude: usage hook in the hub calls fairshare capture", lines)
 
     def test_capture_keeps_recording_for_every_account_the_broken_one_included(self):

@@ -27,9 +27,21 @@ EMAIL, ORG = "someone@example.invalid", "11111111-1111-4111-8111-111111111111"
 
 FAKE_CLAUDE = """#!/bin/sh
 # Serves $FAKE_AUTH/<basename of CLAUDE_CONFIG_DIR>.json, exiting with the code in the .exit file
-# beside it (0 without one), and records how it was called.
+# beside it (0 without one), and records how it was called. The usage probe (last argument
+# /usage) is logged on its own, to usage-<name> and usage-env-<name>, and answered from
+# <name>.usage (exit code in
+# <name>.usage-exit); with no such file it fails (exit 1, no output), so a test that serves no
+# usage sees the snapshots it wrote, plus one "usage probe failed" line per account.
 [ "$1" = "--version" ] && { echo "9.9.9 (Fake Code)"; exit 0; }
 name=$(basename "$CLAUDE_CONFIG_DIR")
+for last; do :; done
+if [ "$last" = "/usage" ]; then
+  printf '%s\\n' "$@" >> "$FAKE_LOG/usage-$name"
+  env > "$FAKE_LOG/usage-env-$name"
+  [ -n "$FAKE_USAGE_SLEEP" ] && exec sleep "$FAKE_USAGE_SLEEP"
+  [ -f "$FAKE_AUTH/$name.usage" ] || exit 1
+  cat "$FAKE_AUTH/$name.usage"; exit "$(cat "$FAKE_AUTH/$name.usage-exit" 2>/dev/null || echo 0)"
+fi
 printf '%s\\n' "$@" > "$FAKE_LOG/args-$name"
 env > "$FAKE_LOG/env-$name"
 [ -n "$FAKE_SLEEP" ] && exec sleep "$FAKE_SLEEP"
@@ -105,6 +117,11 @@ class Fleet(unittest.TestCase):
         (self.tmp / "accounts.toml").write_text(f'hub = "{self.tmp / "hub"}"\n\n'
                                                 + "\n".join(self.accounts))
         return d
+
+    def serve_usage(self, id, name="usage-week-hot.json", code=0):
+        """Have the fake claude answer account `id`'s usage probe with a recorded answer."""
+        (self.auth / f"{id}.usage").write_text((self.version / name).read_text())
+        (self.auth / f"{id}.usage-exit").write_text(str(code))
 
     def snap(self, id, five=None, seven=None, at=NOW):
         w = {}

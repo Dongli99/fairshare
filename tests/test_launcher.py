@@ -200,6 +200,8 @@ class Doctor(Fleet):
     def healthy(self):
         self.add("a", orgId=ORG + "a")
         self.add("b", orgId=ORG + "b")
+        self.serve_usage("a")
+        self.serve_usage("b")
         self.wire(f"{self.bin}/fairshare capture")
 
     def test_everything_passing_exits_0_with_one_line_per_check(self):
@@ -208,9 +210,11 @@ class Doctor(Fleet):
         self.assertEqual(code, 0, lines)
         self.assertEqual(lines, [
             "pass  claude: command found, version 9.9.9 (Fake Code)",
-            "pass  a: sign-in check answers: signed in, plan claude-pro",
+            "pass  a: sign-in check answers: signed in until 2030-01-02, plan claude-pro",
+            "pass  a: usage probe answers (five_hour, seven_day, 1 model week), local command",
             "pass  a: no state file yet",
-            "pass  b: sign-in check answers: signed in, plan claude-pro",
+            "pass  b: sign-in check answers: signed in until 2030-01-02, plan claude-pro",
+            "pass  b: usage probe answers (five_hour, seven_day, 1 model week), local command",
             "pass  b: no state file yet",
             "pass  claude: usage hook in the hub calls fairshare capture",
             "pass  fairshare command (called by the claude usage hook) runs"])
@@ -230,7 +234,8 @@ class Doctor(Fleet):
         self.wire(f"{self.bin}/fairshare capture")
         code, lines = self.lines()
         self.assertEqual(code, 1)
-        self.assertIn("pass  a: sign-in check answers: signed in, plan claude-pro", lines)
+        self.assertIn("pass  a: sign-in check answers: signed in until 2030-01-02, plan claude-pro",
+                      lines)
         self.assertIn("FAIL  b: sign-in check gave no answer", lines)
 
     def test_a_signed_out_account_still_answers(self):
@@ -265,6 +270,7 @@ class Doctor(Fleet):
 
     def test_the_older_command_form_is_checked_too(self):
         self.add("a", orgId=ORG + "a")
+        self.serve_usage("a")
         self.wire(f"{sys.executable} -I -c 'import sys; sys.exit(0)  # fairshare' capture a")
         code_, lines = self.lines()
         self.assertEqual(code_, 0, lines)

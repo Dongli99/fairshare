@@ -2,12 +2,13 @@
 
 ```
 statusLine / provider output ──► providers/<p>.parse_capture ──► store (snapshot per account)
+providers/<p>.read_usage (status, run: every account, in parallel) ──►┤ (same merge)
                                                                    │
 accounts.toml ──► model.load_accounts ───────────────┐             ▼
 plans/*.toml  ──► model.load_plan                    └──► policy.rank(accounts, snapshots, now)
                                                                    ▲   │
 providers/<p>.account_status (once per command, in parallel) ──────┘   │
-   signed in? subscription? same login as another folder? plan?        ▼
+   signed in? subscription? same login as another folder? plan? ends?  ▼
                                                   cli: status | run ◄──┘
                                                        run ──► hub.present (else stop: moved?)
                                                            ──► providers/<p>.trusts / trust (ask)
@@ -70,8 +71,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      `plans/*.toml`. Adding, removing or renaming a subscription is a plan-file change only, and a
      plan may omit `[windows.short]` (it then ranks on the weekly window alone). The window names
      a usage payload may carry are read from the plan files too;
-   - per-model limits are not plan data: they will come from the provider's usage report, for
-     whatever plan reports them.
+   - per-model limits are not plan data: they come from the provider's usage report (decision
+     18), for whatever plan reports them.
 
    The "Public surface" table below lists every outside fact fairshare depends on today.
 
@@ -171,8 +172,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      the file changed after the user was asked, it shows the new list and asks again.
 
 10. **Ask the provider who is signed in.** `Provider.account_status(account)` returns a neutral
-    `AccountStatus` (`logged_in`, `usable`, `identity`, `plan`) or `None` when the question could
-    not be answered. For Claude Code it runs the installed binary as `claude auth status --json`
+    `AccountStatus` (`logged_in`, `usable`, `identity`, `plan`, `expires_at`) or `None` when the
+    question could not be answered. For Claude Code it runs the installed binary as `claude auth status --json`
     with the account's `CLAUDE_CONFIG_DIR`, at most 5 s, in an environment scrubbed of every
     variable that could pick another login or carry another session's state
     (`claude.clean_env`, which the launcher reuses). Verified on Claude Code 2.1.321 (2026-11-09):
@@ -182,7 +183,13 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     tested against recorded outputs in `tests/fixtures/<version>/`. A new Claude Code version means
     a new fixture folder, not new test code. Everything is held in memory: `identity` is a hash of
     org id and email, used only to tell whether two folders are one login; the email, org id and
-    org name are never printed or stored. How the answer is used, in each of `status` and `run`:
+    org name are never printed or stored. `expires_at` is `loginExpiresAt` (an ISO time; absent,
+    null or without a zone gives None, silently): `run`, `run -a` and `status` print
+    `<id>: sign-in ends <day> <time>; \`fairshare join <id>\` signs it in again` for a signed-in
+    account whose sign-in ends within `LOGIN_WARN_DAYS` (3, in `cli.py`), and `doctor`'s sign-in
+    line adds `until <local date>`. The usage probe's envelope carries the same time
+    (`credential_expires_at`); it is not read: one source. How the answer is used, in each of
+    `status` and `run`:
     - not signed in, or not a subscription login (`authMethod` other than `claude.ai`): left out
       of the ranking; `status` says why, `run` prints one line;
     - several folders with one identity are one quota: ranked once, by the member with the
@@ -262,7 +269,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     adapter); `accounts.toml` loads (a config error is one FAIL line with the file's name and the
     reason, never a traceback); the hub is at its configured path (when not, one FAIL line and no
     sign-in check, which would create folders at the old path); each account's plan exists, its
-    sign-in check answers, and its state file reads and, when it holds project entries, at least
+    sign-in check answers (with the sign-in's end date when known), its usage probe answers
+    (decision 18: the window names it read and a count of model weeks, never a value; FAIL with
+    the reason; `usage probe off (usage_args = [])` passes), and its state file reads and, when
+    it holds project entries, at least
     one uses the trust field (otherwise "trust field not found; Claude Code may have renamed
     it"); the hub's one settings file still calls capture; the `fairshare` command it calls
     exists and runs (`--help`; with no hook wired, the installed one). It reads settings and
@@ -347,10 +357,76 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     fixed. With no terminal and no `--hub`, it fixes what needs no answer and lists the rest
     (exit 1).
 
+18. **Usage at launch.** A snapshot moves only while a session on that account exchanges
+    messages, so usage spent elsewhere (the web app, the desktop app, a session outside the hub)
+    was invisible and an idle account's snapshot could be days old. Now `status`, `run` and
+    `run -a` ask the provider for every account's usage, every time
+    (`Provider.read_usage(account, now)`), in the same thread pool as the sign-in checks: the
+    added wait is the slowest answer, not their sum. For Claude Code it is the tool's own
+    `/usage`: `claude -p --no-session-persistence --output-format json --settings
+    '{"disableAllHooks":true}' /usage` (`USAGE_ARGS`), run like the sign-in check (clean
+    environment, stdin from /dev/null, the default folder without the folder variable, in the
+    launch's folder), at most `USAGE_TIMEOUT` (6 s; measured 1.1-2.4 s). Verified on 2.1.322
+    (2026-11-11): a local command, no model call (`local_command: "usage"`, `num_turns: 0`, zero
+    cost and tokens), no transcript, nothing added to history.
+    - **Every time.** There is no "skip when the snapshot is minutes old": a snapshot's time
+      moves whenever a redraw carries an equal value (`store.merge` takes equal values), so an
+      idle session redrawing old numbers makes a stale snapshot look fresh.
+    - **Hooks off.** `-p` fires the user's SessionStart and SessionEnd hooks, once per account
+      per launch. `disableAllHooks` through `--settings` stops them, and beats a folder's own
+      `settings.json` that sets it false (verified 2.1.322, 2026-11-11).
+    - **Recorded like a capture.** Each answer's windows go through `store.record` (same lock,
+      same merge: a lower value for the same window is still refused, since usage never falls
+      within one window). Then the snapshots are loaded and ranked as before; the policy does not
+      change. Twins (one login in several folders) are each probed. `doctor` probes and records
+      nothing. `run`'s wait loop re-surveys after each sleep, so it probes again at the reset.
+    - **Parsing.** Only lines starting with a known label are read (`USAGE_SESSION`,
+      `USAGE_WEEK`, `USAGE_MODEL_WEEK`): `N% used · resets <when>`, extra spaces and a missing
+      "used" tolerated. `<when>` is `Mon D at H[:MM]am|pm (Zone/Name)` (2.1.322) or a bare
+      `H[:MM]am|pm` (2.1.321); a named zone is read with `zoneinfo`, an unknown or missing one as
+      local time. There is no year: the first candidate after `now - SAME_WINDOW_S`, so a
+      printed minute that jitters past the reset is not taken for next year's (or, for a bare
+      clock time, tomorrow's). A line whose reset cannot be read is dropped: a window without
+      one is useless to the policy. The session and all-models lines map to `five_hour` and
+      `seven_day`, checked against the plan files as `parse_capture` does. The rest of the text
+      (tips with local paths) is never parsed or kept.
+    - **Per-model weeks** (`Current week (Fable)`) are kept under `model.model_window`'s key
+      (`seven_day:Fable`), for any plan. The policy never reads them (owner decision,
+      2026-11-09: model choice is not fairshare's business). When the chosen account's is at or
+      above `long_exhausted_pct` and not reset, `run` and `run -a` print `warning: <id>'s <model>
+      week is spent until <time>; other models are unaffected` and `status` shows it under the
+      row. The bar shows one only at or above `short_hot_pct`, labelled by the model (`Fable 96%
+      (Thu 03:00)`).
+    - **The model-turn guard.** If a release stopped treating `/usage` as a local command, `-p
+      "/usage"` would become a prompt and spend usage on every launch for every account. The JSON
+      envelope shows it (`num_turns` or `total_cost_usd` above 0; a missing or other
+      `local_command` alone is only "not understood", since an error answer may lack it): no
+      windows are taken and `run`/`status` print one loud line each time naming `usage_args = []`
+      as the way to stop it. There is no automatic off switch: the override is the off switch.
+    - **Fallbacks.** A probe that fails (no answer: timed out, an exit code, no output, an error
+      envelope; not signed in: the signed-out folder's cost summary; not understood: no window
+      line) never stops a launch: `run` prints `usage probe failed for <id> (<reason>); using its
+      snapshot from <time>` (or `no snapshot; ranked as a fresh window`, decision 6) for each
+      ranked account, and `status` shows it under the row. A row whose numbers did not come from
+      this run's probe shows `(usage as of <time>)`, the snapshot's `captured_at`.
+    - **Override.** `usage_args` in an account's table, like `status_args`: a string split like
+      a shell would, or a list of strings. `usage_args = []` turns the probe off for that
+      account (no call, no failure line). Plain text without the envelope is parsed too, so an
+      override without `--output-format json` still works, but then the model-turn guard is
+      blind.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
-- A snapshot's age is never read, so a stale snapshot is trusted until its windows reset.
+- A snapshot's age is read only to show it (`usage as of`); an account whose probe is off or
+  failing is ranked on its snapshot until its windows reset.
+- The usage probe's reset minute is approximate (it was seen to differ by a minute between runs
+  and from the statusLine's exact `resets_at`), and its zone is as printed: an unknown zone is
+  read as local time. Per-model weeks come only from the probe; the statusLine never carries
+  them.
+- The usage probe's "not signed in" is read from the cost summary a signed-out folder prints
+  instead; an API-key login presumably prints the same (not verified), but such an account is
+  already left out by the sign-in check.
 - Idle sessions redraw their statusLine with old values. Within one window (reset times within
   an hour of each other) a lower used % is treated as stale and the stored one kept, so usage
   cannot roll back; an idle redraw of unchanged values still counts as fresh.
@@ -392,8 +468,6 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   child; a real terminal (interactive shell in a pty) was checked by hand once, 2026-11-09.
 - Plan detection has seen only Claude Pro: the `"max"` and `"ultra"` names are unverified; an
   unmatched value leaves the plan in `accounts.toml`.
-- Per-model weekly limits (e.g. a Fable week, seen on Pro as well) are not read yet; they will
-  come from the provider's usage report for whatever plan reports them, never from plan data.
 - The sign-in check relies on `claude auth status --json` (Claude Code 2.1.322). If a release
   changes it, the check fails soft (see decision 10) until a fixture and the parser follow.
 - `claude --version` (for `doctor`) and the usage hook have not been checked against a recorded
@@ -432,7 +506,11 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Version: `--version` | `VERSION_ARGS`, `version` | `doctor` prints "version unknown" | 2.1.322, 2026-11-09 (prints `2.1.322 (Claude Code)`) |
 | Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | 2.1.321, 2026-11-09 (sign-in, sign-out and usage per folder, independently) |
 | Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_MARK_ENV`, `WATCH_ENV_PREFIX`, `passed_session_vars` | a variable missing from the lists reaches the child: add it (inside a session the launcher names unlisted `CLAUDE_*` ones) | session variables 2.1.322, 2026-11-09 (the names a running session injects into its children; inherited, they stop the child saving a transcript; scrubbing fixes it); login-override variables not tested live |
-| Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `wired`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
+| Usage probe: `-p --no-session-persistence --output-format json /usage`, with `--settings '{"disableAllHooks":true}'` | `USAGE_ARGS` (per account `usage_args`), `USAGE_TIMEOUT`, `read_usage` | the probe fails soft (decision 18): the snapshot is used, one line per account; `doctor` fails | 2.1.322, 2026-11-11: signed in (planner, both accounts): exit 0 in 1.1-1.5 s, stderr empty, no model call, no transcript, no history line, no `projects` entry in the state file; hooks fire without the setting and not with it. Signed out (throwaway folder, temp HOME): exit 0, envelope with `is_error` false, `local_command` `usage` and a cost summary as `result`, no `credential_expires_at`, stderr empty; it creates the state file, `backups/`, `sessions/`, `plugins/store/` and an empty `projects/<folder>/memory/` there. Next to a folder `settings.json` with `disableAllHooks: false` and marker SessionStart/SessionEnd hooks: both fired without `--settings`, neither with it (command-line settings win) |
+| Usage probe envelope: `result`, `is_error`, `local_command` (`usage`), `num_turns`, `total_cost_usd` | `USAGE_RESULT`, `USAGE_IS_ERROR`, `USAGE_LOCAL`, `USAGE_LOCAL_NAME`, `USAGE_TURNS`, `USAGE_COST` | turns or cost above 0 reads as "ran as a model turn": nothing taken, a loud line, `usage_args = []` named; an error answer is "no answer", a missing or other `local_command` "not understood" (neither proves the model ran) | 2.1.322, 2026-11-11 (`tests/fixtures/claude-2.1.322/usage-week-hot.json`, `usage-logged-out.json`) |
+| Usage probe text: `Current session`, `Current week (all models)`, `Current week (<model>)`; `N% used · resets Mon D at H[:MM]am\|pm (Zone/Name)` (U+00B7), or a bare `H[:MM]am\|pm`; the signed-out `Total cost:` summary | `USAGE_SESSION`, `USAGE_WEEK`, `USAGE_MODEL_WEEK`, `USAGE_WINDOWS`, `USAGE_MONTHS`, `USAGE_COST_VIEW`, `parse_usage` | an unread line is dropped; no window line at all reads as "not understood" (the snapshot is used) | dated form 2.1.322, 2026-11-11 (fixtures `usage.txt`, `usage-week-hot.txt`; the minute jitters by one); clock-only form 2.1.321, 2026-11-09 (notes only, no fixture) |
+| Sign-in end: `loginExpiresAt` in `auth status --json` | `STATUS_EXPIRES`, `parse_account_status` | no expiry warning, no date in `doctor` | 2.1.321, 2026-11-09 and 2.1.322, 2026-11-11 (equal to the usage envelope's `credential_expires_at` for the same folder; null when signed out) |
+| Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `wired`, `parse_capture` | sessions record nothing (the launch probe still does); `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
 | Share list: observed `projects/`, `history.jsonl`, `file-history/`, `paste-cache/`, `plugins/`, `skills/`, `tasks/`, `settings.json`, `sessions/`; documented user-level `CLAUDE.md`, `agents/`, `commands/`, `output-styles/`, `keybindings.json`, `rules/`, `workflows/`, `agent-memory/`, `themes/` | `SHARED` | an item missing from the list stays per account; one renamed leaves a stale link (harmless); `NOT_COPIED` (`sessions/`) is shared but never seeded | observed: 2.1.322 (real config dirs); documented: code.claude.com/docs/en/claude-directory, read 2026-11-09 (the last four, "Project and global" or "Global only" in its file reference: `rules/*.md`, `workflows/*.js`, `agent-memory/<name>/`, `themes/*.json`, read 2026-11-10) |
 | Settings written through a symlinked `settings.json` | `SHARED` (the start check repairs either way) | a replaced link is repaired at the next launch, the difference shown | 2.1.322, 2026-11-09 (throwaway folder, first-run theme picker: link kept, target rewritten) |
 | `history.jsonl` written through a link | `SHARED` | as above (lines merged) | not provoked: needs a login |
@@ -473,5 +551,4 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 
 ## Not built yet
 
-OpenAI/Codex adapter · stale-snapshot warning in `status` ·
-mid-session handover · packaging for Homebrew.
+OpenAI/Codex adapter · mid-session handover · packaging for Homebrew.

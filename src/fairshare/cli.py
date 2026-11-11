@@ -13,14 +13,15 @@ import sys
 import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import browser
 from . import hub as hub_mod
 from . import providers, session, store
-from .model import (ACCOUNT_ID, DEFAULT_HUB, Account, AccountStatus, ConfigError, Snapshot, Tuning,
-                    load_accounts, load_plan, with_account, with_hub, without_account)
+from .model import (ACCOUNT_ID, DEFAULT_HUB, USAGE_MODEL_TURN, Account, AccountStatus, ConfigError,
+                    Snapshot, Tuning, Window, load_accounts, load_plan, window_model, with_account,
+                    with_hub, without_account)
 from .policy import HOUR, Verdict, prefer, rank
 
 
@@ -50,6 +51,31 @@ def _probe(accounts: list[Account]) -> list[AccountStatus | None]:
         return list(pool.map(lambda a: providers.get(a.provider).account_status(a), accounts))
 
 
+def _check(accounts: list[Account], now: float
+           ) -> list[tuple[AccountStatus | None, dict[str, Window] | str | None]]:
+    """Ask every account's provider who is signed in and what it has used, all at once: the wait
+    is the slowest answer, not their sum. Per account: its status, and its usage (windows, a
+    reason it could not be read, or None when the account turned the probe off)."""
+    if not accounts:
+        return []
+    with ThreadPoolExecutor(2 * len(accounts)) as pool:
+        asked = [(pool.submit(providers.get(a.provider).account_status, a),
+                  pool.submit(providers.get(a.provider).read_usage, a, now)) for a in accounts]
+        return [(st.result(), use.result()) for st, use in asked]
+
+
+def _record_usage(acct: Account, use: dict[str, Window] | str | None, now: float) -> str | None:
+    """Record a probe's windows in the account's snapshot (same lock and merge as capture). Why
+    its numbers did not come from the probe, or None when they did (or the probe is off)."""
+    if not isinstance(use, dict):
+        return use
+    try:
+        store.record(acct.id, use, now)
+    except OSError as e:
+        return f"not recorded: {e.strerror or type(e).__name__}"
+    return None
+
+
 @dataclass
 class Survey:
     verdicts: list[Verdict]                  # ranked, one per quota
@@ -61,6 +87,9 @@ class Survey:
     tuning: Tuning
     now: float
     preference: tuple[str, float] | None = None   # the user's (account id, until), if any
+    usage: dict[str, str | None] = field(default_factory=dict)   # probed ids: None = answered,
+                                                                 # else why it failed
+    expires: dict[str, float] = field(default_factory=dict)      # signed-in ids: sign-in's end
 
 
 def _with_detected_plan(a: Account, plan_name: str) -> Account:
@@ -98,11 +127,12 @@ def _survey() -> Survey:
     accounts, tuning, hub = _load()
     _require_hub(hub)
     now = _now()
-    snaps = {a.id: s for a in accounts if (s := store.load(a.id))}
-    live, twins, notes, failed = [], [], {}, []
+    live, twins, notes, failed, usage, expires = [], [], {}, [], {}, {}
     out = [(a, a.plan_error) for a in accounts if a.plan is None]     # no plan file: not ranked
     planned = [a for a in accounts if a.plan is not None]
-    for a, st in zip(planned, _probe(planned)):
+    for a, (st, use) in zip(planned, _check(planned, now)):
+        if use is not None:
+            usage[a.id] = _record_usage(a, use, now)
         if st is None:
             failed.append(a.id)
             if why := _unconfirmed(a):
@@ -122,7 +152,10 @@ def _survey() -> Survey:
             if st.plan and st.plan != a.plan.name:
                 notes[a.id] = [f"plan {a.plan.name} in config, detected {st.plan}"]
                 a = _with_detected_plan(a, st.plan)
+            if st.expires_at is not None:
+                expires[a.id] = st.expires_at
             live.append((a, st))
+    snaps = {a.id: s for a in accounts if (s := store.load(a.id))}    # with this run's probes
     # One login in several folders is one quota: rank it once, by its freshest snapshot.
     ranked, seen = [], {}
     for a, st in sorted(live, key=lambda x: x[0].id):
@@ -140,7 +173,7 @@ def _survey() -> Survey:
     verdicts = rank(ranked, snaps, now, tuning)
     if pref := store.preference(now):
         verdicts = prefer(verdicts, pref[0])
-    return Survey(verdicts, out, twins, notes, failed, snaps, tuning, now, pref)
+    return Survey(verdicts, out, twins, notes, failed, snaps, tuning, now, pref, usage, expires)
 
 
 def _in(h: float | None) -> str:
@@ -152,6 +185,57 @@ def _clock(t: float, now: float) -> str:
     on a line that is not redrawn."""
     lt = time.localtime(t)
     return time.strftime("%H:%M" if lt[:3] == time.localtime(now)[:3] else "%a %H:%M", lt)
+
+
+def _day_clock(t: float) -> str:
+    """A local clock time, always with the day name."""
+    return time.strftime("%a %H:%M", time.localtime(t))
+
+
+LOGIN_WARN_DAYS = 3        # a sign-in ending this soon is named at every run and status
+
+
+def _expiry_lines(expires: dict[str, float], now: float) -> dict[str, str]:
+    """For each account whose sign-in ends within LOGIN_WARN_DAYS: one line saying when, and the
+    fix."""
+    return {i: f"{i}: sign-in ends {_day_clock(t)}; `fairshare join {i}` signs it in again"
+            for i, t in expires.items() if t - now < LOGIN_WARN_DAYS * 24 * HOUR}
+
+
+def _probe_line(acct_id: str, reason: str, snap: Snapshot | None, now: float) -> str:
+    """What a failed usage probe means for the ranking. A probe that ran as a model turn spent
+    usage, so it says so loudly, every time, with the way to stop it."""
+    where = (f"using its snapshot from {_clock(snap.captured_at, now)}" if snap
+             else "no snapshot; ranked as a fresh window")
+    if reason == USAGE_MODEL_TURN:
+        return (f"warning: the usage probe for {acct_id} ran as a model turn and may spend usage "
+                f"at every launch; its answer is not used, {where}; set `usage_args = []` in "
+                f"{acct_id}'s accounts.toml table to stop it")
+    return f"usage probe failed for {acct_id} ({reason}); {where}"
+
+
+def _probe_lines(s: Survey) -> dict[str, str]:
+    """A line for each ranked account whose usage probe failed."""
+    return {v.account.id: _probe_line(v.account.id, why, s.snaps.get(v.account.id), s.now)
+            for v in s.verdicts if (why := s.usage.get(v.account.id))}
+
+
+def _age(s: Survey, acct_id: str) -> str:
+    """For a row whose numbers did not come from this run's probe: how old they are."""
+    snap = s.snaps.get(acct_id)
+    if not snap or (acct_id in s.usage and s.usage[acct_id] is None):
+        return ""
+    return f"  (usage as of {_clock(snap.captured_at, s.now)})"
+
+
+def _spent_models(acct_id: str, snap: Snapshot | None, t: Tuning, now: float) -> list[str]:
+    """A warning for each per-model week of the account that is spent and not yet reset. It
+    changes nothing in the ranking: model choice is the user's."""
+    return [f"warning: {acct_id}'s {model} week is spent until {_clock(w.resets_at, now)}; "
+            "other models are unaffected"
+            for k, w in sorted((snap.windows if snap else {}).items())
+            if (model := window_model(k)) and w.used_pct >= t.long_exhausted_pct
+            and w.resets_at > now]
 
 
 def _usable(v: Verdict, now: float) -> str:
@@ -177,14 +261,17 @@ def cmd_status(_a) -> int:
     s = _survey()
     if s.preference and not _honoured(s):
         print(_preference_note(s))
+    probes, expiring = _probe_lines(s), _expiry_lines(s.expires, s.now)
     for i, v in enumerate(s.verdicts):
-        mark = ">" if i == 0 else " "
+        mark, aid = (">" if i == 0 else " "), v.account.id
         flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
         if i == 0 and _honoured(s):
             flag = f"  [preferred until {_clock(s.preference[1], s.now)}]"
-        print(f"{mark} {v.account.id:<12} {v.account.plan.name:<14} score {v.score:6.2f}  "
-              f"{v.reason}{flag}")
-        for note in s.notes.get(v.account.id, []):
+        print(f"{mark} {aid:<12} {v.account.plan.name:<14} score {v.score:6.2f}  "
+              f"{v.reason}{_age(s, aid)}{flag}")
+        for note in [*s.notes.get(aid, []), *([probes[aid]] if aid in probes else []),
+                     *_spent_models(aid, s.snaps.get(aid), s.tuning, s.now),
+                     *([expiring[aid]] if aid in expiring else [])]:
             print(f"    {note}")
     for a, why in s.out:
         print(f"  {a.id:<12} {a.plan.name if a.plan else '-':<14} left out: {why}")
@@ -192,6 +279,8 @@ def cmd_status(_a) -> int:
             print(f"    {note}")
     for a, rep in s.twins:
         print(f"  {a.id:<12} {a.plan.name:<14} same login as {rep}")
+        if a.id in expiring:
+            print(f"    {expiring[a.id]}")
     return 0
 
 
@@ -225,15 +314,18 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
     at the hot mark turns yellow, red once spent, and shows when it resets: a tight account
     about to reset is still worth using. A window the plan has but whose usage is unknown (none
     seen yet, or reset since: nothing is known until the next exchange) shows `-`, so the line
-    keeps its shape. A session's first redraws carry no usage yet, so the saved snapshot stands
-    in, marked with when it was taken."""
+    keeps its shape. A per-model week shows only once hot, named by its model (`Fable 96%`). A
+    session's first redraws carry no usage yet, so the saved snapshot stands in, marked with
+    when it was taken."""
     p = acct.plan
     hours = {p.short_name: p.short_hours, p.long_name: p.long_hours} if p else {}
     known = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > now}
-    names = [k for k in hours if k] + [k for k in known if k not in hours]
+    names = [k for k in hours if k] + [k for k in known if k not in hours and (
+        not window_model(k) or known[k].used_pct >= t.short_hot_pct)]
     parts = [acct.id]
-    for k in sorted(names, key=lambda k: hours.get(k) or 0):
-        label, w = _span(hours[k]) if hours.get(k) else k, known.get(k)
+    for k in sorted(names, key=lambda k: (bool(window_model(k)), hours.get(k) or 0)):
+        label = _span(hours[k]) if hours.get(k) else window_model(k) or k
+        w = known.get(k)
         if w is None:
             parts.append(f"{label} -")
             continue
@@ -402,7 +494,8 @@ def _run_account(account_id: str, args: list[str]) -> int:
         _say(f"{acct.id}: {acct.plan_error}")
         return 1
     _require_hub(hub)
-    st = providers.get(acct.provider).account_status(acct)
+    prov = providers.get(acct.provider)
+    ((st, use),) = _check([acct], _now())
     if st is None:
         if why := _unconfirmed(acct):
             _say(f"{acct.id}: {why}")
@@ -417,18 +510,27 @@ def _run_account(account_id: str, args: list[str]) -> int:
                 return 1
             if (st := _resign(acct, accounts, hub)) is None:
                 return 1
+            use = prov.read_usage(acct, _now())           # the first answer was signed out
         if not st.usable:
             _say(f"{acct.id} is not a subscription login")
             return 1
         if st.plan and st.plan != acct.plan.name:
             acct = _with_detected_plan(acct, st.plan)
+        if line := _expiry_lines({acct.id: st.expires_at} if st.expires_at else {},
+                                 _now()).get(acct.id):
+            _say(line)
     now = _now()
+    why = _record_usage(acct, use, now)
     snaps = {acct.id: s} if (s := store.load(acct.id)) else {}
+    if why:
+        _say(_probe_line(acct.id, why, snaps.get(acct.id), now))
     v = rank([acct], snaps, now, tuning)[0]
     if v.eligible:
         _grace_warning(v, snaps, tuning, now)
     else:
         _say(f"warning: {acct.id} is near a limit: {v.reason}; {_usable(v, now)}")
+    for line in _spent_models(acct.id, snaps.get(acct.id), tuning, now):
+        _say(line)
     return _launch(v, args, explicit=True)
 
 
@@ -445,17 +547,22 @@ def cmd_run(a) -> int:
                      + " signs " + ("it" if len(signed_out) == 1 else "them") + " in again")
             if fallback := [v.account.id for v in s.verdicts if v.account.id in s.failed]:
                 _say(f"sign-in check failed for {', '.join(fallback)}; {FALLBACK}")
+            for line in [*_probe_lines(s).values(), *_expiry_lines(s.expires, s.now).values()]:
+                _say(line)
             if note := _preference_note(s):
                 _say(note)
             _nothing_to_rank(s)
             top = s.verdicts[0]
+            spent = _spent_models(top.account.id, s.snaps.get(top.account.id), s.tuning, s.now)
             if top.eligible:
                 _grace_warning(top, s.snaps, s.tuning, s.now)
+                for line in spent:
+                    _say(line)
                 return _launch(top, a.args)
             _say("no account is eligible:")
             for v in s.verdicts:
-                print(f"  {v.account.id:<12} {v.reason}; {_usable(v, s.now)} (in {_in(v.usable_in)})",
-                      file=sys.stderr)
+                print(f"  {v.account.id:<12} {v.reason}; {_usable(v, s.now)} (in {_in(v.usable_in)})"
+                      f"{_age(s, v.account.id)}", file=sys.stderr)
             if not _interactive():
                 return 75
             soon = min(s.verdicts, key=lambda v: (v.usable_in, v.account.id))
@@ -467,6 +574,8 @@ def cmd_run(a) -> int:
                 choice = "q"
             if choice == "s":
                 _say(f"starting on {top.account.id}, which is near a limit")
+                for line in spent:
+                    _say(line)
                 return _launch(top, a.args)
             if choice != "w":
                 return 75
@@ -1087,6 +1196,20 @@ def _fix(hub_arg: Path | None) -> bool:
     return not left
 
 
+def _usage_check(a: Account, use: dict[str, Window] | str | None) -> str:
+    """doctor's line for one account's usage probe: what it read (names and a count, never a
+    value), why it failed, or that it is off."""
+    if use is None:
+        return "usage probe off (usage_args = [])"
+    if isinstance(use, str):
+        return f"usage probe failed ({use})"
+    plain = sorted(k for k in use if not window_model(k))
+    models = len(use) - len(plain)
+    read = [*plain, *([f"{models} model week{'s' * (models != 1)}"] if models else [])]
+    return (f"usage probe answers ({', '.join(read)}), "
+            + ("local command" if a.usage_args is None else "with usage_args"))
+
+
 def _doctor() -> int:
     """One line per check, read-only. Safe to paste: account ids and plan names only."""
     failed = []
@@ -1114,19 +1237,22 @@ def _doctor() -> int:
         check(False, "no hub at the configured path; if you moved it, run `fairshare doctor --fix`")
         accounts = []                 # a sign-in check would create folders at the old path
     checkable = [a for a in accounts if a.plan is not None and a.provider in providers.REGISTRY]
-    answers = iter(_probe(checkable))
+    answers = iter(_check(checkable, _now()))
     for a in accounts:
         if a.plan is None:
             check(False, f"{a.id}: {a.plan_error}")
         elif a.provider not in providers.REGISTRY:
             check(False, f"{a.id}: unknown provider {a.provider}")
         else:
-            st = next(answers)
+            st, use = next(answers)
+            until = (f" until {time.strftime('%Y-%m-%d', time.localtime(st.expires_at))}"
+                     if st and st.expires_at else "")
             how = ("answers: " + ("signed out" if not st.logged_in else
                                   "not a subscription login" if not st.usable else
-                                  f"signed in, plan {st.plan or a.plan.name}")
+                                  f"signed in{until}, plan {st.plan or a.plan.name}")
                    ) if st else "gave no answer"
             check(st is not None, f"{a.id}: sign-in check {how}")
+            check(not isinstance(use, str), f"{a.id}: {_usage_check(a, use)}")
             check(*(lambda ok, text: (ok, f"{a.id}: {text}"))(
                 *providers.get(a.provider).check_state(a.config_dir)))
     callers: dict[tuple[str, ...], list[str]] = {}

@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+from unittest import mock
 
 from fairshare import hub, store
 from fairshare.model import load_accounts
@@ -19,6 +20,10 @@ class Moved(Base):
         super().setUp()
         self.config()
         self.person("a", "ann")
+        usage = mock.patch.dict(os.environ, {"FAKE_USAGE": str(
+            Path(__file__).parent / "fixtures/claude-2.1.322/usage-week-hot.json")})
+        usage.start()                    # doctor's usage probe line passes
+        self.addCleanup(usage.stop)
         self.assertEqual(self.go("join", "a"), 0, self.err)
         self.settings = hub.shared_dir(self.hub) / "settings.json"
         self.new = self.tmp / "elsewhere" / "hub"

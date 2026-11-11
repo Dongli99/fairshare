@@ -7,8 +7,8 @@ fairshare routes between accounts **you own and pay for**. By design it:
 - never switches account inside a running session;
 - uses only data the provider hands to a user-configured command (for Claude Code, the
   documented `statusLine` input) and what the provider's own command-line tool answers when
-  asked who is signed in (for Claude Code, `claude auth status`). It calls no undocumented
-  endpoint. That answer is read in memory to tell accounts apart; an email address, organisation
+  asked who is signed in and how much is used (for Claude Code, `claude auth status` and its
+  local `/usage` command, which makes no model call). It calls no undocumented endpoint. That answer is read in memory to tell accounts apart; an email address, organisation
   id or organisation name is never printed or stored.
 
 **Not settled, and yours to decide.** Providers' terms may treat deliberately spreading load

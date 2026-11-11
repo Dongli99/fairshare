@@ -1,5 +1,6 @@
 """Claude Code. Usage arrives on the statusLine command's stdin (documented), one account per
-CLAUDE_CONFIG_DIR. fairshare never reads or copies a login.
+CLAUDE_CONFIG_DIR, and is asked for at launch through the tool's own `/usage` command. fairshare
+never reads or copies a login.
 
 Everything Anthropic may rename lives in the constants below and nowhere else in fairshare."""
 from __future__ import annotations
@@ -12,10 +13,13 @@ import re
 import shlex
 import shutil
 import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .. import store
-from ..model import (Account, AccountStatus, Candidate, Capture, Window, plan_for,
+from ..model import (USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT,
+                     Account, AccountStatus, Candidate, Capture, Window, model_window, plan_for,
                      window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
@@ -29,6 +33,14 @@ LOGIN_ARGS = ("auth", "login")               # interactive: the tool owns the br
 LOGOUT_ARGS = ("auth", "logout")
 VERSION_ARGS = ("--version",)
 PROBE_TIMEOUT = 5.0                          # seconds
+# The usage probe: the tool's own `/usage`, a local command (no model call, verified on 2.1.322,
+# 2026-11-11), printed as a JSON envelope so that a release which sends it to the model instead
+# shows up. The user's hooks are switched off for it: they would otherwise run at every launch,
+# once per account (command-line settings beat the folder's own, verified the same day).
+# accounts.toml may override it per account; `usage_args = []` turns it off.
+USAGE_ARGS = ("-p", "--no-session-persistence", "--output-format", "json",
+              "--settings", '{"disableAllHooks":true}', "/usage")
+USAGE_TIMEOUT = 6.0                          # seconds; measured 1.1-2.4 s
 
 # Environment variables.
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"         # picks the account's folder
@@ -107,6 +119,38 @@ GIT_COMMONDIR = "commondir"          # in which this file names the main reposit
 STATUS_LOGGED_IN, STATUS_METHOD = "loggedIn", "authMethod"
 STATUS_SUBSCRIPTION = "claude.ai"            # the STATUS_METHOD of a subscription login
 STATUS_ORG, STATUS_EMAIL, STATUS_PLAN = "orgId", "email", "planTier"
+STATUS_EXPIRES = "loginExpiresAt"            # ISO time the sign-in ends; null when signed out
+
+# The usage probe's JSON envelope, and the text in its `result` (or on stdout without the
+# envelope). Only lines starting with a known label are read: `<label>: N% used · resets <when>`,
+# where <when> is `Nov 11 at 3:40pm (Zone/Name)` (2.1.322) or a bare `9pm` (2.1.321). The rest
+# (tips, with local paths) is never parsed or kept. A signed-out folder answers with the cost
+# summary instead (2.1.322, 2026-11-11).
+USAGE_RESULT, USAGE_IS_ERROR = "result", "is_error"
+USAGE_LOCAL, USAGE_LOCAL_NAME, USAGE_TURNS = "local_command", "usage", "num_turns"
+USAGE_COST = "total_cost_usd"
+USAGE_SESSION = "Current session"
+USAGE_WEEK = "Current week (all models)"
+USAGE_MODEL_WEEK = "Current week ({})"       # {}: the model's name, e.g. Fable
+USAGE_WINDOWS = {USAGE_SESSION: "five_hour", USAGE_WEEK: "seven_day"}   # checked against plans
+USAGE_COST_VIEW = "Total cost:"              # the signed-out answer's first words
+USAGE_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                "dec")
+
+
+def _spaced(text: str) -> str:
+    """A pattern for `text` that takes any run of spaces where it has one."""
+    return re.escape(text).replace(r"\ ", r"\s+")
+
+
+_MODEL_LABEL = (_spaced(USAGE_MODEL_WEEK.partition("{}")[0]) + r"\s*(?P<model>[^()]+?)\s*"
+                + _spaced(USAGE_MODEL_WEEK.partition("{}")[2]))
+_USAGE_LINE = re.compile(r"^\s*(?P<label>" + "|".join(_spaced(x) for x in USAGE_WINDOWS)
+                         + "|" + _MODEL_LABEL + r")\s*:\s*(?P<pct>\d+(?:\.\d+)?)\s*%\s*(?:used)?"
+                         r"\s*(?:\u00b7\s*resets\s+(?P<when>.*?))?\s*$", re.I)
+_WHEN = re.compile(r"(?:(?P<month>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2})\s+at\s+)?"
+                   r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<half>am|pm)"
+                   r"\s*(?:\((?P<zone>[^()]+)\))?", re.I)
 
 
 def parse_capture(raw: dict) -> dict[str, Window]:
@@ -161,6 +205,15 @@ def passed_session_vars() -> list[str]:
                   and k not in SESSION_ENV and k not in LOGIN_OVERRIDE_ENV and k != CONFIG_DIR_ENV)
 
 
+def _iso(value: object) -> float | None:
+    """Unix seconds of an ISO time with a zone (`2030-01-02T03:04:05.678Z`), else None."""
+    try:
+        t = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return t.timestamp() if t.tzinfo else None
+    except (AttributeError, ValueError):
+        return None
+
+
 def parse_account_status(raw: object) -> AccountStatus | None:
     """The status JSON as an AccountStatus; None when it is not the shape we know."""
     if not isinstance(raw, dict) or not isinstance(raw.get(STATUS_LOGGED_IN), bool):
@@ -170,18 +223,25 @@ def parse_account_status(raw: object) -> AccountStatus | None:
     org, email = raw.get(STATUS_ORG), raw.get(STATUS_EMAIL)
     who = hashlib.sha256(f"{org}\n{email}".encode()).hexdigest() if org and email else None
     return AccountStatus(True, raw.get(STATUS_METHOD) == STATUS_SUBSCRIPTION, who,
-                         plan_for(name, raw.get(STATUS_PLAN)))
+                         plan_for(name, raw.get(STATUS_PLAN)), _iso(raw.get(STATUS_EXPIRES)))
+
+
+def _account_env(account: Account) -> dict[str, str]:
+    """The environment for asking the tool about `account`: for the user's DEFAULT_DIR without
+    CONFIG_DIR_ENV, as the tool itself runs there (setting it may name a different login
+    entry)."""
+    env = clean_env(account.config_dir)
+    if account.config_dir == Path.home() / DEFAULT_DIR:
+        del env[CONFIG_DIR_ENV]
+    return env
 
 
 def account_status(account: Account) -> AccountStatus | None:
     """Ask the installed claude who `account` is. Reads no login file; the output is parsed in
-    memory and only its yes/no, a hash and a plan name survive. None on any failure. The exit
-    code is not read: a signed-out folder prints its answer and exits 1 (2.1.322). For the user's
-    DEFAULT_DIR the check runs without CONFIG_DIR_ENV, as the tool itself does there (setting it
-    may name a different login entry)."""
-    env = clean_env(account.config_dir)
-    if account.config_dir == Path.home() / DEFAULT_DIR:
-        del env[CONFIG_DIR_ENV]
+    memory and only its yes/no, a hash, a plan name and the sign-in's end survive. None on any
+    failure. The exit code is not read: a signed-out folder prints its answer and exits 1
+    (2.1.322)."""
+    env = _account_env(account)
     try:
         r = subprocess.run([real_binary(), *(account.status_args or STATUS_ARGS)],
                            env=env, stdin=subprocess.DEVNULL,
@@ -189,6 +249,95 @@ def account_status(account: Account) -> AccountStatus | None:
         return parse_account_status(json.loads(r.stdout))
     except (SystemExit, OSError, subprocess.SubprocessError, ValueError):
         return None
+
+
+def _reset_at(when: str, now: float) -> float | None:
+    """Unix seconds of a printed reset (`Nov 12 at 3am (America/Denver)`, or a bare `9pm`), in
+    the zone it names (local time for a missing or unknown one); None when it cannot be read.
+    There is no year: the first candidate after `now - SAME_WINDOW_S` (the printed minute jitters,
+    so a reset a minute ago is that one, not next year's or tomorrow's); a bare clock time is its
+    next occurrence on that rule."""
+    m = _WHEN.fullmatch(when.strip())
+    if not m or int(m["hour"]) > 12 or int(m["minute"] or 0) > 59:
+        return None
+    try:
+        zone = ZoneInfo(m["zone"].strip()) if m["zone"] else None
+    except (KeyError, ValueError, OSError):  # ZoneInfoNotFoundError is a KeyError
+        zone = None
+    hour = int(m["hour"]) % 12 + (12 if m["half"].lower() == "pm" else 0)
+    minute = int(m["minute"] or 0)
+    base = datetime.fromtimestamp(now, zone).replace(hour=hour, minute=minute, second=0,
+                                                    microsecond=0)
+    if not m["month"]:
+        days = [base + timedelta(days=d) for d in (-1, 0, 1)]
+    elif (month := m["month"].lower()) not in USAGE_MONTHS:
+        return None
+    else:
+        days = []
+        for year in (base.year - 1, base.year, base.year + 1):
+            with contextlib.suppress(ValueError):           # Feb 29 in a common year
+                days.append(base.replace(year=year, month=USAGE_MONTHS.index(month) + 1,
+                                         day=int(m["day"])))
+    return next((t for d in days if (t := d.timestamp()) > now - store.SAME_WINDOW_S), None)
+
+
+def parse_usage(text: str, now: float) -> dict[str, Window]:
+    """The windows in `/usage` text, keyed as parse_capture keys them, plus per-model weeks under
+    `model_window`. A line with no readable reset is dropped: a window without one is useless."""
+    known, out = window_names(name), {}
+    for line in text.splitlines():
+        if not (m := _USAGE_LINE.match(line)) or not m["when"]:
+            continue
+        said = " ".join(m["label"].split()).lower()
+        label = next((k for k in USAGE_WINDOWS if k.lower() == said), None)
+        key = USAGE_WINDOWS[label] if label else model_window(USAGE_WINDOWS[USAGE_WEEK],
+                                                              m["model"].strip())
+        if (label and key not in known) or (at := _reset_at(m["when"], now)) is None:
+            continue
+        out[key] = Window(float(m["pct"]), at)
+    return out
+
+
+def read_usage(account: Account, now: float) -> dict[str, Window] | str | None:
+    """Ask the installed claude for `account`'s usage (USAGE_ARGS, or the account's own
+    `usage_args`). The windows it read; else a short, value-free reason (a string); None when the
+    account's `usage_args` turn the probe off. Never raises. Runs like account_status: clean
+    environment, stdin from /dev/null, in this process's folder. With the JSON envelope, an answer
+    that was not the local command (the model ran) gives USAGE_MODEL_TURN and no windows; plain
+    text (an override without the envelope) is read too, but then that guard is blind."""
+    args = USAGE_ARGS if account.usage_args is None else account.usage_args
+    if not args:
+        return None
+    try:
+        r = subprocess.run([real_binary(), *args], env=_account_env(account),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=USAGE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"{USAGE_NO_ANSWER}: timed out"
+    except (SystemExit, OSError, subprocess.SubprocessError, ValueError):
+        return f"{USAGE_NO_ANSWER}: could not run {BINARY}"
+    try:
+        envelope = json.loads(r.stdout)
+    except ValueError:
+        envelope = None
+    if isinstance(envelope, dict):
+        # A model turn shows as turns or cost, never as a missing field alone: an error answer
+        # (no network, say) must not tell the user to switch the probe off.
+        turns, cost = envelope.get(USAGE_TURNS), envelope.get(USAGE_COST)
+        if (isinstance(turns, int) and turns > 0) or (isinstance(cost, (int, float)) and cost > 0):
+            return USAGE_MODEL_TURN
+        text = envelope.get(USAGE_RESULT)
+        if envelope.get(USAGE_IS_ERROR) is True or not isinstance(text, str):
+            return f"{USAGE_NO_ANSWER}: error"
+        if envelope.get(USAGE_LOCAL) != USAGE_LOCAL_NAME:
+            return USAGE_NOT_UNDERSTOOD
+    elif r.returncode != 0:
+        return f"{USAGE_NO_ANSWER}: exit {r.returncode}"
+    elif not (text := r.stdout).strip():
+        return f"{USAGE_NO_ANSWER}: no output"
+    if windows := parse_usage(text, now):
+        return windows
+    return USAGE_SIGNED_OUT if text.lstrip().startswith(USAGE_COST_VIEW) else USAGE_NOT_UNDERSTOOD
 
 
 def find_binary(path: str | None = None) -> str | None:

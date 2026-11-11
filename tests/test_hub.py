@@ -26,6 +26,11 @@ FAKE_CLAUDE = r"""#!/bin/sh
 [ "$1" = "--version" ] && { echo "9.9.9 (Fake Code)"; exit 0; }
 dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 name=$(basename "$dir")
+for last; do :; done
+if [ "$last" = "/usage" ]; then     # the usage probe: $FAKE_USAGE's answer, else it fails
+  [ -n "$FAKE_USAGE" ] && exec cat "$FAKE_USAGE"
+  exit 1
+fi
 echo "$*" >> "$FAKE_LOG/calls-$name"
 case "$1 $2" in
   "auth login")

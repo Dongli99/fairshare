@@ -51,6 +51,13 @@ class Provider(Protocol):
         """Ask the provider whether `account` is signed in, with what kind of login, under which
         identity and plan. None when the question could not be answered (never raise)."""
 
+    def read_usage(self, account: Account, now: float) -> dict[str, Window] | str | None:
+        """Ask the provider's own tool for `account`'s usage now, without a model call: the
+        windows it read, keyed as parse_capture keys them (per-model weeks under
+        `model.model_window`); else a short, value-free reason, one of `model.USAGE_*` (a detail
+        may follow USAGE_NO_ANSWER after a colon); None when the account turned the probe off.
+        Never raises."""
+
     def find_binary(self) -> str | None:
         """The provider's command-line tool on PATH, or None."""
 
