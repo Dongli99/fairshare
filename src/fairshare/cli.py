@@ -188,21 +188,26 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
                  t: Tuning) -> str:
     """The account and its windows, shortest first, named by their length (`5h 23%`). A window
     at the hot mark turns yellow, red once spent, and shows when it resets: a tight account
-    about to reset is still worth using. A session's first redraws carry no usage yet, so the
-    saved snapshot stands in, marked with when it was taken; a window already reset is left out."""
+    about to reset is still worth using. A window the plan has but whose usage is unknown (none
+    seen yet, or reset since: nothing is known until the next exchange) shows `-`, so the line
+    keeps its shape. A session's first redraws carry no usage yet, so the saved snapshot stands
+    in, marked with when it was taken."""
     p = acct.plan
     hours = {p.short_name: p.short_hours, p.long_name: p.long_hours} if p else {}
+    known = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > now}
+    names = [k for k in hours if k] + [k for k in known if k not in hours]
     parts = [acct.id]
-    windows = (snap.windows if snap else {}).items()
-    for k, w in sorted(windows, key=lambda kw: hours.get(kw[0]) or 0):
-        if w.resets_at <= now:
+    for k in sorted(names, key=lambda k: hours.get(k) or 0):
+        label, w = _span(hours[k]) if hours.get(k) else k, known.get(k)
+        if w is None:
+            parts.append(f"{label} -")
             continue
-        text = f"{_span(hours[k]) if hours.get(k) else k} {w.used_pct:.0f}%"
+        text = f"{label} {w.used_pct:.0f}%"
         if w.used_pct >= t.short_hot_pct:
             colour = SPENT if w.used_pct >= t.long_exhausted_pct else TIGHT
             text = f"{colour}{text} ({_clock(w.resets_at, now)}){PLAIN}"
         parts.append(text)
-    if len(parts) > 1 and not live:
+    if known and not live:
         parts.append(f"as of {_clock(snap.captured_at, now)}")
     return " · ".join(parts)
 

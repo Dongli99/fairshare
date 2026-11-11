@@ -623,7 +623,7 @@ class Capture_(Base):
         self.assertEqual(self.capture(hub.account_dir(self.hub, "b")), 0)
         self.assertEqual(store.load("b").windows["seven_day"].used_pct, 40)
         self.assertIsNone(store.load("a"))
-        self.assertEqual(self.out, "b · 7d 40%\n")
+        self.assertEqual(self.out, "b · 5h - · 7d 40%\n")
 
     def test_a_payload_without_usage_shows_the_saved_snapshot_and_its_time(self):
         # A session's first redraws carry no usage until its first exchange with the service.
@@ -631,7 +631,7 @@ class Capture_(Base):
                                                     "five_hour": Window(90, time.time() - 1)}))
         self.PAYLOAD = json.dumps({"model": {}})
         self.assertEqual(self.capture(hub.account_dir(self.hub, "b")), 0)
-        self.assertRegex(self.out, r"^b · 7d 55% · as of \d\d:\d\d\n$")   # reset one left out
+        self.assertRegex(self.out, r"^b · 5h - · 7d 55% · as of \d\d:\d\d\n$")   # reset: unknown
         self.assertEqual(store.load("b").windows["seven_day"].used_pct, 55)      # nothing written
 
     def test_windows_shortest_first_and_a_tight_one_coloured_with_its_reset(self):
@@ -647,12 +647,12 @@ class Capture_(Base):
         self.PAYLOAD = json.dumps({"rate_limits": {"seven_day": {"used_percentage": 99,
                                                                  "resets_at": 4e9}}})
         self.assertEqual(self.capture(hub.account_dir(self.hub, "a")), 0)
-        self.assertTrue(self.out.startswith("a · \033[31m7d 99% ("), self.out)
+        self.assertTrue(self.out.startswith("a · 5h - · \033[31m7d 99% ("), self.out)
 
-    def test_with_nothing_saved_the_line_is_the_account_alone(self):
+    def test_with_nothing_saved_every_window_is_unknown(self):
         self.PAYLOAD = json.dumps({"model": {}})
         self.assertEqual(self.capture(hub.account_dir(self.hub, "a")), 0)
-        self.assertEqual(self.out, "a\n")
+        self.assertEqual(self.out, "a · 5h - · 7d -\n")
 
     def test_outside_the_hub_nothing_is_recorded_and_their_line_still_runs(self):
         for argv in (["--then", "true"], ["a", "--then", "true"]):   # old form too
