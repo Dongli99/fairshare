@@ -125,7 +125,7 @@ def _sole_provider() -> str | None:
 def _account(a: dict, hub: Path) -> Account:
     if "config_dir" in a:
         raise ValueError("config_dir is no longer used: each account lives in the hub, at "
-                         "<hub>/accounts/<id>; run `fairshare setup`")
+                         "<hub>/accounts/<id>; move this file aside, then run `fairshare setup`")
     if not isinstance(a["id"], str) or not ACCOUNT_ID.fullmatch(a["id"]):
         raise ValueError(f"id {a['id']!r}: use letters, digits, '.', '-' or '_'")
     capacity = None if a.get("capacity") is None else float(a["capacity"])
