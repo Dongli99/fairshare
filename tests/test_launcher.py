@@ -4,13 +4,12 @@ the real ones are never run (Fleet.setUp proves the fakes come first on PATH).""
 import json
 import re
 import sys
-import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from fairshare import cli, model, policy, session
-from fairshare.model import Account, Plan, Snapshot, Window, load_plan
+from fairshare.model import Account, Snapshot, Window, load_plan
 from fairshare.providers import claude
 
 from test_honest import H, NOW, ORG, Fleet
@@ -336,10 +335,9 @@ class NoShortWindow(Fleet):
                                model.Tuning(), NOW)
         say.assert_not_called()
 
-    def test_short_hours_is_gone(self):
-        self.assertNotIn("short_hours", Plan.__dataclass_fields__)
-        for f in (Path(model.__file__).parent / "plans").glob("*.toml"):
-            self.assertNotIn("hours", tomllib.loads(f.read_text())["windows"]["short"], f.name)
+    def test_the_short_window_length_is_plan_data_for_the_status_line(self):
+        self.assertEqual(load_plan("claude-pro").short_hours, 5.0)
+        self.assertIsNone(load_plan("weekly-only").short_hours)
 
 
 class Boundary(unittest.TestCase):

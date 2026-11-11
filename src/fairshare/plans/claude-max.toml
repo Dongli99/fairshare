@@ -8,6 +8,7 @@ names = ["max"]   # unverified: only "pro" has been seen from `claude auth statu
 
 [windows.short]
 name = "five_hour"
+hours = 5
 
 [windows.long]
 name = "seven_day"

@@ -25,6 +25,7 @@ class Plan:
     long_name: str       # provider's name for the long window
     long_hours: float    # its length: the fallback for an unknown reset
     short_name: str | None = None   # provider's name for the short window; None: the plan has none
+    short_hours: float | None = None   # its length, when the plan file gives it
 
 
 @dataclass(frozen=True)
@@ -103,8 +104,9 @@ def load_plan(name: str, capacity: float | None = None) -> Plan:
     cap = float(d["capacity"]) if capacity is None else float(capacity)
     if cap <= 0:
         raise ValueError(f"capacity must be positive (got {cap}) for plan {name}")
+    short = w.get("short", {})
     return Plan(d["name"], d["provider"], cap, w["long"]["name"], float(w["long"]["hours"]),
-                w["short"]["name"] if "short" in w else None)
+                short.get("name"), float(short["hours"]) if "hours" in short else None)
 
 
 DEFAULT_HUB = "~/.local/share/fairshare/hub"   # where setup proposes the hub

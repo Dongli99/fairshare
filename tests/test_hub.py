@@ -623,7 +623,7 @@ class Capture_(Base):
         self.assertEqual(self.capture(hub.account_dir(self.hub, "b")), 0)
         self.assertEqual(store.load("b").windows["seven_day"].used_pct, 40)
         self.assertIsNone(store.load("a"))
-        self.assertEqual(self.out, "b · seven_day 40%\n")
+        self.assertEqual(self.out, "b · 7d 40%\n")
 
     def test_a_payload_without_usage_shows_the_saved_snapshot_and_its_time(self):
         # A session's first redraws carry no usage until its first exchange with the service.
@@ -631,8 +631,23 @@ class Capture_(Base):
                                                     "five_hour": Window(90, time.time() - 1)}))
         self.PAYLOAD = json.dumps({"model": {}})
         self.assertEqual(self.capture(hub.account_dir(self.hub, "b")), 0)
-        self.assertRegex(self.out, r"^b · seven_day 55% · as of \d\d:\d\d\n$")   # reset one left out
+        self.assertRegex(self.out, r"^b · 7d 55% · as of \d\d:\d\d\n$")   # reset one left out
         self.assertEqual(store.load("b").windows["seven_day"].used_pct, 55)      # nothing written
+
+    def test_windows_shortest_first_and_a_tight_one_coloured_with_its_reset(self):
+        now = time.time()
+        self.PAYLOAD = json.dumps({"rate_limits": {
+            "seven_day": {"used_percentage": 92, "resets_at": now + 7200},
+            "five_hour": {"used_percentage": 23, "resets_at": now + 3600}}})
+        self.assertEqual(self.capture(hub.account_dir(self.hub, "a")), 0)
+        reset = cli._clock(now + 7200, now)
+        self.assertEqual(self.out, f"a · 5h 23% · \033[33m7d 92% ({reset})\033[0m\n")
+
+    def test_a_spent_window_is_red(self):
+        self.PAYLOAD = json.dumps({"rate_limits": {"seven_day": {"used_percentage": 99,
+                                                                 "resets_at": 4e9}}})
+        self.assertEqual(self.capture(hub.account_dir(self.hub, "a")), 0)
+        self.assertTrue(self.out.startswith("a · \033[31m7d 99% ("), self.out)
 
     def test_with_nothing_saved_the_line_is_the_account_alone(self):
         self.PAYLOAD = json.dumps({"model": {}})

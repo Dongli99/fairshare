@@ -6,6 +6,7 @@ names = ["pro"]   # what `claude auth status` calls this plan; used to detect it
 
 [windows.short]
 name = "five_hour"
+hours = 5
 
 [windows.long]
 name = "seven_day"

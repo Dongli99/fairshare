@@ -130,12 +130,16 @@ def _in(h: float | None) -> str:
     return "-" if h is None else f"{int(h)}h{int(h % 1 * 60):02d}m"
 
 
+def _clock(t: float, now: float) -> str:
+    """A local clock time, with the day name when it is not today. Unlike "in 2h", it stays true
+    on a line that is not redrawn."""
+    lt = time.localtime(t)
+    return time.strftime("%H:%M" if lt[:3] == time.localtime(now)[:3] else "%a %H:%M", lt)
+
+
 def _usable(v: Verdict, now: float) -> str:
-    """When a spent account can take work again, as a local clock time; a day name when that
-    is not today."""
-    t = time.localtime(now + v.usable_in * HOUR)
-    same_day = t[:3] == time.localtime(now)[:3]
-    return f"usable at {time.strftime('%H:%M' if same_day else '%a %H:%M', t)}"
+    """When a spent account can take work again."""
+    return f"usable at {_clock(now + v.usable_in * HOUR, now)}"
 
 
 def cmd_status(_a) -> int:
@@ -173,16 +177,34 @@ def _session_account(accounts: list[Account]) -> Account | None:
     return None
 
 
-def _status_line(account_id: str, snap: Snapshot | None, now: float, live: bool) -> str:
-    """The account and its stored usage. A session's first redraws carry no usage yet, so the
+TIGHT, SPENT, PLAIN = "\033[33m", "\033[31m", "\033[0m"   # yellow, red, reset
+
+
+def _span(hours: float) -> str:
+    return f"{hours / 24:g}d" if hours % 24 == 0 else f"{hours:g}h"
+
+
+def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
+                 t: Tuning) -> str:
+    """The account and its windows, shortest first, named by their length (`5h 23%`). A window
+    at the hot mark turns yellow, red once spent, and shows when it resets: a tight account
+    about to reset is still worth using. A session's first redraws carry no usage yet, so the
     saved snapshot stands in, marked with when it was taken; a window already reset is left out."""
-    windows = [f"{k} {w.used_pct:.0f}%" for k, w in (snap.windows if snap else {}).items()
-               if w.resets_at > now]
-    if windows and not live:
-        t = time.localtime(snap.captured_at)
-        same_day = t[:3] == time.localtime(now)[:3]
-        windows.append(f"as of {time.strftime('%H:%M' if same_day else '%a %H:%M', t)}")
-    return " · ".join([account_id, *windows])
+    p = acct.plan
+    hours = {p.short_name: p.short_hours, p.long_name: p.long_hours} if p else {}
+    parts = [acct.id]
+    windows = (snap.windows if snap else {}).items()
+    for k, w in sorted(windows, key=lambda kw: hours.get(kw[0]) or 0):
+        if w.resets_at <= now:
+            continue
+        text = f"{_span(hours[k]) if hours.get(k) else k} {w.used_pct:.0f}%"
+        if w.used_pct >= t.short_hot_pct:
+            colour = SPENT if w.used_pct >= t.long_exhausted_pct else TIGHT
+            text = f"{colour}{text} ({_clock(w.resets_at, now)}){PLAIN}"
+        parts.append(text)
+    if len(parts) > 1 and not live:
+        parts.append(f"as of {_clock(snap.captured_at, now)}")
+    return " · ".join(parts)
 
 
 def cmd_capture(a) -> int:
@@ -192,12 +214,13 @@ def cmd_capture(a) -> int:
     `capture` (the form before the hub) is ignored."""
     raw = sys.stdin.buffer.read()
     try:
-        acct = _session_account(_load()[0])
+        accounts, tuning, _ = _load()
+        acct = _session_account(accounts)
         fresh = acct and providers.get(acct.provider).parse_capture(json.loads(raw))
         now = time.time()
         snap = store.record(acct.id, fresh, now) if fresh else acct and store.load(acct.id)
         if acct and not a.then:
-            print(_status_line(acct.id, snap, now, bool(fresh)))
+            print(_status_line(acct, snap, now, bool(fresh), tuning))
     except (Exception, SystemExit):      # whatever is wrong, the user's own line must still run
         pass
     if a.then:

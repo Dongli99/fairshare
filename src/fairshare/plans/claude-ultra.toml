@@ -10,6 +10,7 @@ names = ["ultra"]   # unverified: only "pro" has been seen from `claude auth sta
 # Usually absent for Ultra; an absent window counts as unused, a temporary one is honoured.
 [windows.short]
 name = "five_hour"
+hours = 5
 
 [windows.long]
 name = "seven_day"
