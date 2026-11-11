@@ -63,6 +63,10 @@ and changing `hub` in `accounts.toml`: the links are relative. The usage hook li
 settings: `fairshare capture --then '<yours>'` records usage for the account whose folder the
 session runs in, then runs your own statusLine and prints its line.
 
+`fairshare prefer ID [--for 3h]` prefers one account for a while (default: the rest of today):
+launches go to it while it can take work, and to the best account when it cannot. It ends on
+its own; `fairshare prefer --off` ends it now, `fairshare prefer` shows it.
+
 `fairshare leave ID` stops routing to an account; its folder and login stay (`--logout` signs it
 out too).
 

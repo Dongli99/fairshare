@@ -65,3 +65,9 @@ def rank(accounts: list[Account], snaps: dict[str, Snapshot], now: float,
     """Best first: highest score, ties by id."""
     vs = [evaluate(a, snaps.get(a.id), now, t) for a in accounts]
     return sorted(vs, key=lambda v: (-v.score, v.account.id))
+
+
+def prefer(verdicts: list[Verdict], account_id: str) -> list[Verdict]:
+    """The user's preferred account first while it is eligible; otherwise the ranking as is."""
+    chosen = [v for v in verdicts if v.account.id == account_id and v.eligible]
+    return chosen + [v for v in verdicts if v not in chosen]

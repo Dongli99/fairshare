@@ -1,10 +1,12 @@
-"""fairshare CLI: status | capture | run (the default) | setup | join | leave | uninstall | doctor."""
+"""fairshare CLI: status | capture | run (the default) | prefer | setup | join | leave | uninstall |
+doctor."""
 from __future__ import annotations
 
 import argparse
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -19,7 +21,7 @@ from . import hub as hub_mod
 from . import providers, session, store
 from .model import (ACCOUNT_ID, DEFAULT_HUB, Account, AccountStatus, ConfigError, Snapshot, Tuning,
                     load_accounts, load_plan, with_account, with_hub, without_account)
-from .policy import HOUR, Verdict, rank
+from .policy import HOUR, Verdict, prefer, rank
 
 
 def _load():
@@ -58,6 +60,7 @@ class Survey:
     snaps: dict[str, Snapshot]
     tuning: Tuning
     now: float
+    preference: tuple[str, float] | None = None   # the user's (account id, until), if any
 
 
 def _with_detected_plan(a: Account, plan_name: str) -> Account:
@@ -123,7 +126,10 @@ def _survey() -> Survey:
             ranked.append(a)
         else:
             twins.append((a, seen[key].id))
-    return Survey(rank(ranked, snaps, now, tuning), out, twins, notes, failed, snaps, tuning, now)
+    verdicts = rank(ranked, snaps, now, tuning)
+    if pref := store.preference(now):
+        verdicts = prefer(verdicts, pref[0])
+    return Survey(verdicts, out, twins, notes, failed, snaps, tuning, now, pref)
 
 
 def _in(h: float | None) -> str:
@@ -142,8 +148,20 @@ def _usable(v: Verdict, now: float) -> str:
     return f"usable at {_clock(now + v.usable_in * HOUR, now)}"
 
 
+def _preference_note(s: Survey) -> str | None:
+    if not s.preference:
+        return None
+    who, until = s.preference
+    note = f"preferring {who} until {_clock(until, s.now)}"
+    if not (s.verdicts and s.verdicts[0].account.id == who):
+        note += "; it cannot take work now, so the best account is used"
+    return note
+
+
 def cmd_status(_a) -> int:
     s = _survey()
+    if note := _preference_note(s):
+        print(note)
     for i, v in enumerate(s.verdicts):
         mark = ">" if i == 0 else " "
         flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
@@ -325,6 +343,8 @@ def cmd_run(a) -> int:
             if fallback := [v.account.id for v in s.verdicts if v.account.id in s.failed]:
                 _say(f"sign-in check failed for {', '.join(fallback)}; went by the login file "
                      "(last confirmed as a subscription login) and the plan in accounts.toml")
+            if note := _preference_note(s):
+                _say(note)
             _nothing_to_rank(s)
             top = s.verdicts[0]
             if top.eligible:
@@ -353,6 +373,45 @@ def cmd_run(a) -> int:
     except KeyboardInterrupt:
         print(file=sys.stderr)
         return 130
+
+
+def _duration(text: str) -> float:
+    """Seconds in `30m`, `3h`, `2d` (decimals allowed)."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([mhd])", text.strip())
+    if not m or float(m[1]) <= 0:
+        raise SystemExit(f"fairshare: --for takes a length such as 30m, 3h or 2d, not '{text}'")
+    return float(m[1]) * {"m": 60, "h": HOUR, "d": 24 * HOUR}[m[2]]
+
+
+def _midnight(now: float) -> float:
+    """The start of tomorrow, local time."""
+    t = time.localtime(now)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+
+
+def cmd_prefer(a) -> int:
+    """Prefer one account for a while: launches, and later handoffs and briefings, go to it while
+    it can take work. It ends on its own (default: the end of today), so it never pins."""
+    now = _now()
+    if a.off:
+        store.clear_preference()
+        print("no preferred account; the best account is used")
+        return 0
+    if a.id is None:
+        pref = store.preference(now)
+        print(f"preferring {pref[0]} until {_clock(pref[1], now)}" if pref
+              else "no preferred account")
+        return 0
+    accounts = _load()[0]
+    if a.id not in {x.id for x in accounts}:
+        _say(f"no account '{a.id}' (configured: {', '.join(x.id for x in accounts)})")
+        return 2
+    until = now + _duration(a.duration) if a.duration else _midnight(now)
+    store.save_preference(a.id, until)
+    print(f"preferring {a.id} until {_clock(until, now)}"
+          + ("" if a.duration else " (--for sets how long)")
+          + "; `fairshare prefer --off` ends it")
+    return 0
 
 
 def _tilde(p: Path, home: Path) -> str:
@@ -811,6 +870,12 @@ def main(argv: list[str] | None = None) -> int:
     cp.set_defaults(f=cmd_capture)
     sub.add_parser("run", help="start a session on the best account (also: no command at all); "
                    "`run [-a ID] [--] ARGS...` passes ARGS to the provider unchanged")
+    pp = sub.add_parser("prefer", help="prefer one account for a while (default: the rest of "
+                        "today); with no id, show the current preference")
+    pp.add_argument("id", nargs="?")
+    pp.add_argument("--for", dest="duration", metavar="LENGTH", help="e.g. 30m, 3h, 2d")
+    pp.add_argument("--off", action="store_true", help="end the preference now")
+    pp.set_defaults(f=cmd_prefer)
     sub.add_parser("setup", help="choose the hub and join your own folders"
                    ).set_defaults(f=cmd_setup)
     jp = sub.add_parser("join", help="add an account: sign in to it in its own hub folder")

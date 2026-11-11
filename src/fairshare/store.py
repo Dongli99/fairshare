@@ -66,6 +66,26 @@ def subscription_seen(account_id: str) -> tuple[bool, float] | None:
     return None
 
 
+def save_preference(account_id: str, until: float) -> None:
+    _write_json(state_dir(), "prefer.json", {"account": account_id, "until": until})
+
+
+def clear_preference() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        (state_dir() / "prefer.json").unlink()
+
+
+def preference(now: float) -> tuple[str, float] | None:
+    """(account id, until) of the user's timed preference, None when there is none or it ended."""
+    try:
+        d = json.loads((state_dir() / "prefer.json").read_text())
+        if isinstance(d["account"], str) and float(d["until"]) > now:
+            return d["account"], float(d["until"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
 SAME_WINDOW_S = 3600   # resets this close together belong to the same window
 
 
