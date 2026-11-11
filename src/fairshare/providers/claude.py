@@ -4,6 +4,7 @@ CLAUDE_CONFIG_DIR. fairshare never reads or copies a login.
 Everything Anthropic may rename lives in the constants below and nowhere else in fairshare."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import hashlib
@@ -13,10 +14,12 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .. import store
 from ..model import (Account, AccountStatus, Candidate, Capture, Window, plan_for,
                      window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
+tool = "Claude Code"                 # the tool as users know it, for messages
 default_plan = "claude-pro"
 
 # The command-line tool.
@@ -45,15 +48,16 @@ SESSION_ENV = (SESSION_MARK_ENV, "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_JOB_DIR"
 WATCH_ENV_PREFIX = "CLAUDE_"                 # inside a session, other such variables are reported
 
 # Files and folders.
-LOGIN_FILE = ".credentials.json"     # its presence marks a signed-in dir; never opened
 SETTINGS_FILE = "settings.json"      # holds the statusLine hook
 # What every account shares through the hub; a name ending in "/" is a folder. Everything else in
 # an account's folder (its login, STATE_FILE, caches, jobs, locks) stays its own. Observed in real
 # config dirs on 2.1.322; CLAUDE.md, agents/, commands/, output-styles/ and keybindings.json are
-# documented as user-level files (code.claude.com/docs/en/claude-directory, 2026-11-09).
+# documented as user-level files (code.claude.com/docs/en/claude-directory, 2026-11-09), and so
+# are rules/, workflows/, agent-memory/ and themes/ (same page, 2026-11-10).
 SHARED = ("projects/", "history.jsonl", "file-history/", "paste-cache/", "plugins/", "skills/",
           "tasks/", SETTINGS_FILE, "sessions/", "CLAUDE.md", "agents/", "commands/",
-          "output-styles/", "keybindings.json")
+          "output-styles/", "keybindings.json", "rules/", "workflows/", "agent-memory/",
+          "themes/")
 shared = SHARED
 # Shared, but never copied in by join: the sessions running now, each with its own key. A copy
 # would be stale on arrival and would carry another session's key.
@@ -61,6 +65,10 @@ NOT_COPIED = ("sessions/",)
 not_copied = NOT_COPIED
 STATE_FILE = ".claude.json"          # the tool's own state, inside CONFIG_DIR_ENV's folder
 STATE_LOCK = STATE_FILE + ".lock"    # the folder the tool holds while it writes STATE_FILE
+STATE_LOCK_WAIT = 10.0               # seconds fairshare waits for that folder
+STATE_LOCK_STALE = 30.0              # a lock folder untouched this long is left over: the tool
+                                     # leaves one behind at times (`auth status`, 2.1.322) and
+                                     # writes past an old one itself (one seen 25 s old)
 DEFAULT_DIR = ".claude"              # the folder used without CONFIG_DIR_ENV; its STATE_FILE is
                                      # beside it in HOME
 ACCOUNT_DIR_GLOB = ".claude*"        # folders under HOME that may be accounts (discovery only)
@@ -76,12 +84,24 @@ HOOK_COMMAND_KEY = "command"
 SETTINGS_ENV = "env"                 # variables the settings file sets: values never shown
 CAPTURE_LIMITS, CAPTURE_USED, CAPTURE_RESET = "rate_limits", "used_percentage", "resets_at"
 
-# JSON fields of STATE_FILE that join may carry over from a user's folder, and nothing else (never
-# identity, tokens or account fields). Onboarding is marked done by these two keys, set together
-# when the first-run screens finish (2.1.322); the theme chosen there goes to SETTINGS_FILE.
+# JSON fields of STATE_FILE that join may carry over from a user's folder, after asking, and nothing
+# else (never identity, tokens or account fields). Onboarding is marked done by these two keys, set
+# together when the first-run screens finish (2.1.322); the theme chosen there goes to
+# SETTINGS_FILE. Folder trust is `projects.<path>.hasTrustDialogAccepted`, per account; so is the
+# Claude in Chrome consent (seen 2026-11-10).
 STATE_PROJECTS, STATE_TRUST = "projects", "hasTrustDialogAccepted"
 STATE_MCP = "mcpServers"
 STATE_ONBOARDING = ("hasCompletedOnboarding", "lastOnboardingVersion")
+STATE_CHROME = ("hasCompletedClaudeInChromeOnboarding", "claudeInChromeDefaultEnabled")
+
+# Which folder's trust covers a working folder (verified on 2.1.322, 2026-11-10, throwaway dirs):
+# the folder and its parents up to the root of the git repository it is in (inclusive), plus the
+# main repository's root for a git worktree; outside a repository, every parent. The tool's own
+# dialog writes the main repository's root when accepted inside a repository, else the folder.
+# Paths are the OS-canonical spelling. These name git's own files.
+GIT_DIR = ".git"                     # a folder in a repository's root; a file in a worktree's
+GIT_FILE_PREFIX = "gitdir:"          # that file's one line names the worktree's git folder
+GIT_COMMONDIR = "commondir"          # in which this file names the main repository's .git
 
 # JSON fields and values of the sign-in check's output.
 STATUS_LOGGED_IN, STATUS_METHOD = "loggedIn", "authMethod"
@@ -156,18 +176,19 @@ def parse_account_status(raw: object) -> AccountStatus | None:
 def account_status(account: Account) -> AccountStatus | None:
     """Ask the installed claude who `account` is. Reads no login file; the output is parsed in
     memory and only its yes/no, a hash and a plan name survive. None on any failure. The exit
-    code is not read: a signed-out folder prints its answer and exits 1 (2.1.322)."""
+    code is not read: a signed-out folder prints its answer and exits 1 (2.1.322). For the user's
+    DEFAULT_DIR the check runs without CONFIG_DIR_ENV, as the tool itself does there (setting it
+    may name a different login entry)."""
+    env = clean_env(account.config_dir)
+    if account.config_dir == Path.home() / DEFAULT_DIR:
+        del env[CONFIG_DIR_ENV]
     try:
         r = subprocess.run([real_binary(), *(account.status_args or STATUS_ARGS)],
-                           env=clean_env(account.config_dir), stdin=subprocess.DEVNULL,
+                           env=env, stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, timeout=PROBE_TIMEOUT)
         return parse_account_status(json.loads(r.stdout))
     except (SystemExit, OSError, subprocess.SubprocessError, ValueError):
         return None
-
-
-def login_present(account: Account) -> bool:
-    return (account.config_dir / LOGIN_FILE).exists()
 
 
 def find_binary(path: str | None = None) -> str | None:
@@ -196,8 +217,9 @@ def version() -> str | None:
 
 def discover(home: Path) -> list[Candidate]:
     """Folders set up under `home`: aliases of the form `alias X="CONFIG_DIR_ENV=P ..."` in
-    shell rc files (best effort), and ACCOUNT_DIR_GLOB dirs holding a login file or anything on
-    the share list, signed in or not. Reads no login."""
+    shell rc files (best effort), and ACCOUNT_DIR_GLOB dirs the tool has run in: holding their
+    own STATE_FILE, or DEFAULT_DIR with HOME's beside it. Shared items alone (a folder of shared
+    sessions, say) do not make an account. Reads no login."""
     found: dict[Path, Candidate] = {}
     for rc in RC_FILES:
         try:
@@ -211,9 +233,8 @@ def discover(home: Path) -> list[Candidate]:
     for d in sorted(home.glob(ACCOUNT_DIR_GLOB)):
         if d in found or not d.is_dir():
             continue
-        if (d / LOGIN_FILE).is_file():
-            found[d] = Candidate(d.name.lstrip("."), name, d, f"login file in ~/{d.name}")
-        elif any(os.path.lexists(d / item.rstrip("/")) for item in SHARED):
+        if (d / STATE_FILE).is_file() or (d == home / DEFAULT_DIR
+                                          and (home / STATE_FILE).is_file()):
             found[d] = Candidate(d.name.lstrip("."), name, d, f"folder ~/{d.name}")
     return sorted(found.values(), key=lambda c: c.id)
 
@@ -241,9 +262,117 @@ def state_lock(state: Path) -> Path:
     return state.with_name(STATE_LOCK)
 
 
+def hold_state(state: Path):
+    """Hold the tool's own lock folder for `state` while the block runs, as the tool does: wait
+    up to STATE_LOCK_WAIT seconds, take over one left over (older than STATE_LOCK_STALE), else
+    raise OSError."""
+    return store.held(state_lock(state), STATE_LOCK_WAIT, STATE_LOCK_STALE)
+
+
+def _read_state(state: Path) -> dict:
+    """STATE_FILE's object ({} when there is none). Raises for one that cannot be read or decoded:
+    it is never taken for absent."""
+    if not state.exists():
+        return {}
+    d = json.loads(state.read_text(encoding="utf-8"))
+    if not isinstance(d, dict):
+        raise ValueError("not a JSON object")
+    return d
+
+
+def _git_root(path: Path) -> Path | None:
+    """The root of the git repository (or worktree) `path` is in, else None."""
+    for p in (path, *path.parents):
+        if os.path.lexists(p / GIT_DIR):
+            return p
+    return None
+
+
+def _main_root(root: Path) -> Path:
+    """For a git worktree's root, the main repository's root; otherwise `root` itself."""
+    dot = root / GIT_DIR
+    if not dot.is_file():
+        return root
+    try:
+        line = dot.read_text(encoding="utf-8").strip()
+        if not line.startswith(GIT_FILE_PREFIX):
+            return root
+        gitdir = (root / line[len(GIT_FILE_PREFIX):].strip()).resolve()
+        common = (gitdir / (gitdir / GIT_COMMONDIR).read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, UnicodeDecodeError):
+        return root                          # a submodule, or something else: its own root
+    return common.parent if common.name == GIT_DIR else root
+
+
+def trust_paths(path: Path) -> list[Path]:
+    """The folders whose trust covers the canonical folder `path`, as the tool looks them up."""
+    root = _git_root(path)
+    if root is None:
+        return [path, *path.parents]
+    up = [path, *(p for p in path.parents if p.is_relative_to(root))]
+    main = _main_root(root)
+    return up + ([main] if main != root else [])
+
+
+def trust_key(path: Path) -> Path:
+    """The folder whose entry the tool's own dialog writes when it is accepted in `path`."""
+    root = _git_root(path)
+    return _main_root(root) if root else path
+
+
+def trusts(config_dir: Path, path: Path) -> bool | None:
+    """Whether the account folder `config_dir` trusts the canonical folder `path`; None when its
+    STATE_FILE cannot be read or decoded."""
+    try:
+        projects = _read_state(config_dir / STATE_FILE).get(STATE_PROJECTS)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(projects, dict):
+        return False
+    return any(isinstance(e := projects.get(str(p)), dict) and e.get(STATE_TRUST) is True
+               for p in trust_paths(path))
+
+
+def trust(config_dir: Path, path: Path, backups: Path) -> Path:
+    """Make the account folder `config_dir` trust the canonical folder `path`, writing the entry
+    where the tool itself would (`trust_key`), and return that folder. Under the tool's lock: a
+    file that cannot be read or decoded is refused, the old one is backed up into `backups`,
+    only that key is set (every other key and value kept), the file is replaced atomically and
+    read back. A missing STATE_FILE is created holding only that entry. Raises OSError or
+    ValueError and writes nothing when it cannot."""
+    state, key = config_dir / STATE_FILE, trust_key(path)
+    with hold_state(state):
+        d = _read_state(state)
+        projects = d.get(STATE_PROJECTS, {})
+        entry = projects.get(str(key), {}) if isinstance(projects, dict) else None
+        if not isinstance(entry, dict):
+            raise ValueError(f"{state}: unexpected layout under {STATE_PROJECTS}")
+        new = {**d, STATE_PROJECTS: {**projects, str(key): {**entry, STATE_TRUST: True}}}
+        store.write_with_backup(state, json.dumps(new, indent=2, ensure_ascii=False) + "\n",
+                                backups)
+        if _read_state(state) != new:
+            raise OSError(f"{state} did not read back as written")
+    return key
+
+
+def check_state(config_dir: Path) -> tuple[bool, str]:
+    """For doctor: STATE_FILE reads, and when it holds project entries, at least one uses
+    STATE_TRUST (else the tool may have renamed the field). (ok, text without paths)."""
+    if not (config_dir / STATE_FILE).exists():
+        return True, "no state file yet"
+    try:
+        projects = _read_state(config_dir / STATE_FILE).get(STATE_PROJECTS)
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        return False, f"state file cannot be read ({type(e).__name__})"
+    if isinstance(projects, dict) and projects and not any(
+            isinstance(e, dict) and STATE_TRUST in e for e in projects.values()):
+        return False, f"trust field not found; {tool} may have renamed it"
+    return True, "state file reads" + (", trust field found" if projects else "")
+
+
 def merge_state(dest: dict, src: dict) -> tuple[dict, list[str]]:
     """`dest` plus what may be carried over from `src`: trust for the projects `src` trusts, the
-    user MCP servers `dest` lacks, and the onboarding keys. Every other key of `dest` stays as it
+    user MCP servers `dest` lacks, the onboarding keys and the Claude in Chrome consent. Every other key of `dest` stays as it
     is, and nothing else of `src` is read. Also returns what was added, for the user: counts and
     names only, never a value."""
     new, what = dict(dest), []
@@ -263,11 +392,13 @@ def merge_state(dest: dict, src: dict) -> tuple[dict, list[str]]:
     if added:
         new[STATE_MCP] = {**mine, **{k: servers[k] for k in added}}
         what.append(f"MCP servers {', '.join(added)}")
-    keys = [k for k in STATE_ONBOARDING if k in src and k not in new]
-    for k in keys:
-        new[k] = src[k]
-    if keys:
-        what.append(f"onboarding ({', '.join(keys)})")
+    for label, group in (("onboarding", STATE_ONBOARDING),
+                         ("Claude in Chrome consent", STATE_CHROME)):
+        keys = [k for k in group if k in src and k not in new]
+        for k in keys:
+            new[k] = src[k]
+        if keys:
+            what.append(f"{label} ({', '.join(keys)})")
     return new, what
 
 
@@ -348,6 +479,35 @@ def wire(text: str | None, command: str) -> str | None:
     if json.loads(new) != want:
         raise ValueError("could not change the statusLine alone")
     return new
+
+
+def repath(text: str, old: str, new: str) -> tuple[str | None, list[str]]:
+    """Settings text in which every string value naming the folder `old` (the path itself or
+    something inside it) names `new` instead, and where each was (key paths, never values).
+    Keys and every other byte stay. (None, []) when nothing names it. Raises ValueError for a
+    text it cannot change safely."""
+    d, places = json.loads(text), []
+    after = r"(?![\w.-])"                   # /x/hub matches /x/hub and /x/hub/a, not /x/hub2
+
+    def walk(v, where: str):
+        if isinstance(v, str):
+            if re.search(re.escape(old) + after, v):
+                places.append(where)
+                return re.sub(re.escape(old) + after, lambda m: new, v)
+            return v
+        if isinstance(v, dict):
+            return {k: walk(x, f"{where}.{k}" if where else k) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x, f"{where}[{i}]") for i, x in enumerate(v)]
+        return v
+    want = walk(d, "")
+    if not places:
+        return None, []
+    esc_old, esc_new = (json.dumps(x, ensure_ascii=False)[1:-1] for x in (old, new))
+    out = re.sub(re.escape(esc_old) + after, lambda m: esc_new, text)
+    if json.loads(out) != want:
+        raise ValueError("the old path is not only in string values")
+    return out, places
 
 
 _WS = re.compile(r"\s*")

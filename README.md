@@ -37,15 +37,19 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
    backend (`hatchling`); an offline install fails.
 2. `fairshare setup` asks where to keep the hub (default `~/.local/share/fairshare/hub`), lists
    the Claude Code folders it finds (shell aliases that set `CLAUDE_CONFIG_DIR`, and `~/.claude*`
-   folders; signed-out ones are marked) and joins each one you pick. Your own folders are only
-   ever read: fairshare copies from them and never changes them.
+   folders Claude Code has run in; each marked by Claude Code's own sign-in check when it is
+   signed out or unknown) and joins each one you pick. Your own folders are only ever read:
+   fairshare copies from them and never changes them.
 3. `fairshare join [ID] [--from FOLDER]` adds one account: it makes the account's folder in the
    hub, runs Claude Code's own sign-in there (your browser; fairshare never sees a token), and
    checks who signed in. A login that is already another account's is "one quota", and you are
-   asked before it is kept. `--from` copies your folder's history, transcripts, settings,
-   CLAUDE.md, skills, plugins, commands and agents into the hub (a clashing file keeps both; the
-   first folder's settings win and later differences are shown), and, after asking, the
-   per-project trust, your MCP servers and the "first run done" flags, never your identity.
+   asked before it is kept. On a terminal it first asks which browser that account's sign-in
+   links open in (below). `--from` copies your folder's history, transcripts, settings,
+   CLAUDE.md, skills, plugins, commands, agents, rules and workflows into the hub (a clashing
+   file keeps both; the first folder's settings win and later differences are shown), and,
+   after asking, the per-project trust, your MCP servers, the "first run done" flags and the
+   Claude in Chrome consent, never your identity. `fairshare join ID` for an account already
+   joined signs it in again and changes nothing else: the fix for an expired or lost login.
 4. `fairshare` starts a session on the best account. `fairshare run -p "hi"` (or any other
    arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` starts the account
    `work` instead, skipping the ranking (a warning if it is near a limit); this replaces a
@@ -58,10 +62,43 @@ session feels the same whichever account it runs on. Before each launch fairshar
 account's links and repairs them without losing anything: a real folder Claude Code made is
 merged into the shared one (clashing files keep both), new history lines are appended, a
 differing settings file is set aside in `<hub>/backups/` with its diff shown, and it tells you
-in one line per item what it changed. fairshare never deletes. Move the hub by moving its folder
-and changing `hub` in `accounts.toml`: the links are relative. The usage hook lives in the hub's
+in one line per item what it changed. fairshare never deletes.
+
+**Moving the hub.** Move its folder, then run `fairshare doctor --fix` (it asks where the hub is
+now, or takes `--hub PATH`): it changes `hub` in `accounts.toml`, relinks every account (the
+links are relative, so they hold), rewires the usage hook if needed, and shows you every place
+in the shared settings that names the old path (your own hooks, say), renaming them only after
+your yes. Until then a launch stops with "no hub at <path>" instead of quietly building a new,
+empty hub at the old path. On macOS the login lives in the keychain, one entry per config folder,
+so after a move accounts may read as signed out: `doctor --fix` names `fairshare join ID` for each.
+The usage hook lives in the hub's
 settings: `fairshare capture --then '<yours>'` records usage for the account whose folder the
 session runs in, then runs your own statusLine and prints its line.
+
+**Folder trust.** Claude Code asks whether you trust a folder, and remembers the answer per
+account, so a folder you trusted on one account asks again on the next. When you start a session
+on a terminal in a folder that some account does not trust yet, fairshare asks once, before
+Claude Code starts, with Claude Code's own warning (it will be able to read, edit and execute
+files there):
+- `[a]` trust it for all accounts that lack it (named);
+- `[o]` only the account about to start, which fairshare remembers for this folder: it asks
+  again only when a launch lands on an account that still lacks trust there;
+- `[n]` no: nothing is written and nothing starts.
+
+There is no default (Enter asks again). When the account about to start already trusts the
+folder, `[n]` is not offered and `[o]` leaves the others as they are. `fairshare run -a ID` asks
+about that account only. In your home folder itself fairshare never asks or writes (Claude Code
+keeps trust there for one session only, by design), and without a terminal it asks nothing and
+Claude Code asks for itself. What it writes is exactly what Claude Code's own "Yes, I trust this
+folder" writes, in the same place, with a backup in `<hub>/backups/`.
+
+**Browser per account.** If you keep each account in its own browser profile, join (and setup)
+asks which one opens that account's sign-in: the default browser, one of your Chrome profiles
+(listed by name), or a command. It is stored as one line in the account's table in
+`accounts.toml` (`browser = "chrome:Profile 1"` or `browser = "command:/path/to/program"`); edit
+or remove that line to change it. fairshare writes a one-line launcher for it in
+`<hub>/browsers/` and points `BROWSER` at it for that account's sign-in and sessions. Whether
+`/login` inside a session honours `BROWSER` is not verified.
 
 `fairshare prefer ID [--for 3h]` prefers one account for a while (default: the rest of today):
 launches go to it while it can take work, and to the best account when it cannot. It ends on
@@ -80,16 +117,19 @@ session leaves in its children (silently). Everything else passes through, so mo
 your other Claude settings are yours; started from inside a Claude Code session, it names any
 other `CLAUDE_*` variable it passes on.
 
-If the sign-in check fails, an account is used only when its login file exists and an earlier
-check confirmed it as a subscription login (fairshare keeps a yes/no and a time per account,
-nothing else). An account whose plan has no plan file, or whose `accounts.toml` entry is wrong,
+If the sign-in check fails, an account is used only when an earlier check confirmed it as a
+subscription login (fairshare keeps a yes/no and a time per account, nothing else). A signed-out
+account is skipped with a hint (`fairshare join ID` signs it in again); `fairshare run -a ID` on
+a signed-out account offers that sign-in on a terminal and then starts the session. An account whose plan has no plan file, or whose `accounts.toml` entry is wrong,
 is left out with the reason; the others keep working. A bad `accounts.toml` is reported with
 the file and line, not a traceback.
 
 `fairshare doctor` checks the setup and changes nothing: the `claude` command is found (with its
-version), `accounts.toml` loads, each account's plan exists, each account's sign-in check answers,
-the hub's statusLine still calls capture, and the `fairshare` command it calls runs. One line per
-check; exit 0 when all pass.
+version), `accounts.toml` loads, the hub is where it is configured, each account's plan exists,
+its sign-in check answers and its `.claude.json` still holds folder trust where fairshare
+expects it, the hub's statusLine still calls capture, and the `fairshare` command it calls runs.
+One line per check; exit 0 when all pass. `fairshare doctor --fix` repairs what it can first
+(a moved hub, missing links, a stale usage hook), one line per fix.
 
 `fairshare uninstall` changes nothing (there is nothing to undo in your own folders): it says
 where the config, state and hub are and what the hub holds, how to remove the installed

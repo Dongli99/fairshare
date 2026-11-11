@@ -159,18 +159,18 @@ class Account_(Fleet):
                 self.assertIn(why, err)
                 self.launched.assert_not_called()
 
-    def test_a_failed_check_falls_back_to_the_login_file(self):
-        self.add("c", auth=None)                    # the check fails, a login file exists
-        self.add("d", auth=None, login=False)       # the check fails, no login
+    def test_a_failed_check_falls_back_to_the_last_confirmation(self):
+        self.add("c", auth=None)                    # the check fails, confirmed before
+        self.add("d", auth=None)                    # the check fails, confirmed as not one
         self.confirm("c")
-        self.confirm("d")
+        self.confirm("d", False)
         code, _, err = self.go("run", "-a", "c")
         self.assertEqual(code, 0)
-        self.assertIn("sign-in check failed for c", err)
+        self.assertIn("sign-in check failed for c; went by its last confirmation", err)
         self.launched.assert_called_once()
         code, _, err = self.go("run", "-a", "d")
         self.assertEqual(code, 1)
-        self.assertIn("not signed in", err)
+        self.assertIn("d was never confirmed as a subscription login", err)
         self.launched.assert_not_called()
 
     def test_only_that_account_is_asked(self):
@@ -209,7 +209,9 @@ class Doctor(Fleet):
         self.assertEqual(lines, [
             "pass  claude: command found, version 9.9.9 (Fake Code)",
             "pass  a: sign-in check answers: signed in, plan claude-pro",
+            "pass  a: no state file yet",
             "pass  b: sign-in check answers: signed in, plan claude-pro",
+            "pass  b: no state file yet",
             "pass  claude: usage hook in the hub calls fairshare capture",
             "pass  fairshare command (called by the claude usage hook) runs"])
 
@@ -346,7 +348,8 @@ class Boundary(unittest.TestCase):
 
     def test_no_claude_specific_name_is_left_in_cli(self):
         self.assertIsNone(re.search(r"claude|anthropic", self.SRC, re.I))   # of any case
-        consts = [claude.BINARY, claude.CONFIG_DIR_ENV, claude.LOGIN_FILE, claude.SETTINGS_FILE,
+        consts = [claude.BINARY, claude.CONFIG_DIR_ENV, claude.SETTINGS_FILE, claude.tool,
+                  *claude.STATE_CHROME, claude.GIT_DIR, claude.GIT_COMMONDIR,
                   claude.STATUS_LINE_KEY, claude.SESSION_MARK_ENV,
                   claude.WATCH_ENV_PREFIX, claude.ACCOUNT_DIR_GLOB, *claude.LOGIN_OVERRIDE_ENV, *claude.SESSION_ENV, *claude.RC_FILES,
                   claude.STATE_FILE, claude.STATE_LOCK, claude.STATE_TRUST, claude.STATE_MCP,

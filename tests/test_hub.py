@@ -24,17 +24,20 @@ from fairshare.providers import claude
 # Answers $FAKE_IDS/<folder name> as that folder's person: the same person is the same login.
 FAKE_CLAUDE = r"""#!/bin/sh
 [ "$1" = "--version" ] && { echo "9.9.9 (Fake Code)"; exit 0; }
-name=$(basename "$CLAUDE_CONFIG_DIR")
+dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+name=$(basename "$dir")
 echo "$*" >> "$FAKE_LOG/calls-$name"
 case "$1 $2" in
   "auth login")
+    env > "$FAKE_LOG/login-env-$name"
     [ -f "$FAKE_IDS/$name" ] || exit 1
-    : > "$CLAUDE_CONFIG_DIR/.credentials.json"
-    [ -f "$CLAUDE_CONFIG_DIR/.claude.json" ] || printf '{"userID": "u-%s", "numStartups": 0}\n' "$name" > "$CLAUDE_CONFIG_DIR/.claude.json"
+    : > "$dir/.credentials.json"
+    [ -f "$dir/.claude.json" ] || printf '{"userID": "u-%s", "numStartups": 0}\n' "$name" > "$dir/.claude.json"
     exit 0 ;;
-  "auth logout") rm -f "$CLAUDE_CONFIG_DIR/.credentials.json"; exit 0 ;;
+  "auth logout") rm -f "$dir/.credentials.json"; exit 0 ;;
   "auth status")
-    if [ -f "$CLAUDE_CONFIG_DIR/.credentials.json" ]; then
+    env > "$FAKE_LOG/status-env-$name"
+    if [ -f "$dir/.credentials.json" ]; then
       who=$(cat "$FAKE_IDS/$name")
       printf '{"loggedIn": true, "authMethod": "%s", "email": "%s@example.invalid", "orgId": "org-%s", "orgName": "Example Org", "planTier": "pro"}\n' "${FAKE_METHOD:-claude.ai}" "$who" "$who"
     else
@@ -47,6 +50,7 @@ exit 0
 """
 ZSHRC = ('alias work="CLAUDE_CONFIG_DIR=~/.claude-work claude"\n'
          "alias play='CLAUDE_CONFIG_DIR=$HOME/.claude-play claude'\n")
+LOGIN = ".credentials.json"          # the fake's own sign-in marker; fairshare never looks at it
 SECRETS = ("s3cr3t-value", "mcp-secret-value", "example.invalid", "org-", "Example Org",
            "user-work")
 
@@ -78,11 +82,14 @@ class Base(unittest.TestCase):
             "FAKE_IDS": str(self.ids), "FAKE_LOG": str(self.log)})
         env.start()
         self.addCleanup(env.stop)
-        for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC"))]:
+        for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC")) or k == "BROWSER"]:
             del os.environ[k]                # restored by env.stop
         for tool in ("claude", "fairshare"):                                 # never the real ones
             self.assertEqual(shutil.which(tool), str(self.bin / tool))
         self.hub = self.home / ".local/share/fairshare/hub"
+        cwd = os.getcwd()                # launches run in HOME, where no trust question is asked
+        os.chdir(self.home)
+        self.addCleanup(os.chdir, cwd)
 
     def person(self, folder: str, who: str) -> None:
         """The login the fake's sign-in gives in the hub folder `folder`."""
@@ -130,7 +137,7 @@ class UserFolders(Base):
         work, play, old, default = (h / n for n in (".claude-work", ".claude-play", ".claude-old",
                                                     ".claude"))
         for d in (work, play, default):
-            write(d / claude.LOGIN_FILE, "never opened").chmod(0)
+            write(d / LOGIN, "never opened").chmod(0)
         write(play / "settings.json", json.dumps(
             {"theme": "light", "statusLine": {"type": "command", "command": "~/bin/line.sh"}},
             indent=2) + "\n")
@@ -144,6 +151,7 @@ class UserFolders(Base):
         write(work / "projects/-p-one/s1.jsonl", "A\n")
         write(work / "projects/-p-one/memory/MEMORY.md", "remember\n")
         write(old / "projects/-p-old/s0.jsonl", "old\n")
+        write(old / ".claude.json", "{}")
         write(play / "CLAUDE.md", "play rules\n")
         write(work / "CLAUDE.md", "work rules\n")
         write(work / "skills/x/SKILL.md", "skill\n")
@@ -175,7 +183,7 @@ class UserFolders(Base):
             else:
                 p.chmod(p.stat().st_mode | 0o400)
                 out[rel] = ("file", p.read_bytes(), p.stat().st_mode)
-                if rel.name == claude.LOGIN_FILE:
+                if rel.name == LOGIN:
                     p.chmod(0)
         return out
 
@@ -350,7 +358,9 @@ class Join(UserFolders):
         self.config()
         self.person("work", "alice")
         self.go("join", "work")
-        for argv, why in ((["join", "work"], "already joined"), (["join", "../x"], "account id"),
+        for argv, why in ((["join", "work", "--from", "~/.claude-work"], "already joined"),
+                          (["join", "--from", "~/.claude-work"], "already joined"),
+                          (["join", "../x"], "account id"),
                           (["join", "--from", str(self.tmp / "nope")], "not a folder"),
                           (["join", "--from", str(self.hub / "shared")], "inside the hub")):
             with self.subTest(argv=argv):
@@ -390,7 +400,7 @@ class Join(UserFolders):
     def test_a_held_lock_is_waited_for_then_refused(self):
         lock = self.tmp / "x.lock"
         lock.mkdir()
-        with self.assertRaises(OSError), cli._held(lock, 0.2):
+        with self.assertRaises(OSError), store.held(lock, 0.2, stale=30):
             pass
         self.assertTrue(lock.is_dir())                           # someone else's: left alone
 
@@ -425,14 +435,14 @@ class Leave(UserFolders):
         self.assertEqual(self.go("leave", "a"), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["b"])
         self.assertTrue(self.cfg.read_text().startswith("# my accounts\n"))
-        self.assertTrue((hub.account_dir(self.hub, "a") / claude.LOGIN_FILE).exists())
+        self.assertTrue((hub.account_dir(self.hub, "a") / LOGIN).exists())
         self.assertNotIn("auth logout", self.calls("a"))
 
     def test_logout_also_signs_it_out(self):
         self.assertEqual(self.go("leave", "b", "--logout"), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["a"])
         self.assertEqual(self.calls("b")[-1], "auth logout")
-        self.assertFalse((hub.account_dir(self.hub, "b") / claude.LOGIN_FILE).exists())
+        self.assertFalse((hub.account_dir(self.hub, "b") / LOGIN).exists())
         self.assertTrue(hub.account_dir(self.hub, "b").is_dir())
         self.assert_untouched()
 
@@ -702,10 +712,10 @@ class BareAndUninstall(UserFolders):
     def test_uninstall_changes_nothing_and_says_how(self):
         self.setup_all()
         everything = {p: (p.read_bytes() if p.is_file() and not p.is_symlink() else None)
-                      for p in self.tmp.rglob("*") if p.name != claude.LOGIN_FILE}
+                      for p in self.tmp.rglob("*") if p.name != LOGIN}
         self.assertEqual(self.go("uninstall"), 0)
         self.assertEqual({p: (p.read_bytes() if p.is_file() and not p.is_symlink() else None)
-                          for p in self.tmp.rglob("*") if p.name != claude.LOGIN_FILE}, everything)
+                          for p in self.tmp.rglob("*") if p.name != LOGIN}, everything)
         self.assertIn(f"Hub: {self.hub}", self.out)
         self.assertIn("accounts: claude, claude-old, play, work", self.out)
         self.assertIn("pipx uninstall fairshare", self.out)
@@ -776,7 +786,8 @@ class Pure(unittest.TestCase):
         self.assertEqual(without_account(text, "b"),
                          '# top\nhub = "/h"\n\n[policy]\ngrace_hours = 2.0\n\n# first\n[[account]]\nid = "a"\nplan = "claude-pro"\n\n')
         self.assertEqual(with_hub("", "/x"), 'hub = "/x"\n')
-        self.assertEqual(with_hub(text, "/x"), text)
+        self.assertEqual(with_hub(text, "/h"), text)
+        self.assertEqual(with_hub(text, "/x"), text.replace('hub = "/h"', 'hub = "/x"'))
         self.assertTrue(with_hub("# c\n", "/x").startswith('hub = "/x"\n'))
         for bad in (lambda: with_account(text, {"id": "a", "plan": "claude-pro"}),
                     lambda: with_account(text, {"id": "../e", "plan": "claude-pro"}),

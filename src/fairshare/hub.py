@@ -29,6 +29,14 @@ def account_dir(hub: Path, account_id: str) -> Path:
     return hub / "accounts" / account_id
 
 
+def present(hub: Path, account_id: str | None = None) -> bool:
+    """Whether a hub is at `hub` (its shared/ and accounts/ folders, and the account's folder
+    when one is named). A launch never builds a hub: after a move it would silently start an
+    empty one at the old path."""
+    return shared_dir(hub).is_dir() and (hub / "accounts").is_dir() and (
+        account_id is None or account_dir(hub, account_id).is_dir())
+
+
 def lock(hub: Path):
     """Held while the hub's links or shared items change: two launches must not repair at once."""
     return store.locked(hub / ".lock")
@@ -114,7 +122,7 @@ def _write_bytes(dest: Path, data: bytes, mode_from: Path | None = None) -> None
     os.replace(tmp, dest)
 
 
-def _diff(prov, item: str, ours: bytes, theirs: bytes, theirs_name: str) -> str:
+def diff(prov, item: str, ours: bytes, theirs: bytes, theirs_name: str) -> str:
     """The differences the user is shown, values that may be secrets hidden by the provider."""
     try:
         a = prov.masked(item, ours.decode("utf-8"))
@@ -182,10 +190,10 @@ def check(hub: Path, account_id: str, prov) -> list[str]:
                 notes.append(f"{what} was a real copy of the shared one; moved to "
                              f"{put_aside(link)}")
             else:
-                diff = _diff(prov, name, ours.read_bytes(), link.read_bytes(),
+                shown = diff(prov, name, ours.read_bytes(), link.read_bytes(),
                              f"{account_id}'s {name} (set aside)")
                 notes.append(f"{what} differed from the shared one, which is kept; this "
-                             f"account's copy is in {put_aside(link)}:\n{diff}".rstrip("\n"))
+                             f"account's copy is in {put_aside(link)}:\n{shown}".rstrip("\n"))
             os.symlink(want, link)
     if linked:
         notes.insert(0, f"{account_id}: linked {', '.join(linked)}")
@@ -232,9 +240,9 @@ def seed(hub: Path, source: Path, account_id: str, prov,
                                             backup_dir(hub, f"seed-{account_id}"))
                     notes.append(f"{name}: copied (the hub's held only what fairshare adds)")
                 elif ours.read_bytes() != data:
-                    diff = _diff(prov, name, ours.read_bytes(), data, f"{source}/{name}")
+                    shown = diff(prov, name, ours.read_bytes(), data, f"{source}/{name}")
                     notes.append(f"{name}: differs from the hub's, which is kept (the first "
-                                 f"folder copied wins); not applied:\n{diff}".rstrip("\n"))
+                                 f"folder copied wins); not applied:\n{shown}".rstrip("\n"))
     return notes
 
 

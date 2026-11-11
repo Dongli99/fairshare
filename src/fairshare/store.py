@@ -124,6 +124,58 @@ def locked(path: Path):
         yield
 
 
+@contextlib.contextmanager
+def held(lock: Path, seconds: float = 10.0, stale: float | None = None):
+    """Hold the lock FOLDER `lock` (made with mkdir, as some tools do for their own files) while
+    the block runs. Waits up to `seconds` for it; one untouched for more than `stale` seconds is
+    left over and is taken over. Raises OSError when it stays held."""
+    end = time.monotonic() + seconds
+    while True:
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            try:
+                old = stale is not None and time.time() - lock.stat().st_mtime > stale
+            except FileNotFoundError:
+                continue                     # released meanwhile: try again
+            if old:
+                with contextlib.suppress(OSError):
+                    os.rmdir(lock)           # an empty folder; a race just means waiting on
+                continue
+            if time.monotonic() > end:
+                raise OSError(f"{lock} is held by someone else; try again later")
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        os.rmdir(lock)
+
+
+def _trust_only_file() -> Path:
+    return state_dir() / "trust-only.json"
+
+
+def trust_only(folder: Path) -> bool:
+    """Whether the user answered "only" to the trust question for `folder` (canonical)."""
+    try:
+        return json.loads(_trust_only_file().read_text()).get(str(folder)) is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def remember_trust_only(folder: Path) -> None:
+    """Remember "only" for `folder`: one small JSON map, rewritten atomically under a lock."""
+    path = _trust_only_file()
+    with locked(path.with_name(path.name + ".lock")):
+        try:
+            d = json.loads(path.read_text())
+            d = d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            d = {}
+        _write_json(state_dir(), path.name, {**d, str(folder): True})
+
+
 def free_name(path: Path) -> Path:
     """`path`, or the same name with -1, -2... added when that already exists."""
     found, n = path, 1

@@ -12,6 +12,7 @@ from ..model import Account, AccountStatus, Candidate, Capture, Window
 
 class Provider(Protocol):
     name: str
+    tool: str                # the provider's tool as users know it, for messages
     default_plan: str        # proposed at join when the sign-in check names no plan
     shared: tuple[str, ...]  # what every account shares through the hub; "x/" names a folder
     not_copied: tuple[str, ...]  # of those, what join never copies in: live state, keys
@@ -50,10 +51,6 @@ class Provider(Protocol):
         """Ask the provider whether `account` is signed in, with what kind of login, under which
         identity and plan. None when the question could not be answered (never raise)."""
 
-    def login_present(self, account: Account) -> bool:
-        """Whether the account's folder holds a login, by existence only: the fallback when
-        account_status gives no answer. Must not open the login."""
-
     def find_binary(self) -> str | None:
         """The provider's command-line tool on PATH, or None."""
 
@@ -63,8 +60,22 @@ class Provider(Protocol):
     def state_file(self, folder: Path, home: Path) -> Path:
         """The provider's own state file that the user's folder `folder` uses."""
 
-    def state_lock(self, state: Path) -> Path:
-        """The lock the provider itself takes while it writes the state file `state`."""
+    def hold_state(self, state: Path):
+        """A context manager holding the lock the provider itself takes while it writes the
+        state file `state`; raises OSError when it cannot be had."""
+
+    def trusts(self, config_dir: Path, path: Path) -> bool | None:
+        """Whether the account folder `config_dir` lets the tool work in the canonical folder
+        `path` without asking (by the provider's own lookup rule); None when it cannot tell."""
+
+    def trust(self, config_dir: Path, path: Path, backups: Path) -> Path:
+        """Record that trust as the provider's own dialog would, backing the file up into
+        `backups`, and return the folder the entry names. Raises OSError or ValueError and
+        writes nothing when it cannot."""
+
+    def check_state(self, config_dir: Path) -> tuple[bool, str]:
+        """For doctor: whether the account's state file still has the layout fairshare relies
+        on, and one line saying so (no paths, no values)."""
 
     def merge_state(self, dest: dict, src: dict) -> tuple[dict, list[str]]:
         """`dest` (a new account's state) plus the few keys join may carry over from `src` (a
@@ -80,6 +91,11 @@ class Provider(Protocol):
 
     def wired(self, text: str | None) -> Capture | None:
         """The fairshare capture hook found in that file's text, else None."""
+
+    def repath(self, text: str, old: str, new: str) -> tuple[str | None, list[str]]:
+        """That file's text with every string value naming the folder `old` renamed to `new`, and
+        where each was (key paths only); (None, []) when nothing names it. Every other byte stays.
+        Raises ValueError for a text it cannot change safely."""
 
     def wire(self, text: str | None, command: str) -> str | None:
         """New text for that file so that it records usage through the shell command `command`

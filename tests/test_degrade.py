@@ -62,7 +62,6 @@ class UnknownPlan(Fleet):
         self.launched.assert_not_called()
 
     def test_doctor_fails_that_account_and_checks_the_rest(self):
-        (self.tmp / "hub/shared").mkdir(parents=True)
         (self.tmp / "hub/shared/settings.json").write_text(json.dumps(
             {"statusLine": {"type": "command", "command": f"{self.bin}/fairshare capture"}}))
         code, out, _ = self.go("doctor")
@@ -205,12 +204,11 @@ class Confirmed(Fleet):
 
     def test_last_answer_no_or_login_file_gone_is_still_left_out(self):
         self.add("key", auth=None)
-        self.add("gone", auth=None, login=False)
+        self.add("never", auth=None)
         self.confirm("key", False)
-        self.confirm("gone", True)
         out = self.go("status")[1]
         self.assertIn("left out: " + self.NEVER.format("key"), out)
-        self.assertIn("gone", [l for l in out.splitlines() if "not signed in" in l][0])
+        self.assertIn("left out: " + self.NEVER.format("never"), out)
 
     def test_confirmed_once_it_can_be_used_when_the_check_later_fails(self):
         self.add("a", orgId=ORG + "a")
@@ -353,7 +351,7 @@ class Smalls(Fleet):
         home = self.tmp / "home"
         for n in (".claude-x", ".other-y"):
             (home / n).mkdir()
-            (home / n / claude.LOGIN_FILE).write_text("")
+            (home / n / claude.STATE_FILE).write_text("{}")
         with mock.patch.object(claude, "ACCOUNT_DIR_GLOB", ".other*"):
             self.assertEqual([c.id for c in claude.discover(home)], ["other-y"])
 

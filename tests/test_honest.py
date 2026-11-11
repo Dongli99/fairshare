@@ -74,7 +74,7 @@ class Fleet(unittest.TestCase):
             "FAKE_AUTH": str(self.auth), "FAKE_LOG": str(self.log)})
         env.start()
         self.addCleanup(env.stop)
-        for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC"))]:
+        for k in [k for k in os.environ if k.startswith(("CLAUDE", "ANTHROPIC")) or k == "BROWSER"]:
             del os.environ[k]              # restored by env.stop; a surrounding session's own
         time.tzset()
         self.addCleanup(time.tzset)      # runs after env.stop restores TZ
@@ -86,17 +86,19 @@ class Fleet(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         self.accounts = []
+        (self.tmp / "hub" / "shared").mkdir(parents=True)
+        cwd = os.getcwd()                # launches run in HOME, where no trust question is asked
+        os.chdir(self.tmp / "home")
+        self.addCleanup(os.chdir, cwd)
 
     def sleep(self, s):
         self.slept.append(s)
         self.clock[0] += s
 
-    def add(self, id, plan="claude-pro", auth="pro", login=True, extra="", **override):
+    def add(self, id, plan="claude-pro", auth="pro", extra="", **override):
         """An account folder. `auth` names a fixture served for it (None: the probe fails)."""
         d = self.tmp / "hub/accounts" / id
         d.mkdir(parents=True)
-        if login:
-            (d / claude.LOGIN_FILE).write_text("")
         if auth:
             serve(self.version, f"auth-status-{auth}", self.auth, id, **override)
         self.accounts.append(f'[[account]]\nid = "{id}"\nplan = "{plan}"\n{extra}')
@@ -257,7 +259,7 @@ class Excluded(Fleet):
         self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/ok"))
 
     def test_nothing_rankable_is_an_error_not_a_launch(self):
-        (self.tmp / "accounts.toml").write_text(self.accounts[1])
+        (self.tmp / "accounts.toml").write_text(f'hub = "{self.tmp / "hub"}"\n' + self.accounts[1])
         with self.assertRaises(SystemExit) as e, \
                 mock.patch.object(session, "run_child") as launched, \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -322,26 +324,27 @@ class DetectedPlan(Fleet):
 
 
 class ProbeFails(Fleet):
-    def test_falls_back_to_the_login_file_and_the_configured_plan(self):
+    def test_falls_back_to_the_last_confirmation_and_the_configured_plan(self):
         self.add("a", plan="claude-max", auth=None)           # claude exits non-zero
-        self.add("b", auth=None, login=False)
+        self.add("b", auth=None)
         self.add("c", orgId=ORG + "c")
         self.confirm("a")
-        self.confirm("b")             # confirmed once, but the login file is gone now
+        self.confirm("b", False)      # confirmed once as not a subscription login
         s = cli._survey()
         self.assertEqual({v.account.id: v.account.plan.name for v in s.verdicts},
                          {"a": "claude-max", "c": "claude-pro"})
-        self.assertEqual([(a.id, why) for a, why in s.out], [("b", "not signed in")])
+        self.assertEqual([(a.id, why) for a, why in s.out], [
+            ("b", "sign-in check failed and b was never confirmed as a subscription login")])
         self.assertEqual(s.failed, ["a", "b"])
 
     def test_status_says_what_failed_and_what_was_used(self):
         self.add("a", auth=None)
-        self.add("b", auth=None, login=False)
+        self.add("b", auth=None)
         self.confirm("a")
         out = self.go("status")[1]
-        self.assertIn("sign-in check failed; login file found, last confirmed as a subscription "
-                      "login on 2027-01-15; plan claude-pro from config", out)
-        self.assertIn("login file not found, counted as signed out", out)
+        self.assertIn("sign-in check failed; last confirmed as a subscription login on "
+                      "2027-01-15; plan claude-pro from config", out)
+        self.assertNotIn("login file", out)
 
     def test_run_prints_one_line_and_still_launches(self):
         self.add("a", auth=None)

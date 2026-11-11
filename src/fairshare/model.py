@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 
+from . import browser
+
 
 @dataclass(frozen=True)
 class Window:
@@ -37,6 +39,7 @@ class Account:
     status_args: tuple[str, ...] | None = None   # overrides the provider's sign-in check command
     capacity: float | None = None  # the account's own override; it survives plan detection
     plan_error: str | None = None  # why `plan` is None: the account is left out of ranking
+    browser: str | None = None     # how its sign-in link opens (`browser.parse`); None: default
 
 
 @dataclass(frozen=True)
@@ -139,8 +142,10 @@ def _account(a: dict, hub: Path) -> Account:
     if not provider:
         raise ValueError(f"{error}, and no provider is named")
     args = a.get("status_args")
+    if (spec := a.get("browser")) is not None:
+        browser.parse(spec)                  # raises ValueError saying what is accepted
     return Account(a["id"], provider, plan, hub / "accounts" / a["id"],
-                   tuple(shlex.split(args)) if args else None, capacity, error)
+                   tuple(shlex.split(args)) if args else None, capacity, error, spec)
 
 
 def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
@@ -188,6 +193,7 @@ def plan_names() -> list[str]:
 # layout survive, and every result is parsed again before it is returned.
 
 _TABLE = re.compile(r"^\s*\[")
+_HUB_LINE = re.compile(r"^\s*hub\s*=")
 _ACCOUNT_TABLE = re.compile(r"^\s*\[\[\s*account\s*\]\]")
 
 
@@ -202,12 +208,20 @@ def account_table(entry: dict) -> str:
 
 
 def with_hub(text: str, hub: str) -> str:
-    """`text` with a top-level `hub` key; unchanged when it already has one."""
-    if "hub" in tomllib.loads(text):
+    """`text` whose top-level `hub` key is `hub`: its one line replaced, or added at the top."""
+    old = tomllib.loads(text)
+    if old.get("hub") == hub:
         return text
     new = f"hub = {_toml(hub)}\n" + ("\n" + text if text.strip() else "")
-    if tomllib.loads(new).get("hub") != hub:
-        raise ValueError("could not add the hub to accounts.toml")
+    if "hub" in old:
+        lines = text.splitlines(keepends=True)
+        at = next((i for i, line in enumerate(lines) if _HUB_LINE.match(line)
+                   and not any(_TABLE.match(x) for x in lines[:i])), None)
+        if at is None:
+            raise ValueError("could not find the hub line in accounts.toml")
+        new = "".join(lines[:at] + [f"hub = {_toml(hub)}\n"] + lines[at + 1:])
+    if tomllib.loads(new) != {**old, "hub": hub}:
+        raise ValueError("could not set the hub in accounts.toml")
     return new
 
 

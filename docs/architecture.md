@@ -9,12 +9,15 @@ plans/*.toml  ──► model.load_plan                    └──► policy.r
 providers/<p>.account_status (once per command, in parallel) ──────┘   │
    signed in? subscription? same login as another folder? plan?        ▼
                                                   cli: status | run ◄──┘
-                                                       run ──► hub.check (the account's links)
-                                                           ──► providers/<p>.launch
+                                                       run ──► hub.present (else stop: moved?)
+                                                           ──► providers/<p>.trusts / trust (ask)
+                                                           ──► hub.check (the account's links)
+                                                           ──► browser.env, providers/<p>.launch
                                                            ──► session.run_child (a child, not exec)
 
-setup ──► join ──► hub.check, providers/<p>.login_command, account_status
+setup ──► join ──► hub.check, browser (ask), providers/<p>.login_command, account_status
                    [--from: hub.seed, providers/<p>.merge_state] ──► accounts.toml (+ one table)
+doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ──► wire ──► repath (ask)
 ```
 
 ## Seams
@@ -27,6 +30,7 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
 | Storage | where snapshots live | `store.py` |
 | Session | how a child session is started and supervised | `session.py` (provider-neutral) |
 | Hub | where the shared items live and how each account's folder links to them | `hub.py` (provider-neutral; the share list is the adapter's `SHARED`) |
+| Browser | where an account's sign-in links open | `browser.py` (provider-neutral; `BROWSER` names one launcher per account) |
 
 ## Decisions
 
@@ -80,7 +84,8 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
      is one config folder per account, holding what is its own (the login the provider creates
      there, its state file, caches, jobs, locks) and a RELATIVE link for every shared item
      (`projects -> ../../shared/projects`), so the whole hub can be moved: move the folder, change
-     `hub`, and every link still holds. `<hub>/backups/` gets whatever fairshare moves aside;
+     `hub` (`fairshare doctor --fix` does it, decision 17), and every link still holds. The
+     hub also holds `browsers/` (one launcher per account with a `browser` line). `<hub>/backups/` gets whatever fairshare moves aside;
      fairshare never deletes. An account's folder is derived (`<hub>/accounts/<id>`), so an
      account table has no `config_dir` (an old one is a `ConfigError` that says to run `setup`),
      and an id must be a plain folder name.
@@ -111,6 +116,10 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
      (`Provider.session_dir`); a session outside the hub records nothing and still runs `--then`.
      An id after `capture` (what the per-account wiring wrote) is accepted and ignored, so the
      user's own folders' old statusLines keep printing their line.
+   - **`join <id>` for an id already joined** signs it in again and changes nothing else: only
+     the provider's sign-in in its folder (with its browser), then the sign-in check under the
+     same identity rules (a login that is another account's says "one quota"). This is the fix
+     for an expired or moved login; `run -a` offers it for a signed-out account on a terminal.
    - **`join [<id>] [--from <folder>]`** creates the folder with its links (the start check), runs
      the provider's own sign-in in it (`Provider.login_command`, interactive; fairshare never sees
      a token), then the sign-in check: not signed in or not a subscription login adds nothing;
@@ -123,14 +132,30 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
      that holds only fairshare's own statusLine counts as none). Then, after asking, the state
      keys `Provider.merge_state` allows (trusted projects, user MCP servers, the onboarding keys)
      go into the new account's state file, adding only what it lacks; identity, tokens and
-     account fields never. The prompt names counts and server names only. The source is never
+     account fields never. The Claude in Chrome consent keys are in that same asked-for group
+     (consent is per account, like trust). The prompt names counts and server names only. The source is never
      written. Default id: the folder's alias or name, else the lowest free `account-N`.
    - **`leave <id> [--logout]`** removes the account's table from `accounts.toml`; its folder and
      login stay. `--logout` runs the provider's sign-out in that folder first (a failure changes
      nothing).
    - **`setup`** asks the hub folder (default shown; not asked again once set), lists the user's
-     folders that discovery finds (signed-out ones marked, by the login file's existence: nothing
-     is run against them) and runs `join <id> --from <folder>` for each one picked. Bare
+     folders that discovery finds and runs `join <id> --from <folder>` for each one picked (one
+     already joined is marked and skipped). A folder qualifies only with its own state file, or as
+     the provider's default folder with HOME's state file beside it, or when an rc alias names
+     it: shared items alone (a folder of shared sessions) do not make an account. Each folder's
+     label comes from the read-only sign-in check, all at once; the default folder is checked
+     without the folder variable, as the provider itself runs there. A folder with no state file
+     is not checked, since the check would create one in it: "(sign-in unknown)", as for a check
+     that gives no answer.
+   - **Browser per account.** An account may have a `browser` line: absent, the system default;
+     `chrome:<profile folder>`, that Chrome profile; `command:<absolute path>`, an executable
+     taking the link. setup and join ask once on a terminal (Chrome profiles listed by display
+     name, read from Chrome's own `Local State`, those two fields only); changing it later is an
+     edit of that line. fairshare writes a one-line launcher per account, `<hub>/browsers/<id>`
+     (mode 755, rewritten by each launch when missing or changed) and sets `BROWSER` to its
+     absolute path for that account's sign-in, sign-in again and sessions. The provider calls
+     `BROWSER` with the link as its one argument and does not split a value with arguments, so
+     it must name one program. Bare
      `fairshare` with no config offers it on a terminal; otherwise it prints how and exits 2.
    - **`uninstall`** changes nothing: it prints where the config, state and hub are and what the
      hub holds, the command that removes fairshare, and a prompt the user can give their own agent
@@ -169,10 +194,10 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
       onto a login nobody confirmed. Every successful check records, per account, in
       fairshare's state dir (`checks/<id>.json`), whether it was a subscription login and when:
       a yes/no and a time, nothing else. After a failed check an account counts as signed in
-      only when its login file exists (existence only, never opened) AND its last recorded
-      answer was yes; it then takes its plan from `accounts.toml` and is not grouped. Otherwise
-      it is left out: "sign-in check failed and <id> was never confirmed as a subscription
-      login" (or "not signed in" when there is no login file). The reason: the state a
+      only when its last recorded answer was yes; it then takes its plan from `accounts.toml`
+      and is not grouped. Otherwise it is left out: "sign-in check failed and <id> was never
+      confirmed as a subscription login". The login file is no evidence (stage 3b): on 2.1.322
+      macOS a fresh sign-in writes none, the login lives in the keychain. The reason: the state a
       changed `auth status` leaves behind is exactly when an API-billed login could be taken for
       a subscription, so a guess is not good enough. `status` names the failure and the
       fallback; `run` prints one line. `run -a` follows the same rule (exit 1 when refused).
@@ -201,8 +226,12 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
     `fairshare run -a <id> [args...]` (`--account`) starts that account and skips ranking and the
     refusal: it is the user's explicit choice, so a near-limit account gets one warning line
     (reason, when it is usable) and then launches. An unknown id lists the configured ones
-    (exit 2); an account that is not signed in, not a subscription login, or whose plan has no
-    plan file, stops with exit 1; a failed sign-in check falls back as in decision 10. Only a
+    (exit 2); an account that is not a subscription login, or whose plan has no plan file, stops
+    with exit 1; a failed sign-in check falls back as in decision 10. A signed-out account on a
+    terminal is asked "Sign in now? [y/N]": yes signs it in again (decision 9) and, when the
+    check then passes, starts it; no, or no terminal, stops with exit 1 naming
+    `fairshare join <id>`. A plain launch that skips a signed-out account adds one hint line
+    naming that command, and asks nothing (routing still works). Only a
     leading `-a`/`--account` is fairshare's; `run -- -a x` passes `-a x` on. Any other first word
     that is not a command (`fairshare -p hi`) exits 2 with `did you mean: fairshare run -p hi`.
 
@@ -228,14 +257,17 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
     - the exit code is the child's, or 128 plus the signal number when it died of a signal;
       a command that cannot start gives 127 (not found) or 126 with one message.
 
-13. **`doctor` is read-only.** One line per check, `pass` or `FAIL`, exit 0 when all pass and 1
-    otherwise: the provider's command is found (with its version, from the adapter);
-    `accounts.toml` loads (a config error is one FAIL line with the file's name and the reason,
-    never a traceback); each account's plan exists and its sign-in check answers; the hub's one
-    settings file still calls capture; the `fairshare` command it calls exists and runs
-    (`--help`; with no hook wired, the installed one). It reads settings and changes nothing, and
-    prints account ids and plan names only, so the output can go into a public issue. A repairing
-    `--fix` (reusing the start check) is stage 3b.
+13. **`doctor` is read-only; `doctor --fix` repairs.** One line per check, `pass` or `FAIL`, exit 0
+    when all pass and 1 otherwise: the provider's command is found (with its version, from the
+    adapter); `accounts.toml` loads (a config error is one FAIL line with the file's name and the
+    reason, never a traceback); the hub is at its configured path (when not, one FAIL line and no
+    sign-in check, which would create folders at the old path); each account's plan exists, its
+    sign-in check answers, and its state file reads and, when it holds project entries, at least
+    one uses the trust field (otherwise "trust field not found; Claude Code may have renamed
+    it"); the hub's one settings file still calls capture; the `fairshare` command it calls
+    exists and runs (`--help`; with no hook wired, the installed one). It reads settings and
+    changes nothing, and prints account ids and plan names only, so the output can go into a
+    public issue. `--fix` is decision 17.
 
 14. **Bad input degrades, it does not crash.** `load_accounts` raises only `ConfigError`, whose
     message says what is wrong and where (a TOML error with its line, a missing account key, an
@@ -260,6 +292,61 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
     usage; `prefer --off` ends it early. `run -a` stays separate: one session, no refusal.
     It starts no session, so an agent can set it mid-session when the user asks.
 
+16. **Folder trust at launch.** The provider stores folder trust per account (Claude Code:
+    `projects[<path>].hasTrustDialogAccepted` in the account's `.claude.json`), so a folder
+    trusted on one account asks again on the next. After `run` has picked the account and
+    before the start check, on a terminal only, fairshare repeats the provider's own warning
+    (it "will be able to read, edit and execute files here"), names the folder and offers
+    `[a]` trust for all accounts lacking it (named), `[o]` only the account about to start, or
+    `[n]` no, exit (exit 1, nothing written). Lacking = joined accounts with a plan whose state
+    does not trust the canonical working folder by the provider's own lookup rule
+    (`Provider.trusts`; for Claude Code, verified live on 2.1.322: the folder and its parents up
+    to the git root, plus the main repository's root for a worktree; every parent outside a
+    repository). It asks when the starting account lacks trust, and when only others lack it
+    (then `[o]` reads "only the accounts that already trust it" and there is no `[n]`), unless
+    this folder has a remembered "only" answer (`trust-only.json` in the state dir, written
+    atomically); a remembered "only" yields as soon as a launch lands on an account that lacks
+    trust there. There is no default: Enter asks again; end of input is no. `run -a <id>` asks
+    about that account only (`[y]`/`[n]`) and remembers nothing.
+    - **Never in HOME, never without a terminal.** In the canonical HOME fairshare asks nothing
+      and writes nothing ("In HOME, fairshare does not ask; Claude Code's own per-session question
+      applies": Claude Code keeps HOME trust per session by design). Subfolders of HOME are normal.
+      Without a terminal nothing is asked or written and the provider asks for itself. Automatic
+      handoff (a later stage) will re-ask trust in HOME, and workers cannot run there: use a
+      project folder. Handoffs and workers will use only accounts that already trust the folder.
+    - **The write** (`Provider.trust`) goes where the provider's own dialog writes it (Claude
+      Code: the main repository's root inside a repository, else the folder): under the
+      provider's lock folder (wait up to 10 s; one left over, untouched for 30 s, is taken over,
+      as Claude Code itself does; otherwise nothing is written and the line says so), a file that
+      cannot be read or decoded is refused, the old one is backed up into `<hub>/backups/`, only
+      that key is set and every other key and value kept, the file is replaced atomically and
+      read back. A missing state file is created holding only that entry. One line per account
+      written. A write that fails does not stop the launch: the provider asks for itself.
+
+17. **The hub can move; a launch never rebuilds it.** The start check creates whatever is
+    missing, so after the user moved the hub a launch would have built an empty one at the old
+    path. Now every launch (`run`, `run -a`), `status`, `join <id>` again and `doctor` first
+    require the configured hub to hold `shared/` and `accounts/` (a launch also the account's
+    folder) and otherwise stop with exit 1: "no hub at <path>; if you moved it, run `fairshare
+    doctor --fix`". This also keeps the sign-in check from creating folders at the old path
+    (Claude Code creates a state file in the folder it is pointed at). setup and a new join still
+    create hubs. `doctor --fix [--hub PATH]` (doctor stays read-only without it):
+    1. a hub missing at its path: asks where it is now on a terminal (or takes `--hub`), accepts
+       only a folder holding `shared/` and `accounts/`, and changes the `hub` line of
+       `accounts.toml` (that line only, locked, backed up, like join and leave);
+    2. runs the start check for every account and prints its lines;
+    3. rewires the usage hook, with its diff, when the shared settings' statusLine does not call
+       the installed `fairshare` (it moved, say);
+    4. when step 1 moved the hub, finds every string value in the shared settings naming the old
+       path (the user's own hooks may) and shows the diff renaming it; applied only after a yes
+       (backed up, through the hub's lock), otherwise listed by key path. Nothing else changes;
+    5. after a move, runs the sign-in check and names, for each account signed out,
+       `fairshare join <id>` to sign it in again: on macOS the login lives in the keychain, one
+       entry per config folder, so a moved hub may read as signed out (UNVERIFIED).
+    One line per fix (`fixed` or `FAIL`), then the read-only checks; exit 0 when everything ends
+    fixed. With no terminal and no `--hub`, it fixes what needs no answer and lists the rest
+    (exit 1).
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -269,8 +356,9 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
   cannot roll back; an idle redraw of unchanged values still counts as fresh.
 - The ranking is greedy; it cannot promise full use of every week.
 - The usage hook calls the installed `fairshare` by the absolute path found when `setup` or
-  `join` last ran; if it moves (a reinstall elsewhere), `fairshare doctor` fails and running
-  `fairshare setup` again rewrites the hook (it rewrites any older capture).
+  `join` last ran; if it moves (a reinstall elsewhere), `fairshare doctor` fails and
+  `fairshare doctor --fix` (or `fairshare setup`) rewrites the hook (it rewrites any older
+  capture).
 - Whether Claude Code appends to `history.jsonl` in place (link kept) could not be provoked
   without a login; the start check repairs a replaced link losslessly either way.
 - A shared settings change Claude Code writes by replacing the link (not seen: on 2.1.322 the
@@ -289,10 +377,16 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
 - `accounts.toml.lock` (beside the config) and `.lock` (in the hub) are lock files fairshare
   leaves in place.
 - `join` cannot yet pick a provider: there is one.
-- Claude Code's docs say `claude auth status` exits 1 when signed out; the sign-in check treats a
-  non-zero exit as no answer (decision 10), so a signed-out account may read as a failed check
-  (the recorded fixtures keep the output, not the exit code). Not checked or changed in this
-  stage.
+- Claude Code creates `.claude.json` (and `backups/`) in a folder that lacks one when
+  `auth status` runs there (docs and 2.1.322), and was seen leaving its `.claude.json.lock` folder
+  behind in such a folder. setup therefore does not check a folder with no state file, and the
+  trust write takes over a lock folder untouched for 30 s.
+- The trust lookup rule was verified for plain folders, repositories and worktrees (2.1.322);
+  a git submodule is treated as its own root, unverified.
+- Whether `/login` inside a session honours `BROWSER` is UNVERIFIED; `claude auth login` does
+  (2.1.322). Chrome profile launchers are macOS only (`open -na "Google Chrome"`).
+- `BROWSER` from fairshare's own environment passes to an account with no `browser` line (a
+  surrounding Claude Code session was seen to set it).
 - `run -a` takes the account only as its first argument; later `-a` goes to the provider.
 - Ctrl-Z and `fg` are tested by sending the stop and continue signals to a supervised fake
   child; a real terminal (interactive shell in a pty) was checked by hand once, 2026-11-09.
@@ -314,6 +408,8 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
   instead, with a notice.
 - An account on a plan with no plan file is left out until `accounts.toml` or the plan file is
   fixed; a detected plan can only replace a plan that loaded.
+- Whether a moved hub reads as signed out (keychain entries per config folder) is UNVERIFIED;
+  `doctor --fix` names `fairshare join <id>` for any account that then reads signed out.
 - After a failed sign-in check, an account never confirmed as a subscription login is left out,
   even if it is one, until one check succeeds (`fairshare status` records it as soon as the check
   answers). A first run on a Claude Code release whose check already fails is therefore refused
@@ -331,20 +427,23 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Dependency | Adapter constant or function | Fallback when it changes | Verified |
 |---|---|---|---|
 | The tool on PATH (`claude`) | `BINARY`, `find_binary`, `real_binary` | launch stops with a clear message; `doctor` fails | 2.1.322, 2026-11-09 |
-| Sign-in check: `auth status --json` and its fields (`loggedIn`, `authMethod`, `email`, `orgId`, `planTier`) | `STATUS_ARGS` (per account `status_args`), `STATUS_*`, `parse_account_status` | fails soft (decision 10): login file and `accounts.toml` plan | 2.1.322, 2026-11-10 |
+| Sign-in check: `auth status --json` and its fields (`loggedIn`, `authMethod`, `email`, `orgId`, `planTier`) | `STATUS_ARGS` (per account `status_args`), `STATUS_*`, `parse_account_status` | fails soft (decision 10): last confirmation and `accounts.toml` plan | 2.1.322, 2026-11-10; with the folder variable at a fresh empty folder and unset (temp HOME) both answer signed out, exit 1, differing only in `configDirectory`/`projectsDirectory`; both create the state file there |
+| Default folder checked without the folder variable | `DEFAULT_DIR`, `account_status` | setup's label for it may be wrong | brief (2026-11-10); the probe above shows unset means `~/.claude` |
 | Version: `--version` | `VERSION_ARGS`, `version` | `doctor` prints "version unknown" | 2.1.322, 2026-11-09 (prints `2.1.322 (Claude Code)`) |
 | Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | 2.1.321, 2026-11-09 (sign-in, sign-out and usage per folder, independently) |
 | Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_MARK_ENV`, `WATCH_ENV_PREFIX`, `passed_session_vars` | a variable missing from the lists reaches the child: add it (inside a session the launcher names unlisted `CLAUDE_*` ones) | session variables 2.1.322, 2026-11-09 (the names a running session injects into its children; inherited, they stop the child saving a transcript; scrubbing fixes it); login-override variables not tested live |
 | Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `wired`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
-| Share list: observed `projects/`, `history.jsonl`, `file-history/`, `paste-cache/`, `plugins/`, `skills/`, `tasks/`, `settings.json`, `sessions/`; documented user-level `CLAUDE.md`, `agents/`, `commands/`, `output-styles/`, `keybindings.json` | `SHARED` | an item missing from the list stays per account; one renamed leaves a stale link (harmless); `NOT_COPIED` (`sessions/`) is shared but never seeded | observed: 2.1.322 (real config dirs); documented: code.claude.com/docs/en/claude-directory, read 2026-11-09 |
+| Share list: observed `projects/`, `history.jsonl`, `file-history/`, `paste-cache/`, `plugins/`, `skills/`, `tasks/`, `settings.json`, `sessions/`; documented user-level `CLAUDE.md`, `agents/`, `commands/`, `output-styles/`, `keybindings.json`, `rules/`, `workflows/`, `agent-memory/`, `themes/` | `SHARED` | an item missing from the list stays per account; one renamed leaves a stale link (harmless); `NOT_COPIED` (`sessions/`) is shared but never seeded | observed: 2.1.322 (real config dirs); documented: code.claude.com/docs/en/claude-directory, read 2026-11-09 (the last four, "Project and global" or "Global only" in its file reference: `rules/*.md`, `workflows/*.js`, `agent-memory/<name>/`, `themes/*.json`, read 2026-11-10) |
 | Settings written through a symlinked `settings.json` | `SHARED` (the start check repairs either way) | a replaced link is repaired at the next launch, the difference shown | 2.1.322, 2026-11-09 (throwaway folder, first-run theme picker: link kept, target rewritten) |
 | `history.jsonl` written through a link | `SHARED` | as above (lines merged) | not provoked: needs a login |
 | Sign-in and sign-out: `auth login`, `auth logout` | `LOGIN_ARGS`, `LOGOUT_ARGS`, `login_command`, `logout_command` | `join` reports the sign-in did not finish; `leave --logout` changes nothing | documented (CLI reference, read 2026-11-09); not run live |
-| State file `.claude.json` inside the folder variable's folder (beside `~/.claude` in HOME without it), its lock folder `.claude.json.lock` | `STATE_FILE`, `STATE_LOCK`, `DEFAULT_DIR`, `state_file`, `state_lock` | `join --from` copies no state | location: docs (claude-directory) and 2.1.322 (created in the throwaway folder); lock: brief, not observed |
-| State keys `join` copies: `projects.<path>.hasTrustDialogAccepted`, `mcpServers`, `hasCompletedOnboarding`, `lastOnboardingVersion` | `STATE_PROJECTS`, `STATE_TRUST`, `STATE_MCP`, `STATE_ONBOARDING`, `merge_state` | the first-run screens or trust prompts show again | 2.1.322, 2026-11-09: a fresh folder's first-run screen set none of them before sign-in (the theme went to `settings.json`); the binary sets the two onboarding keys together when onboarding finishes. Not observed after a real sign-in |
+| State file `.claude.json` inside the folder variable's folder (beside `~/.claude` in HOME without it), its lock folder `.claude.json.lock` | `STATE_FILE`, `STATE_LOCK`, `STATE_LOCK_WAIT`, `STATE_LOCK_STALE`, `DEFAULT_DIR`, `state_file`, `hold_state` | `join --from` copies no state; the trust write says it could not | location: docs (claude-directory) and 2.1.322; lock: 2.1.322, 2026-11-10 (a folder, left behind by `auth status` in a folder whose state it created; a session wrote past a 25 s-old one and removed it) |
+| Folder trust: `projects.<path>.hasTrustDialogAccepted`, canonical path; lookup: the folder and parents up to the git root, plus a worktree's main repository root; the dialog writes the main repository root inside a repository, else the folder | `STATE_PROJECTS`, `STATE_TRUST`, `GIT_DIR`, `GIT_FILE_PREFIX`, `GIT_COMMONDIR`, `trust_paths`, `trust_key`, `trusts`, `trust`, `check_state` | the trust question asks needlessly or the provider asks again; `doctor` fails when no entry uses the field | 2.1.322, 2026-11-10 (throwaway folders, `--bg` with no terminal: trusted starts, untrusted "Workspace not trusted"; the `/tmp` spelling of a `/private/tmp` folder refused; a parent trusted covers plain subfolders, not a repository or worktree below it; repo root trusted covers its subfolders and its worktree; a subfolder trusted covers itself and below, not the root; the dialog accepted in a repo subfolder and a worktree subfolder wrote the main repo root, in a plain subfolder that folder) |
+| State keys `join` copies after asking: `projects.<path>.hasTrustDialogAccepted`, `mcpServers`, `hasCompletedOnboarding`, `lastOnboardingVersion`, `hasCompletedClaudeInChromeOnboarding`, `claudeInChromeDefaultEnabled` | `STATE_PROJECTS`, `STATE_TRUST`, `STATE_MCP`, `STATE_ONBOARDING`, `STATE_CHROME`, `merge_state` | the first-run screens, trust or Chrome prompts show again | 2.1.322, 2026-11-09: a fresh folder's first-run screen set none of them before sign-in (the theme went to `settings.json`); the binary sets the two onboarding keys together when onboarding finishes. Chrome keys: seen on a joined account whose first session asked for consent, 2026-11-10; not verified in a throwaway folder |
+| `BROWSER` called with the sign-in link as its one argument, not word-split | `browser.ENV`, `browser.script`, `browser.env` | the sign-in prints the link to paste, as without a browser | `claude auth login`: 2.1.322 (brief, 2026-11-10); `/login` in a session: UNVERIFIED |
+| Chrome's `Local State` (`profile.info_cache.<folder>.name`), `open -na "Google Chrome" --args --profile-directory=` | `browser.CHROME_LOCAL_STATE`, `CHROME_PROFILES`, `CHROME_NAME`, `CHROME_APP` | no profiles offered; a launcher that fails leaves the paste-the-link text | not run live (tests use fake data) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
-| Login file (`.credentials.json`), existence only | `LOGIN_FILE`, `login_present` | only used when the sign-in check fails, and then only for an account last confirmed as a subscription login | 2.1.321, 2026-11-09 (present exactly in signed-in folders) |
-| Shell aliases that set the folder variable; the folders to look in | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
+| Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
 
 ## Cold review 2 (commit 0f67c67): what happened to each finding
