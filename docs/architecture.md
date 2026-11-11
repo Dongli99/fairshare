@@ -116,7 +116,8 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
      a token), then the sign-in check: not signed in or not a subscription login adds nothing;
      the same identity as a configured account says "same login as <x>: one quota" and asks
      before keeping it; a check that gives no answer adds it with the default plan and a warning.
-     `--from` COPIES (never moves) the shared items of a user's folder into `shared/`: folders
+     `--from` COPIES (never moves) the shared items of a user's folder into `shared/`, except
+     `Provider.not_copied` (Claude Code: `sessions/`, the running sessions and their keys): folders
      merge as above, `.jsonl` lines are appended, and a single file is copied only when `shared/`
      has none (the first seed wins; a later difference is shown, not applied; a hub settings file
      that holds only fairshare's own statusLine counts as none). Then, after asking, the state
@@ -267,9 +268,10 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
   theme picker wrote through the link) would be set aside at the next launch, with its diff.
 - `plugins/` is shared as it is: install records seeded from a user's folder may name absolute
   paths inside that folder, so such plugins load from there until reinstalled in the hub.
-- `join --from` copies every shared item, `sessions/` and `tasks/` included, so markers of a
-  session running in the user's folder at that moment are copied too (Claude Code clears such
-  leftovers itself, by its docs).
+- `join --from` copies every shared item but `sessions/`, so `tasks/` markers of a session
+  running in the user's folder at that moment are copied too (Claude Code clears such leftovers
+  itself, by its docs). `sessions/` is never copied: it holds each running session's key
+  (observed 2.1.322: `<pid>.json` and `<pid>.<hash>.key`), stale on arrival and not ours to copy.
 - `shared/` is one namespace: a second provider whose share list names the same item as Claude
   Code's would need its own folder there.
 - The first folder copied decides the shared settings and CLAUDE.md; later differences are only
@@ -325,7 +327,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Account folder variable (`CLAUDE_CONFIG_DIR`) | `CONFIG_DIR_ENV`, `clean_env` | none: accounts could not be told apart | 2.1.321, 2026-11-09 (sign-in, sign-out and usage per folder, independently) |
 | Login-override and session variables | `LOGIN_OVERRIDE_ENV`, `SESSION_ENV`, `SESSION_MARK_ENV`, `WATCH_ENV_PREFIX`, `passed_session_vars` | a variable missing from the lists reaches the child: add it (inside a session the launcher names unlisted `CLAUDE_*` ones) | session variables 2.1.322, 2026-11-09 (the names a running session injects into its children; inherited, they stop the child saving a transcript; scrubbing fixes it); login-override variables not tested live |
 | Usage hook: the `statusLine` entry in `settings.json` and its payload (`rate_limits`, `used_percentage`, `resets_at`) | `SETTINGS_FILE`, `STATUS_LINE_KEY`, `HOOK_*`, `CAPTURE_*`, `wire`, `wired`, `parse_capture` | no usage is recorded; accounts rank as fresh; `doctor` shows the hook | 2.1.321, 2026-11-09 (documented fields; live capture on two accounts) |
-| Share list: observed `projects/`, `history.jsonl`, `file-history/`, `paste-cache/`, `plugins/`, `skills/`, `tasks/`, `settings.json`, `sessions/`; documented user-level `CLAUDE.md`, `agents/`, `commands/`, `output-styles/`, `keybindings.json` | `SHARED` | an item missing from the list stays per account; one renamed leaves a stale link (harmless) | observed: 2.1.322 (real config dirs); documented: code.claude.com/docs/en/claude-directory, read 2026-11-09 |
+| Share list: observed `projects/`, `history.jsonl`, `file-history/`, `paste-cache/`, `plugins/`, `skills/`, `tasks/`, `settings.json`, `sessions/`; documented user-level `CLAUDE.md`, `agents/`, `commands/`, `output-styles/`, `keybindings.json` | `SHARED` | an item missing from the list stays per account; one renamed leaves a stale link (harmless); `NOT_COPIED` (`sessions/`) is shared but never seeded | observed: 2.1.322 (real config dirs); documented: code.claude.com/docs/en/claude-directory, read 2026-11-09 |
 | Settings written through a symlinked `settings.json` | `SHARED` (the start check repairs either way) | a replaced link is repaired at the next launch, the difference shown | 2.1.322, 2026-11-09 (throwaway folder, first-run theme picker: link kept, target rewritten) |
 | `history.jsonl` written through a link | `SHARED` | as above (lines merged) | not provoked: needs a login |
 | Sign-in and sign-out: `auth login`, `auth logout` | `LOGIN_ARGS`, `LOGOUT_ARGS`, `login_command`, `logout_command` | `join` reports the sign-in did not finish; `leave --logout` changes nothing | documented (CLI reference, read 2026-11-09); not run live |

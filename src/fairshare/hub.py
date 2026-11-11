@@ -201,10 +201,11 @@ def seed(hub: Path, source: Path, account_id: str, prov,
     makes of an empty text holds nothing of the user's and counts as none), and otherwise the
     first seed wins and a difference is shown, not applied. Returns one line per item."""
     shared, notes, prepare = shared_dir(hub), [], prepare or {}
+    skip = {i.rstrip("/") for i in prov.not_copied}
     with lock(hub):
         for name, is_dir in _items(prov):
             src, ours = source / name, shared / name
-            if not src.exists():
+            if name in skip or not src.exists():
                 continue
             if is_dir != src.is_dir():
                 notes.append(f"{name}: not a {'folder' if is_dir else 'file'} in {source}; "

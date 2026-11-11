@@ -55,6 +55,10 @@ SHARED = ("projects/", "history.jsonl", "file-history/", "paste-cache/", "plugin
           "tasks/", SETTINGS_FILE, "sessions/", "CLAUDE.md", "agents/", "commands/",
           "output-styles/", "keybindings.json")
 shared = SHARED
+# Shared, but never copied in by join: the sessions running now, each with its own key. A copy
+# would be stale on arrival and would carry another session's key.
+NOT_COPIED = ("sessions/",)
+not_copied = NOT_COPIED
 STATE_FILE = ".claude.json"          # the tool's own state, inside CONFIG_DIR_ENV's folder
 STATE_LOCK = STATE_FILE + ".lock"    # the folder the tool holds while it writes STATE_FILE
 DEFAULT_DIR = ".claude"              # the folder used without CONFIG_DIR_ENV; its STATE_FILE is

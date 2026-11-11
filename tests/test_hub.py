@@ -294,6 +294,21 @@ class Join(UserFolders):
         self.assertEqual((hub.shared_dir(self.hub) / "CLAUDE.md").read_text(), "work rules\n")
         self.assert_untouched()
 
+    def test_the_running_sessions_and_their_keys_are_not_copied(self):
+        """A folder whose sessions/ links to a registry kept elsewhere, holding a live session's
+        record and key: the hub shares sessions/ but starts it empty."""
+        registry = self.home / ".elsewhere/sessions"
+        write(registry / "4242.json", '{"pid": 4242}')
+        write(registry / "4242.abc.key", "session-key-value")
+        os.symlink(registry, self.home / ".claude-work/sessions")
+        self.before = self.user_bytes()
+        self.config()
+        self.assertEqual(self.go("join", "--from", "~/.claude-work", answers=["y"]), 0, self.err)
+        self.assertEqual(list((hub.shared_dir(self.hub) / "sessions").iterdir()), [])
+        self.assertTrue((hub.account_dir(self.hub, "work") / "sessions").is_symlink())
+        self.assertNotIn("sessions/: copied", self.out)
+        self.assert_untouched()
+
     def test_declining_the_state_copy_copies_none_of_it(self):
         self.config()
         self.person("w2", "alice")

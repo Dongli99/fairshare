@@ -14,6 +14,7 @@ class Provider(Protocol):
     name: str
     default_plan: str        # proposed at join when the sign-in check names no plan
     shared: tuple[str, ...]  # what every account shares through the hub; "x/" names a folder
+    not_copied: tuple[str, ...]  # of those, what join never copies in: live state, keys
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.
