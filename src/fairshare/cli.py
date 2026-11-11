@@ -173,6 +173,18 @@ def _session_account(accounts: list[Account]) -> Account | None:
     return None
 
 
+def _status_line(account_id: str, snap: Snapshot | None, now: float, live: bool) -> str:
+    """The account and its stored usage. A session's first redraws carry no usage yet, so the
+    saved snapshot stands in, marked with when it was taken; a window already reset is left out."""
+    windows = [f"{k} {w.used_pct:.0f}%" for k, w in (snap.windows if snap else {}).items()
+               if w.resets_at > now]
+    if windows and not live:
+        t = time.localtime(snap.captured_at)
+        same_day = t[:3] == time.localtime(now)[:3]
+        windows.append(f"as of {time.strftime('%H:%M' if same_day else '%a %H:%M', t)}")
+    return " · ".join([account_id, *windows])
+
+
 def cmd_capture(a) -> int:
     """Runs as the provider's usage hook. Must never raise or print noise. The account is the
     session's own folder in the hub; a session outside the hub records nothing. With --then, the
@@ -182,10 +194,10 @@ def cmd_capture(a) -> int:
     try:
         acct = _session_account(_load()[0])
         fresh = acct and providers.get(acct.provider).parse_capture(json.loads(raw))
-        if fresh:
-            store.record(acct.id, fresh, time.time())
-            if not a.then:
-                print(" · ".join(f"{k} {w.used_pct:.0f}%" for k, w in fresh.items()))
+        now = time.time()
+        snap = store.record(acct.id, fresh, now) if fresh else acct and store.load(acct.id)
+        if acct and not a.then:
+            print(_status_line(acct.id, snap, now, bool(fresh)))
     except (Exception, SystemExit):      # whatever is wrong, the user's own line must still run
         pass
     if a.then:

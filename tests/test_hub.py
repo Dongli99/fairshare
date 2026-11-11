@@ -10,13 +10,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from fairshare import cli, hub, session, store
-from fairshare.model import Capture, load_accounts, with_account, with_hub, without_account
+from fairshare.model import (Capture, Snapshot, Window, load_accounts, with_account, with_hub,
+                             without_account)
 from fairshare.providers import claude
 
 # Answers $FAKE_IDS/<folder name> as that folder's person: the same person is the same login.
@@ -621,7 +623,21 @@ class Capture_(Base):
         self.assertEqual(self.capture(hub.account_dir(self.hub, "b")), 0)
         self.assertEqual(store.load("b").windows["seven_day"].used_pct, 40)
         self.assertIsNone(store.load("a"))
-        self.assertEqual(self.out, "seven_day 40%\n")
+        self.assertEqual(self.out, "b · seven_day 40%\n")
+
+    def test_a_payload_without_usage_shows_the_saved_snapshot_and_its_time(self):
+        # A session's first redraws carry no usage until its first exchange with the service.
+        store.save("b", Snapshot(time.time() - 60, {"seven_day": Window(55, 4e9),
+                                                    "five_hour": Window(90, time.time() - 1)}))
+        self.PAYLOAD = json.dumps({"model": {}})
+        self.assertEqual(self.capture(hub.account_dir(self.hub, "b")), 0)
+        self.assertRegex(self.out, r"^b · seven_day 55% · as of \d\d:\d\d\n$")   # reset one left out
+        self.assertEqual(store.load("b").windows["seven_day"].used_pct, 55)      # nothing written
+
+    def test_with_nothing_saved_the_line_is_the_account_alone(self):
+        self.PAYLOAD = json.dumps({"model": {}})
+        self.assertEqual(self.capture(hub.account_dir(self.hub, "a")), 0)
+        self.assertEqual(self.out, "a\n")
 
     def test_outside_the_hub_nothing_is_recorded_and_their_line_still_runs(self):
         for argv in (["--then", "true"], ["a", "--then", "true"]):   # old form too
