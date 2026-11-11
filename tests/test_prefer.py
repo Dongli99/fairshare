@@ -22,7 +22,8 @@ class Prefer(Fleet):
     def test_the_preferred_account_is_launched_and_status_says_so(self):
         self.assertEqual(self.go("prefer", "b", "--for", "3h")[0], 0)
         code, out, _ = self.go("status")
-        self.assertTrue(out.startswith("preferring b until 11:00\n> b "), out)   # NOW is 08:00 UTC
+        first = out.splitlines()[0]                                          # NOW is 08:00 UTC
+        self.assertTrue(first.startswith("> b ") and first.endswith("  [preferred until 11:00]"), out)
         self.go("run")
         self.assertEqual(self.launched_dir(), self.dir("b"))
 
@@ -33,6 +34,9 @@ class Prefer(Fleet):
         self.assertEqual(self.launched_dir(), self.dir("a"))
         self.assertIn("preferring b until", err)
         self.assertIn("cannot take work now, so the best account is used", err)
+        out = self.go("status")[1]
+        self.assertTrue(out.startswith("preferring b until Sat 00:00; it cannot take work"), out)
+        self.assertNotIn("[preferred", out)
 
     def test_it_ends_on_its_own_and_by_default_at_the_end_of_today(self):
         self.go("prefer", "b")

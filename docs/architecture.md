@@ -253,7 +253,9 @@ setup ──► join ──► hub.check, providers/<p>.login_command, account_s
 15. **A preference is timed, never a pin.** `fairshare prefer <id> [--for 30m|3h|2d]` stores one
     (account, until) in the state folder; with no `--for` it lasts until the end of the local
     day, and the output says when it ends. While it lasts, the preferred account goes first if it
-    is eligible (`policy.prefer`, pure); otherwise the ranking stands and `run`/`status` say so.
+    is eligible (`policy.prefer`, pure) and `status` tags its row `[preferred until <time>]` (a
+    text tag like `[avoid]`: symbols vary in width and a pin reads as permanent); otherwise the
+    ranking stands and `run`/`status` say so.
     It ends on its own, so it cannot quietly become a permanent pin that stops routing by
     usage; `prefer --off` ends it early. `run -a` stays separate: one session, no refusal.
     It starts no session, so an agent can set it mid-session when the user asks.

@@ -148,23 +148,29 @@ def _usable(v: Verdict, now: float) -> str:
     return f"usable at {_clock(now + v.usable_in * HOUR, now)}"
 
 
+def _honoured(s: Survey) -> bool:
+    return bool(s.preference and s.verdicts and s.verdicts[0].account.id == s.preference[0])
+
+
 def _preference_note(s: Survey) -> str | None:
     if not s.preference:
         return None
     who, until = s.preference
     note = f"preferring {who} until {_clock(until, s.now)}"
-    if not (s.verdicts and s.verdicts[0].account.id == who):
+    if not _honoured(s):
         note += "; it cannot take work now, so the best account is used"
     return note
 
 
 def cmd_status(_a) -> int:
     s = _survey()
-    if note := _preference_note(s):
-        print(note)
+    if s.preference and not _honoured(s):
+        print(_preference_note(s))
     for i, v in enumerate(s.verdicts):
         mark = ">" if i == 0 else " "
         flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
+        if i == 0 and _honoured(s):
+            flag = f"  [preferred until {_clock(s.preference[1], s.now)}]"
         print(f"{mark} {v.account.id:<12} {v.account.plan.name:<14} score {v.score:6.2f}  "
               f"{v.reason}{flag}")
         for note in s.notes.get(v.account.id, []):
