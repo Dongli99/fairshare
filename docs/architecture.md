@@ -510,8 +510,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       eligible account that has the session's model (decision 23), with `--resume <id>`, the
       model and effort, and the moved prompt (`fairshare moved this session from account A to
       account B because <A hit its usage limit | a move was asked for>. Continue where you left
-      off.`); building those arguments moves the session record to B (same id, not stranded,
-      everything else kept). None eligible is decision 11's flow, carrying them. The launcher
+      off.`) and `FAIRSHARE_CONTINUES=<its pid>:<id>`; building those arguments clears the
+      record's stranded mark and wait and leaves its account: the first capture under the same
+      id writes B, and a new id (another account, decision 23) is linked to it. None eligible is decision 11's flow, carrying them. The launcher
       stays the parent, so a second limit picks up again.
     - **The manual command.** `fairshare pickup [SESSION] [--bg] [--model M] [--effort E] [-a
       ID]` (the flags override the record; `-a` skips the ranking, keeps the trust check, and is
@@ -529,9 +530,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       through (it names the attach command). `--fork-session` only when the session is not
       marked stranded: it may still run, and fairshare stops no session it did not start. Then
       the running sessions are looked up by that name (up to 10 s): another id under it is a
-      copy (the fork, or the tool's own copy with a `note:` line), which gets a record copied
-      from the old one (role, parent, model, effort, the new account) and a worker's name;
-      otherwise the old record is moved.
+      copy (the fork, or the tool's own copy with a `note:` line), linked to the old one as a
+      resume under a new id is (`store.link_session`, decision 23), and a worker's name joins
+      it; otherwise the old record is moved.
       None eligible and able: exit 1, naming which were eligible and why trust could not be had. A session whose
       account can still work is picked up anyway, with one note line: moving is a valid wish.
     - **Never stopping others' sessions.** Only the launcher stops a session, and only its own
@@ -659,7 +660,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 
     | verb | new session |
     |---|---|
-    | `pickup` (manual, and the launcher's automatic one) | the same session, resumed under its own id on the best account |
+    | `pickup` (manual, and the launcher's automatic one) | the same session, resumed on the best account: under its own id on the same account, as a linked copy under a new id on another |
     | `handoff` | fresh: a new id, the pickup prompt, which reads the checkpoint note first |
     | switch (bare `fairshare` inside a session) | fresh, no prompt |
 
@@ -727,6 +728,32 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     - **Requests** carry a kind (`pickup`, `handoff`, `handoff-note`, `switch`) and the flags
       (`model.Request`); every kind but an automatic pickup is manual (no check that the
       account is out).
+    - **A resume on another account is a copy** (observed by the owner on 2.1.322,
+      2026-11-12). Each subscription account is its own organization; resumed there, Claude
+      Code continues the chat under a **new id** and drops the earlier thinking with a notice
+      ("Claude can't use thinking from another organization…"; it is kept, and usable again
+      from the first organization). On the same account the id stays. Model and effort carried
+      over both ways. So a move costs one uncached read of the context plus the thinking
+      regenerated on the new account; a resume on the same account loses nothing. This weighs
+      for `resume_wait_minutes` (decision 19): waiting for the reset keeps both.
+      - **The link.** The launcher passes `FAIRSHARE_CONTINUES=<its pid>:<old id>` to a resume
+        only (not a switch, not a handoff's fresh session; an inherited value is dropped).
+        Capture, the prompt and post-tool hooks and the stop-failure hook call `_continuation`
+        before recording the session: when the pid is one of its ancestors (as for
+        `FAIRSHARE_LAUNCHER`), the old id is not its own and its record is missing or not yet
+        linked, `store.link_session` runs, under the sessions' lock: the new record takes the
+        old one's role, parent, model, display name and effort where it lacks them (a model its
+        own payload names wins), the new account, its folder and transcript, a cost series of
+        its own and `continues=<old id>`; the old record keeps its account and costs, gets
+        `moved_to=<new id>` and is no longer stranded or waiting; workers whose parent is the
+        old id (worker records and their sessions' records) name the new one; the old
+        checkpoint note is copied (never moved) when the new id has none. An old record already
+        moved, or missing, is not linked (a nested session under the same launcher never takes
+        the place). Never raises. The background copy (`_copied`) uses the same function.
+      - **Readers.** `status` does not list a record with `moved_to` (its spend still counts for
+        its own account). `watch`, worker targeting (`checkpoint --request`), `pickup <prefix>`
+        and `transcript` take a session at the end of its chain (`store.latest`: `moved_to`
+        followed, at most `CHAIN_STEPS`, 8, stopping at a cycle).
 
 24. **Measured spend per session** (owner and planner, 2026-11-11). One interactive session on a
     pricier model drained an account's 5-hour window and stranded a background worker, and
@@ -912,6 +939,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Skill format: a folder holding `SKILL.md`, front matter between `---` lines with `name` and `description` (all optional; `description` recommended; description text truncated at 1,536 characters in the listing); user skills in `<config>/skills/<name>/` | `SKILLS_DIR`, `SKILL_FILE`, `SKILL_NAME`, `SKILL_SOURCE`, `SKILL_FENCE`, `SKILL_NAME_KEY`, `skill`, `own_skill` | the skill does not load; doctor still checks the file | documented: code.claude.com/docs/en/skills, read 2026-11-11 (no date on the page); loading in a real session: not yet checked live |
 | statusLine payload `model.id`, `model.display_name`, `effort.level` (absent when the model takes no effort level; the level actually run when the set one is unsupported) | `CAPTURE_MODEL`, `CAPTURE_MODEL_ID`, `CAPTURE_MODEL_NAME`, `CAPTURE_EFFORT`, `CAPTURE_EFFORT_LEVEL`, `session_of` | no model recorded: sessions started in place of another take the default model | documented: /statusline, read 2026-11-12 |
 | statusLine payload `cost.total_cost_usd` (an estimate at list price, not a bill; resets to 0 on `/clear`) | `CAPTURE_COST`, `CAPTURE_COST_TOTAL`, `session_of` | no spend: `status` shows `-`, no heaviest clause, no worker cost | documented: /statusline, read 2026-11-12 |
+| A resume on another account (another organization) continues the chat under a new id and drops the earlier thinking with a notice; on the same account it keeps the id; model and effort carry over both ways | none in the adapter: `FAIRSHARE_CONTINUES` (`cli.CONTINUES_ENV`), `store.link_session` | either way works: an id that stays is recorded as itself (the first capture writes the account), a new one is linked to the old (decision 23) | observed: 2.1.322, 2026-11-12 (owner, live; agent-view docs: a resume "either continues that session under the same ID, or starts a copy under a new ID") |
 | `--resume <id>` (any project's session; the same id), `--fork-session` (a copy under a new id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line) | `RESUME_ARGS`, `FORK_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `resume_args`, `model_args`, `background` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
 | Print-mode resume for the handoff note: `-p --output-format stream-json --verbose --include-partial-messages --tools "" --resume <id>`; one JSON object per line: `system`/`thinking_tokens`, `stream_event` with `content_block_start` (`thinking`, `text`) and `content_block_delta` (`thinking_delta`, `text_delta` with `delta.text`); the final line's `result` (and `is_error`) | `NOTE_ARGS`, the `NOTE_*` spellings, `note_command`, `note_event`, `note_text` | lines that stop parsing: the spinner, the clock and the last phase stay; no result line: the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools; `--include-partial-messages` requires `--print` and `--output-format stream-json`, its example passes `--verbose`), /sessions ("Access conversations from scripts"), read 2026-11-12. Run live by the planner on 2.1.322, 2026-11-12: an Opus turn at medium effort (thinking block, then 37 text deltas, then `result`; recorded as `tests/fixtures/claude-2.1.322/note-stream.jsonl`) and a Haiku turn at low effort (no thinking block) |
 | The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (planner; a background and an interactive session) |

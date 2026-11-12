@@ -650,11 +650,12 @@ class PickupLaunch(Stranded):
         self.assertEqual(cmd[1:], ["--resume", SID, "fairshare moved this session from account a "
                                    "to account b because a hit its usage limit. Continue where "
                                    "you left off."])
-        rec = store.session(SID)                                     # the same record, moved
-        self.assertEqual((rec.account, rec.stranded_at, rec.cwd), ("b", None, str(self.work)))
+        rec = store.session(SID)          # the same record; its first capture writes the account
+        self.assertEqual((rec.account, rec.stranded_at, rec.cwd), ("a", None, str(self.work)))
         self.assertEqual([r.id for r in store.sessions()], [SID])
         self.assertEqual(Path(cwd).resolve(), self.work.resolve())
         self.assertEqual(env["FAIRSHARE_LAUNCHER"], str(os.getpid()))
+        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}")
         self.counted.assert_not_called()                             # no terminal: at once
         self.assertIsNone(store.take_request(os.getpid()))           # consumed
 

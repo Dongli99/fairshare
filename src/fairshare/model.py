@@ -130,6 +130,8 @@ class SessionRecord:
     waiting_until: float | None = None  # stranded, left for the provider's own resume at this reset
     costs: list = field(default_factory=list)   # the running cost seen: series (a new one each
                                                 # time it fell) of [time, cost], see store.add_cost
+    continues: str | None = None      # the session this one continues under a new id
+    moved_to: str | None = None       # the session that continues this one (store.link_session)
 
 
 ROLE_WORKER = "worker"

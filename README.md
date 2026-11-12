@@ -116,7 +116,11 @@ fairshare wires in the hub's settings), the session is marked as stopped, and:
   (`--fork-session`).
 
 Moving a session to another account reads its whole context once on that account, uncached:
-that is the price of keeping its reasoning. For a lean start use a handoff (below).
+that is the price of keeping its reasoning. For a lean start use a handoff (below). Each
+account is its own organization to Claude Code, so a session resumed on another account goes
+on under a new id (fairshare links it to the old one: role, workers, checkpoint note) and
+Claude Code drops its earlier thinking with a notice; resumed on the same account it keeps its
+id and loses nothing.
 
 **Pickup, handoff, switch.** Three ways to continue in another session, each with
 `--model M`, `--effort E` (override the session's latest, which carry over otherwise) and

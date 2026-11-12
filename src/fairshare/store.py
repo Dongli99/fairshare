@@ -222,7 +222,8 @@ def _read_session(path: Path) -> SessionRecord | None:
                              d["reported"] if isinstance(d.get("reported"), dict) else {},
                              _text(d.get("model")), _text(d.get("model_name")),
                              _text(d.get("effort")), _num(d.get("waiting_until")),
-                             _costs(d.get("costs")))
+                             _costs(d.get("costs")), _text(d.get("continues")),
+                             _text(d.get("moved_to")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -314,6 +315,67 @@ def move_session(session_id: str, account_id: str) -> SessionRecord | None:
     kept."""
     return update_session(session_id, lambda old: old and replace(
         old, account=account_id, stranded_at=None, waiting_until=None))
+
+
+CHAIN_STEPS = 8    # `moved_to` links followed at most, so a damaged chain never loops
+
+
+def latest(session_id: str) -> str:
+    """The end of the chain of recorded sessions that continue `session_id` under new ids
+    (`moved_to`), itself when it has not moved; stops at a cycle or after CHAIN_STEPS links."""
+    chain = [session_id]
+    while len(chain) <= CHAIN_STEPS and (r := session(chain[-1])) and r.moved_to \
+            and r.moved_to not in chain and session(r.moved_to):
+        chain.append(r.moved_to)
+    return chain[-1]
+
+
+def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float
+                 ) -> SessionRecord | None:
+    """`seen` continues the session `old_id` under a new id on `account_id` (a resume on another
+    account, or a background copy). Its record takes the old one's role, parent, model, display
+    name and effort where it lacks them (a model `seen` names wins, as in `note_session`), the
+    account, `seen`'s folder and transcript, `continues=old_id`, and keeps a cost series of its
+    own. The old record keeps its account and costs, gets `moved_to`, and is no longer stranded
+    or waiting. Workers (their records and their sessions' records) whose parent is the old id
+    now name the new one; the old checkpoint note is copied when the new id has none. None, with
+    nothing changed, when either id is bad, they are the same, the old record is missing or has
+    moved already, or the new one already continues a session."""
+    if old_id == seen.id or not _SESSION_ID.fullmatch(old_id) \
+            or not _SESSION_ID.fullmatch(seen.id):
+        return None
+    dest = _sessions()
+    dest.mkdir(parents=True, exist_ok=True)
+    with locked(dest / ".lock"):
+        old = _read_session(dest / f"{old_id}.json")
+        mine = _read_session(dest / f"{seen.id}.json")
+        if old is None or old.moved_to or (mine and mine.continues):
+            return None
+        new = mine or SessionRecord(seen.id, account_id, None, None, now)
+        model = (seen.model, seen.model_name, seen.effort) if seen.model else \
+            (new.model, new.model_name, new.effort) if new.model else \
+            (old.model, old.model_name, seen.effort or old.effort)
+        new = replace(new, account=account_id, cwd=seen.cwd or new.cwd or old.cwd,
+                      transcript=seen.transcript or new.transcript, seen=now,
+                      role=new.role or old.role, parent=new.parent or old.parent,
+                      model=model[0], model_name=model[1], effort=model[2], continues=old_id)
+        _write_session(dest, new)
+        _write_session(dest, replace(old, moved_to=seen.id, stranded_at=None,
+                                     waiting_until=None))
+        for p in dest.glob("*.json"):
+            if (r := _read_session(p)) and r.parent == old_id and r.id != seen.id:
+                _write_session(dest, replace(r, parent=seen.id))
+        with locked(_workers() / ".lock"):
+            for w in workers(old_id):
+                _save_worker(replace(w, parent=seen.id))
+    src, dst = checkpoint_path(old_id), checkpoint_path(seen.id)
+    with locked(_checkpoints() / ".lock"):
+        if src.is_file() and not dst.exists():
+            fd, tmp = tempfile.mkstemp(dir=_checkpoints())
+            os.close(fd)
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+    return new
 
 
 def _workers() -> Path:

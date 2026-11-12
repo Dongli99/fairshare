@@ -205,9 +205,9 @@ class LauncherPickup(Handover):
                 self.assertEqual((args, acct), (["--model", "claude-opus-5-5", "--effort", "high",
                                                  "--resume", SID,
                                                  MOVED.format(new="b", why=why)], "b"))
-                rec = store.session(SID)
+                rec = store.session(SID)          # its account: written by its first capture
                 self.assertEqual((rec.account, rec.stranded_at, rec.model, rec.effort),
-                                 ("b", None, "claude-opus-5-5", "high"))
+                                 ("a", None, "claude-opus-5-5", "high"))
                 self.assertEqual([r.id for r in store.sessions()], [SID])   # not duplicated
                 store.move_session(SID, "a")
 
@@ -263,7 +263,7 @@ class CommandPickup(Handover):
         self.assertEqual(code, 0, err)
         cmd = self.launched.call_args.args[0]
         self.assertEqual(cmd[1:6], ["--model", "claude-opus-5-5", "--effort", "max", "--resume"])
-        self.assertEqual(store.session(SID).account, "b")
+        self.assertEqual(store.session(SID).account, "a")     # until its first capture
 
     def test_background_of_a_stranded_session_resumes_in_place(self):
         self.record(model="claude-opus-5-5", effort="high")
