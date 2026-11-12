@@ -582,5 +582,19 @@ class NoteWait(unittest.TestCase):
         self.assertEqual(self.wait(seconds=0.4), "timeout")
 
 
+class MovedPrompt(unittest.TestCase):
+    """The resumed session's first prompt names a move only when the account changed."""
+
+    def test_another_account_is_a_move(self):
+        rec = SessionRecord(SID, "a", "/w", None, NOW)
+        self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
+
+    def test_the_same_account_is_a_restart(self):
+        rec = SessionRecord(SID, "a", "/w", None, NOW, stranded_at=NOW)
+        self.assertEqual(cli._moved_prompt(rec, "a"),
+                         f"fairshare restarted this session on account a because {LIMIT}; it is "
+                         "still the best account. Continue where you left off.")
+
+
 if __name__ == "__main__":
     unittest.main()

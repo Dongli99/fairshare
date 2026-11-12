@@ -1050,13 +1050,17 @@ def _pickup_prompt(rec: SessionRecord, now: float) -> str:
 
 MOVED_PROMPT = ("fairshare moved this session from account {old} to account {new} because "
                 "{why}. Continue where you left off.")
+RESTARTED_PROMPT = ("fairshare restarted this session on account {new} because {why}; it is still "
+                    "the best account. Continue where you left off.")
 
 
 def _moved_prompt(rec: SessionRecord, new: str) -> str:
-    """The first prompt of a session resumed on another account. Provider-neutral."""
+    """The first prompt of a session resumed on another account, or on the same one when that
+    is still the best. Provider-neutral."""
     why = (f"{rec.account} hit its usage limit" if rec.stranded_at is not None
            else "a move was asked for")
-    return MOVED_PROMPT.format(old=rec.account, new=new, why=why)
+    text = RESTARTED_PROMPT if new == rec.account else MOVED_PROMPT
+    return text.format(old=rec.account, new=new, why=why)
 
 
 def _resumed(rec: SessionRecord):
