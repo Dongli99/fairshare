@@ -173,6 +173,17 @@ class LiveSession:
     busy: bool | None                 # None: the provider did not say
 
 
+NOTE_THINKING, NOTE_WRITING = "thinking", "writing"
+
+
+@dataclass(frozen=True)
+class NoteEvent:
+    """One line of the handoff note turn's output, as the provider reads it: the model is
+    thinking (NOTE_THINKING) or writing its answer (NOTE_WRITING, with the text that arrived)."""
+    kind: str
+    text: str = ""
+
+
 @dataclass(frozen=True)
 class Snapshot:
     captured_at: float

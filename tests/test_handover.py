@@ -402,10 +402,10 @@ class Handoff(Handover):
                 Request(SID, True, 4321, "handoff-note")])
         self.assertEqual(code, 0, err)
         asked = (self.log / "note-a").read_text().splitlines()
-        self.assertEqual(asked[:9], ["-p", "--output-format", "json", "--tools", "", "--resume",
-                                     SID, "--model", "claude-opus-5-5"])
-        self.assertEqual(asked[9:11], ["--effort", "high"])
-        self.assertEqual(asked[11], cli.HANDOFF_NOTE_ASK)
+        self.assertEqual(asked[:12], ["-p", "--output-format", "stream-json", "--verbose",
+                                      "--include-partial-messages", "--tools", "", "--resume",
+                                      SID, "--model", "claude-opus-5-5", "--effort"])
+        self.assertEqual(asked[12:], ["high", cli.HANDOFF_NOTE_ASK])
         self.assertEqual(Path((self.log / "note-cwd-a").read_text().strip()), self.work.resolve())
         self.assertTrue(self.note().endswith("\nDone: parser. Next: tests.\n"))
         args, _ = self.started_args()
@@ -445,7 +445,7 @@ class Handoff(Handover):
         self.assertLess(took, 4)                                     # the turn was not awaited
 
     def test_c_skips_to_a_pickup(self):
-        with mock.patch.object(cli, "_note_wait", return_value="skip"):
+        with mock.patch.object(cli, "_note_wait", return_value=("skip", None)):
             self.check_fallback({"FAKE_NOTE": NOTE_JSON}, "skipped")
 
     def test_no_account_can_work(self):
@@ -551,7 +551,8 @@ class NoteWait(unittest.TestCase):
         self.before = termios.tcgetattr(slave)
 
     def wait(self, keys=b"", cmd=("sleep", "5"), seconds=3.0):
-        proc = subprocess.Popen(list(cmd))
+        proc = subprocess.Popen(list(cmd), stdout=subprocess.PIPE)
+        self.addCleanup(proc.stdout.close)
         self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait()))
         orig, err = cli.termios.tcflush, io.StringIO()
 
@@ -560,14 +561,14 @@ class NoteWait(unittest.TestCase):
             if keys:
                 os.write(self.master, keys)
         with mock.patch.object(sys, "stdin", self.tty), mock.patch.object(sys, "stderr", err), \
-                mock.patch.object(cli, "_interactive", return_value=True), \
                 mock.patch.object(cli.termios, "tcflush", flushed):
-            got = cli._note_wait(proc, "writing the handoff note for 0a1b2c3d… · c = skip",
-                                 seconds)
+            how, _ = cli._note_wait(proc, claude, "a", cli._Status(True), seconds)
         self.assertEqual(test_pickup.Countdown.attrs(termios.tcgetattr(self.tty.fileno())),
                          test_pickup.Countdown.attrs(self.before))                # restored
-        self.assertEqual(err.getvalue(), "writing the handoff note for 0a1b2c3d… · c = skip\n")
-        return got
+        self.assertIn("reading the session on a…", err.getvalue())
+        self.assertIn(" · c = skip", err.getvalue())
+        self.assertTrue(err.getvalue().endswith("\r\x1b[K"))                   # cleared
+        return how
 
     def test_c_skips_and_other_keys_do_not(self):
         t = time.monotonic()

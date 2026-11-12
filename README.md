@@ -131,9 +131,10 @@ that is the price of keeping its reasoning. For a lean start use a handoff (belo
 - `handoff` with a note (what the agent runs) saves it as the session's checkpoint, then the
   launcher stops the session and starts the fresh one; without a launcher the fresh one starts
   in the background. `! fairshare handoff` with no note (you, in the session) has the launcher
-  stop the session, resume it headless for one turn that writes the note (no tools; `writing
-  the handoff note for 1a2b3c4d… · c = skip`), then start the fresh session in the same
-  terminal. If that note cannot be written (an error, no answer in 5 minutes, `c`, no account
+  stop the session, resume it headless for one turn that writes the note (no tools), then
+  start the fresh session in the same terminal. Meanwhile one line shows what it is doing,
+  with a spinner and a clock: checking accounts, reading the session, thinking, writing the
+  note (with its word count so far), `c = skip`. If that note cannot be written (an error, no answer in 5 minutes, `c`, no account
   that can work), it says why in one line and picks the session up instead. It refuses outside
   a session, and with no note in a session `fairshare` did not start.
 - A switch prints how to resume the old session (`fairshare run -a work -- --resume <id>`),

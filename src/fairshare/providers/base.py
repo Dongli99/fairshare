@@ -7,7 +7,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..model import Account, AccountStatus, Candidate, Capture, LiveSession, SessionSeen, Window
+from ..model import (Account, AccountStatus, Candidate, Capture, LiveSession, NoteEvent,
+                     SessionSeen, Window)
 
 
 class Provider(Protocol):
@@ -64,10 +65,16 @@ class Provider(Protocol):
                      ) -> tuple[list[str], dict[str, str]]:
         """The command and clean environment of one headless turn of the stopped session
         `session_id` on `account`, under the same id, with no tools and `extra` arguments
-        (model_args), whose message is `prompt`; its output is read by `note_text`."""
+        (model_args), whose message is `prompt`; its output lines are read by `note_event`,
+        its final line by `note_text`."""
+
+    def note_event(self, line: str) -> NoteEvent | None:
+        """What one output line of that command says (thinking, or writing with the new text);
+        None for any other line or one that does not parse. Never raises."""
 
     def note_text(self, out: str) -> str | None:
-        """The answer's text in that command's output; None for an error or no text."""
+        """The answer's text in that command's final output line; None for an error or no
+        text."""
 
     def list_sessions(self, account: Account) -> list[LiveSession] | None:
         """The provider's sessions running now (asked through `account`'s folder), with their

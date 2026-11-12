@@ -690,12 +690,23 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       holds the session while it runs, so the session cannot write the note during it): the
       command sends the launcher a `handoff-note` request and returns; the launcher stops the
       child, then **writes the note through a headless resume**: one turn of the stopped session
-      (`-p --output-format json --tools "" --resume <id>`, its model and effort, a
+      (`-p --output-format stream-json --verbose --include-partial-messages --tools ""
+      --resume <id>`, its model and effort, a
       provider-neutral instruction: what was done, what is next, open decisions, files
       touched), on the session's own account when it can take work (its cache is warm), else
-      the top eligible one; the answer's `result` is appended as the checkpoint; then the fresh
-      session, in the same terminal, the launcher still its parent. The terminal shows
-      `writing the handoff note for <first 8>… · c = skip`. On failure, `HANDOFF_WAIT_S` (300 s),
+      the top eligible one; the result line's `result` is appended as the checkpoint; then the
+      fresh session, in the same terminal, the launcher still its parent. **Progress you can
+      see** (owner, 2026-11-12: a static line looked stuck): the launcher's first line after it
+      stops the child names the verb, the session's first 8 characters and its model and effort
+      (`fairshare · handing off 1a2b3c4d (Opus · high)`; every request kind prints one such
+      line). Then one status line, redrawn in place at 10 Hz with a spinner and an m:ss clock,
+      shows the phase: `checking accounts…` (the survey runs in a worker thread),
+      `reading the session on <acct>…`, `thinking…`, `writing the note · N words`; the phase
+      comes from the adapter (`note_event`: one output line to a provider-neutral `NoteEvent`,
+      or None) and never goes back; lines that stop parsing keep the last phase. The output is
+      read through a pipe with `select`, so it never fills. Success ends with
+      `✓ note saved, N words → <path>`. Without a terminal each phase is one plain line as
+      the launcher sees it (phases that arrive in one read show only the latest). On failure, `HANDOFF_WAIT_S` (300 s),
       `c`, or no account that can work: one line why, then a pickup (the resume) instead: the
       user is never left without a session. Without a launcher, no NOTE is refused (ask the
       agent: `/fairshare handoff`).
@@ -902,7 +913,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | statusLine payload `model.id`, `model.display_name`, `effort.level` (absent when the model takes no effort level; the level actually run when the set one is unsupported) | `CAPTURE_MODEL`, `CAPTURE_MODEL_ID`, `CAPTURE_MODEL_NAME`, `CAPTURE_EFFORT`, `CAPTURE_EFFORT_LEVEL`, `session_of` | no model recorded: sessions started in place of another take the default model | documented: /statusline, read 2026-11-12 |
 | statusLine payload `cost.total_cost_usd` (an estimate at list price, not a bill; resets to 0 on `/clear`) | `CAPTURE_COST`, `CAPTURE_COST_TOTAL`, `session_of` | no spend: `status` shows `-`, no heaviest clause, no worker cost | documented: /statusline, read 2026-11-12 |
 | `--resume <id>` (any project's session; the same id), `--fork-session` (a copy under a new id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line) | `RESUME_ARGS`, `FORK_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `resume_args`, `model_args`, `background` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
-| Print-mode resume for the handoff note: `-p --output-format json --tools "" --resume <id>`; the JSON's `result` (and `is_error`) | `NOTE_ARGS`, `note_command`, `note_text` | the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools), /sessions ("Access conversations from scripts"), read 2026-11-12; not run live |
+| Print-mode resume for the handoff note: `-p --output-format stream-json --verbose --include-partial-messages --tools "" --resume <id>`; one JSON object per line: `system`/`thinking_tokens`, `stream_event` with `content_block_start` (`thinking`, `text`) and `content_block_delta` (`thinking_delta`, `text_delta` with `delta.text`); the final line's `result` (and `is_error`) | `NOTE_ARGS`, the `NOTE_*` spellings, `note_command`, `note_event`, `note_text` | lines that stop parsing: the spinner, the clock and the last phase stay; no result line: the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools; `--include-partial-messages` requires `--print` and `--output-format stream-json`, its example passes `--verbose`), /sessions ("Access conversations from scripts"), read 2026-11-12. Run live by the planner on 2.1.322, 2026-11-12: an Opus turn at medium effort (thinking block, then 37 text deltas, then `result`; recorded as `tests/fixtures/claude-2.1.322/note-stream.jsonl`) and a Haiku turn at low effort (no thinking block) |
 | The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (planner; a background and an interactive session) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
 | Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |

@@ -13,7 +13,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import termios
 import time
 import tomllib
@@ -25,7 +24,8 @@ from pathlib import Path
 from . import browser
 from . import hub as hub_mod
 from . import providers, session, store
-from .model import (ACCOUNT_ID, DEFAULT_HUB, ROLE_WORKER, USAGE_MODEL_TURN, Account,
+from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, NOTE_THINKING, NOTE_WRITING,
+                    ROLE_WORKER, USAGE_MODEL_TURN, Account,
                     AccountStatus, ConfigError, Request, SessionRecord, SessionSeen, Snapshot,
                     Tuning, Window, Worker,
                     load_accounts, load_plan, window_model, with_account, with_hub,
@@ -1146,7 +1146,9 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
       HANDOFF_NOTE the launcher has the stopped session write that note first, and anything
       wrong there is a pickup instead (one line why);
     - a pickup: for an automatic one on a terminal, a countdown (cancel says how to resume
-      later); then the same session resumed on the best account (`_resumed`)."""
+      later); then the same session resumed on the best account (`_resumed`).
+    First one line says what is happening (`_notice`), so the terminal is never blank."""
+    _notice(rec, req)
     if req.kind == SWITCH:
         _say(f"to resume the old session: {_resume_line(rec)}")
         _to_folder(rec)
@@ -1164,6 +1166,22 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
     _to_folder(rec)
     return _start(rec, req, _resumed(rec), moving=None if s or req.kind != PICKUP
                   else rec.account)
+
+
+VERBS = {PICKUP: "picking up", HANDOFF: "handing off", HANDOFF_NOTE: "handing off",
+         SWITCH: "switching from"}
+
+
+def _notice(rec: SessionRecord, req: Request) -> None:
+    """The launcher's first line after it stopped its child for `req`: the verb, the session's
+    first 8 characters, and the model's display name and effort it keeps, when known. Ends in
+    `…`, except for a note to write, whose phases follow on their own line."""
+    model, effort = _carry(rec, req)
+    name = rec.model_name if model and model == rec.model and rec.model_name else model
+    what = " · ".join(x for x in (name, effort if effort != EFFORT_NONE else None) if x)
+    print(f"fairshare · {VERBS.get(req.kind, req.kind)} {rec.id[:8]}"
+          f"{f' ({what})' if what else ''}{'' if req.kind == HANDOFF_NOTE else '…'}",
+          file=sys.stderr, flush=True)
 
 
 def _browser_env(hub: Path, acct: Account) -> dict[str, str]:
@@ -1530,13 +1548,17 @@ def _write_note(rec: SessionRecord, req: Request) -> bool:
     """In the launcher, after it stopped its child: resume that session headless for one turn
     that writes its handoff note (no tools, its model and effort), on its own account when it
     can take work (its cache is warm), else the top eligible one; append the answer as its
-    checkpoint. On a terminal, `c` skips. False, with one line why, when no note was written:
-    the caller picks the session up instead."""
+    checkpoint. A status line shows each step (`_Status`); on a terminal, `c` skips. False,
+    with one line why, when no note was written: the caller picks the session up instead."""
+    status = _Status(_interactive())
+
     def fail(why: str) -> bool:
+        status.clear()
         _say(f"no handoff note ({why}); picking the session up instead")
         return False
+    status.show("checking accounts…")
     try:
-        s = _survey()
+        s = _drawing(status, _survey)
     except SystemExit as e:
         return fail(str(e))
     own = next((v.account for v in s.verdicts if v.account.id == rec.account), None)
@@ -1547,53 +1569,143 @@ def _write_note(rec: SessionRecord, req: Request) -> bool:
     prov = providers.get(acct.provider)
     model, effort = _carry(rec, req)
     cmd, env = prov.note_command(acct, rec.id, prov.model_args(model, effort), HANDOFF_NOTE_ASK)
-    with tempfile.TemporaryFile() as out:
-        try:
-            proc = subprocess.Popen(cmd, env=_background_env(env), stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=subprocess.DEVNULL,
-                                    cwd=rec.cwd if rec.cwd and os.path.isdir(rec.cwd) else None)
-        except OSError as e:
-            return fail(f"cannot start {cmd[0]}: {e.strerror}")
-        how = _note_wait(proc, f"writing the handoff note for {rec.id[:8]}… · c = skip")
-        if how != "done":
+    try:
+        proc = subprocess.Popen(cmd, env=_background_env(env), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                cwd=rec.cwd if rec.cwd and os.path.isdir(rec.cwd) else None)
+    except OSError as e:
+        return fail(f"cannot start {cmd[0]}: {e.strerror}")
+    try:
+        how, text = _note_wait(proc, prov, acct.id, status)
+    finally:
+        if proc.poll() is None:
             proc.kill()
-            proc.wait()
-            return fail("skipped" if how == "skip" else f"no answer in {HANDOFF_WAIT_S} s")
-        out.seek(0)
-        text = prov.note_text(out.read().decode("utf-8", "replace"))
+        proc.wait()
+        proc.stdout.close()
+    if how != "done":
+        return fail("skipped" if how == "skip" else f"no answer in {HANDOFF_WAIT_S} s")
     if proc.returncode or not text:
         return fail(f"the turn failed (exit {proc.returncode})" if proc.returncode
                     else "the answer held no note")
-    _write_checkpoint(rec.id, text)
-    _say(f"handoff note written on {acct.id}: {store.checkpoint_path(rec.id)}")
+    path = _write_checkpoint(rec.id, text)
+    status.clear()
+    print(f"✓ note saved, {len(text.split())} words → {path}", file=sys.stderr, flush=True)
     return True
 
 
-def _note_wait(proc: subprocess.Popen, text: str, seconds: float | None = None) -> str:
-    """Wait for `proc`: "done" when it ended, "skip" when `c` was typed (on a terminal, which
-    shows `text`; cbreak mode, always restored), "timeout" after `seconds` (HANDOFF_WAIT_S)."""
+TICK_S = 0.1                              # the status line's redraw interval
+SPIN_UTF8, SPIN_ASCII = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", "|/-\\"
+STATUS_PHASE_WIDTH = 44                   # the phase's column, so the clock stays put
+
+
+def _width() -> int:
+    try:
+        return max(os.get_terminal_size(sys.stderr.fileno()).columns, 20)
+    except (OSError, ValueError):
+        return 80
+
+
+class _Status:
+    """One status line on stderr. On a terminal (`tty`): a spinner, the phase, the time since
+    it began (m:ss) and a tail, redrawn in place by `draw`, cut to the terminal's width.
+    Otherwise each phase once, as a plain line, as it starts."""
+
+    def __init__(self, tty: bool):
+        self.tty, self.start = tty, time.monotonic()
+        self.phase = self.detail = self.tail = ""
+        utf8 = (getattr(sys.stderr, "encoding", None) or "").lower().replace("-", "") == "utf8"
+        self.frames = SPIN_UTF8 if utf8 else SPIN_ASCII
+
+    def show(self, phase: str, detail: str = "", tail: str = "") -> None:
+        """Show `phase` (with `detail` and `tail`, on a terminal only)."""
+        if phase != self.phase and not self.tty:
+            print(phase, file=sys.stderr, flush=True)
+        self.phase, self.detail, self.tail = phase, detail, tail
+        self.draw()
+
+    def draw(self) -> None:
+        if not self.tty:
+            return
+        t = time.monotonic() - self.start
+        line = (f"{self.frames[int(t / TICK_S) % len(self.frames)]} "
+                f"{self.phase + self.detail:<{STATUS_PHASE_WIDTH}} "
+                f"{int(t) // 60}:{int(t) % 60:02d}{self.tail}")
+        print(f"\r{line[:_width() - 1]}\x1b[K", end="", file=sys.stderr, flush=True)
+
+    def clear(self) -> None:
+        if self.tty:
+            print("\r\x1b[K", end="", file=sys.stderr, flush=True)
+
+
+def _drawing(status: _Status, fn):
+    """`fn()` in a worker thread while this one redraws `status`: its result, or its exception
+    (a SystemExit too)."""
+    with ThreadPoolExecutor(1) as pool:
+        future = pool.submit(fn)
+        while True:
+            try:
+                return future.result(TICK_S)
+            except TimeoutError:
+                status.draw()
+
+
+def _note_wait(proc: subprocess.Popen, prov, where: str, status: _Status,
+               seconds: float | None = None) -> tuple[str, str | None]:
+    """Wait for `proc`, the note turn, reading its output pipe as it comes (so it never fills)
+    and showing its phase on `status`: reading the session on `where` until the model's first
+    event, thinking, then writing the note with its words so far (`Provider.note_event`). The
+    phase never goes back; a line that says nothing keeps it. "done" and the answer's text
+    (`Provider.note_text` of the final line; None without one) when the turn ended; "skip"
+    when `c` was typed (on a terminal: cbreak mode, always restored); "timeout" after `seconds`
+    (HANDOFF_WAIT_S)."""
     end = time.monotonic() + (HANDOFF_WAIT_S if seconds is None else seconds)
-    tty_fd = sys.stdin.fileno() if _interactive() else None
+    tty_fd = sys.stdin.fileno() if status.tty else None
+    tail = " · c = skip" if tty_fd is not None else ""
+    pipe, buf, last, phase, written = proc.stdout.fileno(), b"", "", 0, ""
+
+    def show() -> None:
+        status.show(*((f"reading the session on {where}…", ""), ("thinking…", ""),
+                      ("writing the note", f" · {len(written.split())} words"))[phase], tail)
+
+    def read(lines: list[bytes]) -> None:
+        nonlocal last, phase, written
+        for raw in lines:
+            if not (line := raw.decode("utf-8", "replace").strip()):
+                continue
+            last, ev = line, prov.note_event(line)
+            if ev and ev.kind == NOTE_THINKING:
+                phase = max(phase, 1)
+            elif ev and ev.kind == NOTE_WRITING:
+                phase, written = 2, written + ev.text
     saved = None
     try:
         if tty_fd is not None:
             saved = termios.tcgetattr(tty_fd)
             tty.setcbreak(tty_fd)
             termios.tcflush(tty_fd, termios.TCIFLUSH)
-            print(text, end="", file=sys.stderr, flush=True)
-        while proc.poll() is None:
-            if (left := end - time.monotonic()) <= 0:
-                return "timeout"
-            if tty_fd is None:
-                time.sleep(min(left, 0.2))
-            elif select.select([tty_fd], [], [], min(left, 0.2))[0] and \
-                    os.read(tty_fd, 1).lower() == b"c":
-                return "skip"
-        return "done"
+        show()
+        while not ((done := proc.poll() is not None) and pipe is None):
+            if not done and (left := end - time.monotonic()) <= 0:
+                return "timeout", None
+            ready = select.select([f for f in (pipe, tty_fd) if f is not None], [], [],
+                                  0 if done else min(left, TICK_S))[0]
+            if pipe is not None and pipe in ready:
+                if chunk := os.read(pipe, 65536):
+                    *lines, buf = (buf + chunk).split(b"\n")
+                    read(lines)
+                else:                                 # the end of the output
+                    pipe = None
+            elif done:                                # ended, and its pipe held open elsewhere
+                break
+            if tty_fd is not None and tty_fd in ready and os.read(tty_fd, 1).lower() == b"c":
+                return "skip", None
+            show()
+        read([buf])
+        return "done", prov.note_text(last) if last else None
     finally:
         if saved is not None:
             termios.tcsetattr(tty_fd, termios.TCSADRAIN, saved)
-            print(file=sys.stderr)
+        status.clear()
 
 
 # --- Switch: bare `fairshare` inside a session started by the launcher (decision 23).

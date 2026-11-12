@@ -20,9 +20,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import store
-from ..model import (EFFORT_NONE, USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD,
-                     USAGE_SIGNED_OUT, Account, AccountStatus, Candidate, Capture, LiveSession, SessionSeen, Window,
-                     model_window, plan_for, window_names)
+from ..model import (EFFORT_NONE, NOTE_THINKING, NOTE_WRITING, USAGE_MODEL_TURN, USAGE_NO_ANSWER,
+                     USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT, Account, AccountStatus, Candidate,
+                     Capture, LiveSession, NoteEvent, SessionSeen, Window, model_window, plan_for,
+                     window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
 tool = "Claude Code"                 # the tool as users know it, for messages
@@ -56,10 +57,22 @@ BG_ARGS, NAME_ARGS, RESUME_ARGS, FORK_ARGS = ("--bg",), ("--name",), ("--resume"
     ("--fork-session",)
 MODEL_ARGS, EFFORT_ARGS = ("--model",), ("--effort",)
 # The handoff note: one headless turn of a stopped session, resumed with the arguments above,
-# in print mode with JSON output (whose `result` is the answer's text, `is_error` an error) and
-# no tools (`--tools ""` disables every built-in tool). CLI reference, read 2026-11-12; the
-# JSON's `result`: /sessions ("Access conversations from scripts"), same day.
-NOTE_ARGS = ("-p", "--output-format", "json", "--tools", "")
+# in print mode with streamed JSON output and no tools (`--tools ""` disables every built-in
+# tool). CLI reference, read 2026-11-12: `--include-partial-messages` requires `--print` and
+# `--output-format stream-json`, its example also passes `--verbose`. One JSON object per line
+# (2.1.322, planner, 2026-11-12): `system` lines (`thinking_tokens` while it thinks), then
+# `stream_event` lines whose `event` is a `content_block_start` (`content_block.type`
+# `thinking` or `text`) or a `content_block_delta` (`delta.type` `thinking_delta`, or
+# `text_delta` with `delta.text`), among others; last, `{"type": "result", "is_error": ...,
+# "result": <the answer's text>}` (/sessions, "Access conversations from scripts").
+NOTE_ARGS = ("-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+             "--tools", "")
+NOTE_TYPE, NOTE_SUBTYPE, NOTE_EVENT = "type", "subtype", "event"
+NOTE_SYSTEM, NOTE_THINKING_TOKENS, NOTE_STREAM = "system", "thinking_tokens", "stream_event"
+NOTE_BLOCK_START, NOTE_BLOCK = "content_block_start", "content_block"
+NOTE_DELTA_EVENT, NOTE_DELTA, NOTE_DELTA_TEXT = "content_block_delta", "delta", "text"
+NOTE_THINKING_PARTS = ("thinking", "thinking_delta")
+NOTE_TEXT_BLOCK, NOTE_TEXT_DELTA = "text", "text_delta"
 # The running sessions: `claude agents --json`, items with `sessionId`, `name` and `status`
 # (`busy` / `idle`), among others (`pid`, `cwd`, `kind`, `startedAt`); ended sessions are not
 # listed (2.1.322, planner, 2026-11-11). A background session's name appeared within 4 s.
@@ -311,14 +324,40 @@ def background(account: Account, name: str, prompt: str, extra: list[str] = ()
 
 def note_command(account: Account, session_id: str, extra: list[str], prompt: str
                  ) -> tuple[list[str], dict[str, str]]:
-    """One headless turn of the stopped session `session_id` on `account`: no tools, JSON out,
-    with `extra` arguments (a model) and `prompt` as the turn's message. The id stays the same."""
+    """One headless turn of the stopped session `session_id` on `account`: no tools, streamed
+    JSON out, with `extra` arguments (a model) and `prompt` as the turn's message. The id stays
+    the same."""
     return ([real_binary(), *NOTE_ARGS, *resume_args(session_id), *extra, prompt],
             clean_env(account.config_dir))
 
 
+def note_event(line: str) -> NoteEvent | None:
+    """What one line of that turn's output says: thinking, or writing (with the new text); None
+    for any other line, or one that does not parse."""
+    try:
+        d = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    if d.get(NOTE_TYPE) == NOTE_SYSTEM:
+        return NoteEvent(NOTE_THINKING) if d.get(NOTE_SUBTYPE) == NOTE_THINKING_TOKENS else None
+    e = d.get(NOTE_EVENT) if d.get(NOTE_TYPE) == NOTE_STREAM else None
+    part = e.get({NOTE_BLOCK_START: NOTE_BLOCK, NOTE_DELTA_EVENT: NOTE_DELTA}.get(
+        e.get(NOTE_TYPE), "")) if isinstance(e, dict) else None
+    kind = part.get(NOTE_TYPE) if isinstance(part, dict) else None
+    if kind in NOTE_THINKING_PARTS:
+        return NoteEvent(NOTE_THINKING)
+    if kind == NOTE_TEXT_BLOCK:
+        return NoteEvent(NOTE_WRITING)
+    if kind == NOTE_TEXT_DELTA:
+        return NoteEvent(NOTE_WRITING, _str(part, NOTE_DELTA_TEXT) or "")
+    return None
+
+
 def note_text(out: str) -> str | None:
-    """The answer's text in that turn's JSON output; None for an error or no text."""
+    """The answer's text in that turn's final output line (a JSON document); None for an error
+    or no text."""
     try:
         d = json.loads(out)
     except ValueError:
