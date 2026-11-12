@@ -12,7 +12,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .model import SessionRecord, SessionSeen, Snapshot, Window, Worker
+from .model import Request, SessionRecord, SessionSeen, Snapshot, Window, Worker
 
 
 def config_path() -> Path:
@@ -157,6 +157,59 @@ def _text(v: object) -> str | None:
     return v if isinstance(v, str) and v else None
 
 
+def _costs(v: object) -> list:
+    """A cost series as stored; [] for anything that is not one."""
+    if not isinstance(v, list) or not all(
+            isinstance(s, list) and s and all(isinstance(p, list) and len(p) == 2
+                                              and _num(p[0]) is not None
+                                              and _num(p[1]) is not None for p in s) for s in v):
+        return []
+    return v
+
+
+COST_POINT_S = 300     # a new cost point once the last one is this old (the latest value is kept)
+COST_KEEP_S = 7200     # cost points older than this are dropped, one kept before as a baseline
+
+
+def add_cost(series: list, t: float, cost: float) -> list:
+    """`series` (oldest first: segments of [time, cost] points) with the running cost `cost` seen
+    at `t`. A cost that moved adds a point when the last one is COST_POINT_S old or more, else
+    becomes the last point's value (a segment's first point is never changed: it is the base);
+    a cost lower than the last means the session started counting again: a new segment from it,
+    never a negative spend. Points older than COST_KEEP_S go, except the one before the oldest
+    kept (the base its rise is measured from) and the latest value."""
+    segs = [[list(p) for p in seg] for seg in series]
+    last = segs[-1][-1] if segs else None
+    if last is None or cost < last[1]:
+        segs.append([[t, cost]])
+    elif cost > last[1]:
+        if len(segs[-1]) == 1 or t - last[0] >= COST_POINT_S:
+            segs[-1].append([t, cost])
+        else:
+            last[1] = cost
+    cut, kept = t - COST_KEEP_S, []
+    for i, seg in enumerate(segs):
+        while len(seg) >= 2 and seg[1][0] <= cut:
+            seg.pop(0)
+        if seg[-1][0] > cut or i == len(segs) - 1:
+            kept.append(seg)
+    return kept
+
+
+def spend(series: list, start: float, end: float) -> float | None:
+    """The cost rise of a session inside (start, end]: each rise between two points counts at
+    the later point's time (at most COST_POINT_S late). None when the session has no cost data."""
+    if not series:
+        return None
+    return sum(q[1] - p[1] for seg in series for p, q in zip(seg, seg[1:]) if start < q[0] <= end)
+
+
+def total_cost(series: list) -> float | None:
+    """A session's cost as far as the series knows: the last value of each segment (each one
+    counts from zero again)."""
+    return sum(seg[-1][1] for seg in series) if series else None
+
+
 def _read_session(path: Path) -> SessionRecord | None:
     try:
         d = json.loads(path.read_text())
@@ -166,7 +219,10 @@ def _read_session(path: Path) -> SessionRecord | None:
                              _text(d.get("parent")),
                              _num(d.get("checkpoint_requested")), _num(d.get("request_said")),
                              d["warned"] if isinstance(d.get("warned"), dict) else {},
-                             d["reported"] if isinstance(d.get("reported"), dict) else {})
+                             d["reported"] if isinstance(d.get("reported"), dict) else {},
+                             _text(d.get("model")), _text(d.get("model_name")),
+                             _text(d.get("effort")), _num(d.get("waiting_until")),
+                             _costs(d.get("costs")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -206,8 +262,11 @@ def note_session(seen: SessionSeen, account_id: str, now: float,
     provider left out keeps its old value) and every other field. `stranded` True marks it
     stopped by its account's limit now, False clears that, None leaves it. Written only when it
     is new or changed, or last seen SESSION_WRITE_S ago or more, so a redraw costs no write;
+    a change of `stranded` either way also ends a wait for the provider's own resume;
     each write drops the records unseen for SESSION_KEEP_S. Under a lock: a hook and a usage
-    hook may arrive together. None for an id that cannot be a file name."""
+    hook may arrive together. None for an id that cannot be a file name. A model `seen` names
+    replaces the known model, display name and effort together (the user may change them
+    mid-session); none named keeps them."""
     if not _SESSION_ID.fullmatch(seen.id):
         return None
     dest = _sessions()
@@ -219,6 +278,12 @@ def note_session(seen: SessionSeen, account_id: str, now: float,
                       transcript=seen.transcript or (old and old.transcript), seen=now,
                       stranded_at=now if stranded else None if stranded is False
                       else old and old.stranded_at)
+        if seen.model:
+            new = replace(new, model=seen.model, model_name=seen.model_name, effort=seen.effort)
+        if seen.cost is not None:
+            new = replace(new, costs=add_cost(new.costs, now, seen.cost))
+        if stranded is not None:
+            new = replace(new, waiting_until=None)
         if old and replace(old, seen=now) == new and now - old.seen < SESSION_WRITE_S:
             return old
         _write_session(dest, new)
@@ -243,6 +308,14 @@ def update_session(session_id: str, change) -> SessionRecord | None:
     return new
 
 
+def move_session(session_id: str, account_id: str) -> SessionRecord | None:
+    """A session resumed under its own id on `account_id`: its record names that account, is
+    no longer stranded or waiting; every other field (role, parent, checkpoints' requests) is
+    kept."""
+    return update_session(session_id, lambda old: old and replace(
+        old, account=account_id, stranded_at=None, waiting_until=None))
+
+
 def _workers() -> Path:
     return state_dir() / "workers"
 
@@ -251,7 +324,8 @@ def _read_worker(path: Path) -> Worker | None:
     try:
         d = json.loads(path.read_text())
         return Worker(path.stem, str(d["parent"]), str(d["account"]), str(d["cwd"]),
-                      float(d["started"]), _text(d.get("session")))
+                      float(d["started"]), _text(d.get("session")), _text(d.get("model")),
+                      _text(d.get("effort")), _num(d.get("cost")), _num(d.get("duration")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -298,6 +372,16 @@ def workers(parent: str | None = None) -> list[Worker]:
                    and (parent is None or w.parent == parent)), key=lambda w: (w.started, w.name))
 
 
+def finish_worker(name: str, cost: float | None, duration: float) -> bool:
+    """Record a worker's measured cost and duration (when it ended or went still); True when
+    that changed its record."""
+    with locked(_workers() / ".lock"):
+        if (w := worker(name)) is None or (w.cost, w.duration) == (cost, duration):
+            return False
+        _save_worker(replace(w, cost=cost, duration=duration))
+    return True
+
+
 def join_worker(name: str, session_id: str) -> None:
     """Note the session id a worker turned out to have."""
     with locked(_workers() / ".lock"):
@@ -333,23 +417,25 @@ def _requests() -> Path:
     return state_dir() / "requests"
 
 
-def save_request(launcher: int, session_id: str, manual: bool, pid: int | None) -> None:
-    """Ask the launcher `launcher` (a process id) to continue `session_id` elsewhere: one file
-    per launcher, replaced atomically. `pid` is the session's own process, when known, so the
-    launcher acts only for its own child; `manual` skips its check that the account is out."""
-    _write_json(_requests(), f"{launcher}.json",
-                {"session": session_id, "manual": manual, "pid": pid})
+def save_request(launcher: int, req: Request) -> None:
+    """Ask the launcher `launcher` (a process id) to act on its child's session: one file per
+    launcher, replaced atomically. The request's `pid` is the session's own process, when known,
+    so the launcher acts only for its own child; `manual` skips its check that the account is
+    out."""
+    _write_json(_requests(), f"{launcher}.json", vars(req))
 
 
-def take_request(launcher: int) -> tuple[str, bool, int | None] | None:
-    """(session id, manual, pid) of the launcher's pending request, removed as it is read; None
-    when there is none or it does not read."""
+def take_request(launcher: int) -> Request | None:
+    """The launcher's pending request, removed as it is read; None when there is none or it
+    does not read."""
     path = _requests() / f"{launcher}.json"
     try:
         d = json.loads(path.read_text())
         path.unlink()
         pid = d.get("pid")
-        return str(d["session"]), d.get("manual") is True, pid if isinstance(pid, int) else None
+        return Request(str(d["session"]), d.get("manual") is True,
+                       pid if isinstance(pid, int) else None, _text(d.get("kind")) or "pickup",
+                       _text(d.get("model")), _text(d.get("effort")), _text(d.get("account")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 

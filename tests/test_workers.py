@@ -140,10 +140,10 @@ class TrustCommand(Work):
 
 
 class WorkerCommand(Work):
-    def worker(self, *argv, env=None, inside=True):
+    def worker(self, *argv, env=None, inside=True, model=("--model", "opus", "--effort", "high")):
         e = {**({"CLAUDE_CODE_SESSION_ID": PARENT} if inside else {}), **(env or {})}
         with mock.patch.dict(os.environ, e):
-            return self.go("worker", *argv)
+            return self.go("worker", *model, *argv)
 
     def bg_args(self, account):
         return (self.log / f"args-{account}").read_text().splitlines()
@@ -162,14 +162,15 @@ class WorkerCommand(Work):
         self.assertEqual(out, f"worker {name} started on a (session s-w-9f8e)\n")
         args = self.bg_args("a")
         self.assertEqual(args[:3], ["--bg", "--name", name])
-        self.assertEqual(args[3:], [cli.WORKER_LINE.format(parent=PARENT), "",
+        self.assertEqual(args[3:], ["--model", "opus", "--effort", "high",
+                                    cli.WORKER_LINE.format(parent=PARENT), "",
                                     "Refactor the parser."])
         self.assertIn(f'You are a worker for session {PARENT}. When fairshare asks for a '
                       'checkpoint, run fairshare checkpoint "<what is done, what is next>".', args)
         self.assertEqual(Path((self.log / "cwd-a").read_text().strip()), self.here)
         w = store.worker(name)
-        self.assertEqual((w.parent, w.account, w.cwd, w.started, w.session),
-                         (PARENT, "a", str(self.here), self.clock[0], f"s-{name}"))
+        self.assertEqual((w.parent, w.account, w.cwd, w.started, w.session, w.model, w.effort),
+                         (PARENT, "a", str(self.here), self.clock[0], f"s-{name}", "opus", "high"))
         rec = store.session(f"s-{name}")
         self.assertEqual((rec.role, rec.parent, rec.account), (ROLE_WORKER, PARENT, "a"))
 

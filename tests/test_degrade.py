@@ -263,7 +263,7 @@ class Scrub(Fleet):
     def test_session_state_is_dropped_silently_and_user_settings_pass(self):
         with mock.patch.dict(os.environ, {"CLAUDE_JOB_DIR": "/j", "CLAUDE_CODE_SESSION_ID": "s",
                                           "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1000"}):
-            _, _, err = self.go(real=True)
+            _, _, err = self.go("run", real=True)      # bare `fairshare` in a session: a switch
         seen = env_seen(self, "a")
         self.assertFalse("CLAUDE_JOB_DIR" in seen or "CLAUDE_CODE_SESSION_ID" in seen)
         self.assertEqual(seen["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1000")

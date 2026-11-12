@@ -17,13 +17,16 @@ class Provider(Protocol):
     shared: tuple[str, ...]  # what every account shares through the hub; "x/" names a folder
     not_copied: tuple[str, ...]  # of those, what join never copies in: live state, keys
     usage_timeout: float     # seconds read_usage waits at most
+    resumes_at_reset: bool   # the tool resumes a session its limit stopped once the limit resets
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.
         Return {} when the payload carries no usage."""
 
     def session_of(self, raw: object) -> SessionSeen | None:
-        """The session (id, folder, transcript) the usage payload `raw` describes, else None."""
+        """The session (id, folder, transcript) the usage payload `raw` describes, with its model
+        and effort level when the payload names a model (`model.EFFORT_NONE`: the model takes no
+        effort level), else None."""
 
     def hook_session(self, hook: str, raw: object) -> SessionSeen | None:
         """For fairshare's hook named `hook` (`fairshare hook <name>`): the session its input
@@ -39,13 +42,32 @@ class Provider(Protocol):
     def session_pid(self) -> int | None:
         """The process id of that session, when the provider says, else None."""
 
-    def resume_args(self, session_id: str) -> list[str]:
-        """Arguments that continue the session `session_id` in a new one."""
+    def resume_args(self, session_id: str, fork: bool = False) -> list[str]:
+        """Arguments that continue the session `session_id` under its own id, on whichever
+        account starts it; `fork`: in a copy under a new id."""
 
-    def background(self, account: Account, name: str, prompt: str
+    def model_args(self, model: str | None, effort: str | None) -> list[str]:
+        """Arguments that start a session on `model` at `effort` (`model.EFFORT_NONE` or None:
+        no effort argument); none for what is None."""
+
+    def uses_week(self, model: str, week: str) -> bool:
+        """Whether the per-model week the usage report names `week` limits `model` (an id, an
+        alias or a display name)."""
+
+    def background(self, account: Account, name: str, prompt: str, extra: list[str] = ()
                    ) -> tuple[list[str], dict[str, str]]:
         """The command and the clean environment (as `launch`) that start a session of
-        `account` with no terminal, named `name`, whose first message is `prompt`."""
+        `account` with no terminal, named `name`, with `extra` arguments (resume_args,
+        model_args), whose first message is `prompt`."""
+
+    def note_command(self, account: Account, session_id: str, extra: list[str], prompt: str
+                     ) -> tuple[list[str], dict[str, str]]:
+        """The command and clean environment of one headless turn of the stopped session
+        `session_id` on `account`, under the same id, with no tools and `extra` arguments
+        (model_args), whose message is `prompt`; its output is read by `note_text`."""
+
+    def note_text(self, out: str) -> str | None:
+        """The answer's text in that command's output; None for an error or no text."""
 
     def list_sessions(self, account: Account) -> list[LiveSession] | None:
         """The provider's sessions running now (asked through `account`'s folder), with their

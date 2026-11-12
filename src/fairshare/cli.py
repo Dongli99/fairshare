@@ -1,5 +1,5 @@
-"""fairshare CLI: status | capture | run (the default) | prefer | pickup | transcript | trust |
-worker | checkpoint | watch | setup | join | leave | uninstall | doctor."""
+"""fairshare CLI: status | capture | run (the default) | prefer | pickup | handoff | transcript |
+trust | worker | checkpoint | watch | setup | join | leave | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 import tomllib
@@ -25,7 +26,8 @@ from . import browser
 from . import hub as hub_mod
 from . import providers, session, store
 from .model import (ACCOUNT_ID, DEFAULT_HUB, ROLE_WORKER, USAGE_MODEL_TURN, Account,
-                    AccountStatus, ConfigError, SessionRecord, SessionSeen, Snapshot, Tuning, Window, Worker,
+                    AccountStatus, ConfigError, Request, SessionRecord, SessionSeen, Snapshot,
+                    Tuning, Window, Worker,
                     load_accounts, load_plan, window_model, with_account, with_hub,
                     without_account)
 from .policy import HOUR, Verdict, prefer, rank
@@ -263,11 +265,69 @@ def _preference_note(s: Survey) -> str | None:
     return note
 
 
+LIVE_S = 600           # a session seen this recently is live (status's sessions block)
+SPEND_SPAN_S = 3600    # spend is shown and compared over this span: the last hour
+SESSIONS_SHOWN = 5     # status shows at most this many sessions per account
+
+
+def _hour_spend(recs: list[SessionRecord], now: float) -> dict[str, float | None]:
+    """Each session's spend in the last hour (None: no cost data), by id."""
+    return {r.id: store.spend(r.costs, now - SPEND_SPAN_S, now) for r in recs}
+
+
+def _role(rec: SessionRecord) -> str:
+    """main, or a worker's name."""
+    if rec.role != ROLE_WORKER:
+        return "main"
+    return w.name if (w := _worker_of(rec.id)) else ROLE_WORKER
+
+
+def _about(rec: SessionRecord) -> tuple[str, str]:
+    """A session's model (display name) and folder (its last part), `-` when unknown."""
+    return rec.model_name or rec.model or "-", (Path(rec.cwd).name if rec.cwd else "") or "-"
+
+
+def _sessions_block(acct_id: str, recs: list[SessionRecord], now: float) -> list[str]:
+    """status's lines for an account's live sessions, heaviest in the last hour first, at most
+    SESSIONS_SHOWN, then `+N more`: id start, model, folder, role, spend and its share of the
+    account's last-hour spend; `-` with no cost data."""
+    mine = [r for r in recs if r.account == acct_id]
+    spent = _hour_spend(mine, now)
+    total = sum(x for x in spent.values() if x)
+    live = sorted((r for r in mine if now - r.seen <= LIVE_S),
+                  key=lambda r: (-(spent[r.id] if spent[r.id] is not None else -1), r.id))
+    lines = []
+    for r in live[:SESSIONS_SHOWN]:
+        x = spent[r.id]
+        model, folder = _about(r)
+        lines.append(f"session {r.id[:8]} · {model} · {folder} · {_role(r)} · " + (
+            "-" if x is None else f"${x:.2f}" + (f" ({100 * x / total:.0f}%)" if total else "")))
+    if len(live) > SESSIONS_SHOWN:
+        lines.append(f"+{len(live) - SESSIONS_SHOWN} more")
+    return lines
+
+
+def _heaviest(rec: SessionRecord, acct_id: str, now: float) -> str:
+    """One sentence naming another session of the account that drew at least half of its
+    last-hour spend; "" when none did."""
+    mine = [r for r in store.sessions() if r.account == acct_id]
+    spent = _hour_spend(mine, now)
+    total = sum(x for x in spent.values() if x)
+    heavy = max(((spent[r.id], r.id, r) for r in mine if r.id != rec.id and spent[r.id]
+                 and 2 * spent[r.id] >= total), default=None, key=lambda h: h[:2])
+    if not heavy:
+        return ""
+    model, folder = _about(heavy[2])
+    return (f" Heaviest in the last hour: session {heavy[1][:8]} ({model}, {folder}, "
+            f"{100 * heavy[0] / total:.0f}%).")
+
+
 def cmd_status(_a) -> int:
     s = _survey()
     if s.preference and not _honoured(s):
         print(_preference_note(s))
     probes, expiring = _probe_lines(s), _expiry_lines(s.expires, s.now)
+    recs = store.sessions()
     for i, v in enumerate(s.verdicts):
         mark, aid = (">" if i == 0 else " "), v.account.id
         flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
@@ -277,16 +337,18 @@ def cmd_status(_a) -> int:
               f"{v.reason}{_age(s, aid)}{flag}")
         for note in [*s.notes.get(aid, []), *([probes[aid]] if aid in probes else []),
                      *_spent_models(aid, s.snaps.get(aid), s.tuning, s.now),
-                     *([expiring[aid]] if aid in expiring else [])]:
+                     *([expiring[aid]] if aid in expiring else []),
+                     *_sessions_block(aid, recs, s.now)]:
             print(f"    {note}")
     for a, why in s.out:
         print(f"  {a.id:<12} {a.plan.name if a.plan else '-':<14} left out: {why}")
-        for note in s.notes.get(a.id, []):
+        for note in [*s.notes.get(a.id, []), *_sessions_block(a.id, recs, s.now)]:
             print(f"    {note}")
     for a, rep in s.twins:
         print(f"  {a.id:<12} {a.plan.name:<14} same login as {rep}")
-        if a.id in expiring:
-            print(f"    {expiring[a.id]}")
+        for note in [*([expiring[a.id]] if a.id in expiring else []),
+                     *_sessions_block(a.id, recs, s.now)]:
+            print(f"    {note}")
     return 0
 
 
@@ -390,6 +452,26 @@ def cmd_capture(a) -> int:
 PICKUP_MARK = f"{SPENT}out · ! fairshare pickup{PLAIN}"
 
 
+def _pickup_mark(rec: SessionRecord, now: float) -> str:
+    """The bar's mark for a stranded session: when it waits for the provider's own resume,
+    when that is and how to move now instead."""
+    if rec.waiting_until is not None and rec.waiting_until > now:
+        return (f"{SPENT}out · resumes {_clock(rec.waiting_until, now)} · ! fairshare pickup to "
+                f"move now{PLAIN}")
+    return PICKUP_MARK
+
+
+def _limit_reset(acct: Account, snap: Snapshot | None, t: Tuning, now: float) -> float | None:
+    """When the account's limit lifts: the latest reset among its plan windows at their limit (a
+    week at `long_exhausted_pct`, a short window at `short_hot_pct`) still running; None when no
+    window says."""
+    p = acct.plan
+    return max((w.resets_at for name, full in ((p.long_name, t.long_exhausted_pct),
+                                               (p.short_name, t.short_hot_pct))
+                if name and snap and (w := snap.windows.get(name)) and w.used_pct >= full
+                and w.resets_at > now), default=None) if p else None
+
+
 def _spent_now(acct: Account, snap: Snapshot | None, t: Tuning, now: float) -> bool:
     """Whether one of the account's plan windows is spent and not yet reset. The policy calls a
     full short window usable inside its grace hour; for a session the provider already stopped,
@@ -403,13 +485,13 @@ def _spent_now(acct: Account, snap: Snapshot | None, t: Tuning, now: float) -> b
 def _stranded(acct: Account, seen, snap: Snapshot | None, t: Tuning, now: float) -> str | None:
     """Record the session; the pickup hint when its limit stopped it and its account still
     cannot take work by the policy. Numbers newer than the stop that say it can work again (a
-    window reset) clear the mark."""
+    window reset) clear the mark, and any wait for the provider's own resume with it."""
     rec = store.note_session(seen, acct.id, now)
     if rec is None or rec.stranded_at is None or acct.plan is None:
         return None
     if (_spent_now(acct, snap, t, now)
             or not rank([acct], {acct.id: snap} if snap else {}, now, t)[0].eligible):
-        return PICKUP_MARK
+        return _pickup_mark(rec, now)
     if snap and snap.captured_at > rec.stranded_at:
         store.note_session(seen, acct.id, now, stranded=False)
     return None
@@ -509,9 +591,15 @@ def _launcher() -> int | None:
     return pid if pid > 1 and pid in _ancestors() else None
 
 
-def _request(launcher: int, session_id: str, manual: bool, pid: int | None) -> None:
-    """Ask the launcher to stop its child and continue the session elsewhere."""
-    store.save_request(launcher, session_id, manual, pid)
+# What a request asks the launcher to do after it stopped its child: resume the same session on
+# the best account; start a fresh one that reads the checkpoint (written, or to be written by
+# the launcher first); start a fresh one with nothing (a switch).
+PICKUP, HANDOFF, HANDOFF_NOTE, SWITCH = "pickup", "handoff", "handoff-note", "switch"
+
+
+def _request(launcher: int, req: Request) -> None:
+    """Ask the launcher to stop its child and act on its session."""
+    store.save_request(launcher, req)
     os.kill(launcher, signal.SIGUSR1)
 
 
@@ -529,7 +617,7 @@ def _stop_failure(name: str, raw: object) -> None:
     store.note_session(seen, acct.id, now, stranded=True)
     _start_probe(acct, seen.cwd, now)
     if launcher := _launcher():
-        _request(launcher, seen.id, False, prov.session_pid())
+        _request(launcher, Request(seen.id, False, prov.session_pid()))
 
 
 # --- What the hooks say (decision 22): percent crossings, once each per window per session,
@@ -617,7 +705,8 @@ def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window
                 "what happens next.")
     workers = ", ".join(x.name for x in store.workers(rec.id)) or "none"
     return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window (resets "
-            f"{_clock(w.resets_at, now)}). Best other account: {_best_other(acct, accounts, t, now)}"
+            f"{_clock(w.resets_at, now)}).{_heaviest(rec, acct.id, now)} Best other account: "
+            f"{_best_other(acct, accounts, t, now)}"
             ". If what is left of your work is small, carry on. Otherwise, at the next stopping "
             'point: write a checkpoint (fairshare checkpoint "<where you stand>") and run '
             "fairshare pickup to continue on the best account. Workers you started: "
@@ -662,6 +751,8 @@ def _speak(name: str, raw: object) -> str | None:
     rec = rec or store.note_session(seen, acct.id, now)
     if rec is None:
         return None
+    if name == PROMPT_HOOK and rec.role != ROLE_WORKER:
+        _measure_still(store.workers(rec.id), now)
     if _ask_checkpoint(rec.id):
         return prov.hook_output(name, CHECKPOINT_ASK)
     if crossing := _tell_crossing(rec.id, acct, tuning, now):
@@ -758,12 +849,18 @@ def _offer_trust(start: Account, explicit: bool) -> bool:
     return True
 
 
-def _launch(v: Verdict, args: list[str], explicit: bool = False) -> int:
+def _args_for(args, acct: Account) -> list[str]:
+    """A session's arguments: a list, or built once its account is known (a function of it)."""
+    return args(acct) if callable(args) else args
+
+
+def _launch(v: Verdict, args, explicit: bool = False) -> int:
     """Check the hub is there, offer folder trust, run the start check on the account's hub
     folder, then start the provider as a child, in its clean environment (with the account's
-    browser and LAUNCHER_ENV naming this process), and return its exit code. A pickup request
-    (SIGUSR1, `_pickup_request`) stops the child and continues its session on the best account,
-    with this process still the parent, so a later limit picks up again."""
+    browser and LAUNCHER_ENV naming this process), and return its exit code. `args`: a list, or
+    a function of the account that builds them now. A request (SIGUSR1, `_pickup_request`) stops
+    the child and acts on its session (`_continue`), with this process still the parent, so a
+    later limit picks up again."""
     prov, acct = providers.get(v.account.provider), v.account
     hub = acct.config_dir.parent.parent
     if not hub_mod.present(hub, acct.id):
@@ -784,13 +881,14 @@ def _launch(v: Verdict, args: list[str], explicit: bool = False) -> int:
         _say(f"ignoring {', '.join(dropped)} from the environment; the account's own login is used")
     if passed := prov.passed_session_vars():
         _say(f"passing {', '.join(passed)} through from the surrounding session")
-    asked: list[tuple[SessionRecord, Survey | None]] = []
+    asked: list[tuple[SessionRecord, Survey | None, Request]] = []
 
     def requested(child: int) -> bool:
         if got := _pickup_request(child):
             asked.append(got)
         return bool(got)
-    code = session.run_child(cmd + args, {**env, LAUNCHER_ENV: str(os.getpid())}, requested)
+    code = session.run_child(cmd + _args_for(args, acct), {**env, LAUNCHER_ENV: str(os.getpid())},
+                             requested)
     if code != session.PICKUP:
         return code
     return _continue(*asked[-1])
@@ -808,25 +906,45 @@ def _can_work(s: Survey, acct_id: str) -> bool:
     return v is not None and not _spent_now(v.account, s.snaps.get(rep), s.tuning, s.now)
 
 
-def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None] | None:
+def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None, Request] | None:
     """Called in the launcher's wait on SIGUSR1. The request for this launcher, when it is for
-    its own child's session and stands: a manual one (`fairshare pickup`) as it is; an automatic
-    one only when the session is marked stranded and a fresh survey (probes included) confirms
-    its account cannot take work. Otherwise None: back to waiting, nothing printed (the session
-    owns the terminal)."""
+    its own child's session and stands: a manual one (`fairshare pickup`, `handoff`, a switch)
+    as it is; an automatic one only when the session is marked stranded, a fresh survey (probes
+    included) confirms its account cannot take work, and the limit does not reset within
+    `resume_wait_minutes` (then the session is left for the provider's own resume, the wait
+    written on its record as `waiting_until`). Otherwise None: back to waiting, nothing printed
+    (the session owns the terminal)."""
     try:
         got = store.take_request(os.getpid())
-        if got is None or (got[2] is not None and got[2] != child):
+        if got is None or (got.pid is not None and got.pid != child):
             return None
-        rec = store.session(got[0])
-        if rec is None or got[1]:
-            return (rec, None) if rec else None
+        rec = store.session(got.session)
+        if rec is None or got.manual:
+            return (rec, None, got) if rec else None
         if rec.stranded_at is None:
             return None
         s = _survey()
-        return None if _can_work(s, rec.account) else (rec, s)
+        if _can_work(s, rec.account):
+            return None
+        if (until := _resume_soon(s, rec.account)) is not None:
+            store.update_session(rec.id, lambda old: old and replace(old, waiting_until=until))
+            return None
+        return rec, s, got
     except (Exception, SystemExit):
         return None
+
+
+def _resume_soon(s: Survey, acct_id: str) -> float | None:
+    """The reset to leave a stopped session waiting for, when it is within `resume_wait_minutes`
+    (0: never): the provider resumes the session itself then, with its whole context and no
+    re-read. None: pick it up."""
+    rep = next((r for a, r in s.twins if a.id == acct_id), acct_id)
+    v = next((v for v in s.verdicts if v.account.id == rep), None)
+    if v is None or not providers.get(v.account.provider).resumes_at_reset:
+        return None
+    reset = _limit_reset(v.account, s.snaps.get(rep), s.tuning, s.now)
+    wait = s.tuning.resume_wait_minutes * 60
+    return reset if reset and wait > 0 and reset - s.now <= wait else None
 
 
 def _limit_text(s: Survey, acct_id: str) -> str:
@@ -930,23 +1048,122 @@ def _pickup_prompt(rec: SessionRecord, now: float) -> str:
         "First say in one line what you are picking up."])
 
 
-def _continue(rec: SessionRecord, s: Survey | None) -> int:
-    """After the launcher stopped its child: for an automatic pickup on a terminal, a countdown
-    (cancel says how to resume later); then the pickup through the normal launch path, in the
-    session's folder, with the pickup prompt as the first prompt."""
+MOVED_PROMPT = ("fairshare moved this session from account {old} to account {new} because "
+                "{why}. Continue where you left off.")
+
+
+def _moved_prompt(rec: SessionRecord, new: str) -> str:
+    """The first prompt of a session resumed on another account. Provider-neutral."""
+    why = (f"{rec.account} hit its usage limit" if rec.stranded_at is not None
+           else "a move was asked for")
+    return MOVED_PROMPT.format(old=rec.account, new=new, why=why)
+
+
+def _resumed(rec: SessionRecord):
+    """The arguments that resume `rec` under its own id on the chosen account, with the moved
+    prompt. Building them moves the record to that account (`store.move_session`): it is
+    called just before the start."""
+    def build(acct: Account) -> list[str]:
+        prompt = _moved_prompt(rec, acct.id)
+        store.move_session(rec.id, acct.id)
+        return [*providers.get(acct.provider).resume_args(rec.id), prompt]
+    return build
+
+
+def _worker_of(session_id: str) -> Worker | None:
+    return next((w for w in store.workers() if w.session == session_id), None)
+
+
+def _carry(rec: SessionRecord | None, req: Request) -> tuple[str | None, str | None]:
+    """The model and effort a session started in place of `rec` keeps: the latest a usage hook
+    recorded, else (a worker no usage hook saw) what its main session chose for it, else none
+    (the account's default). The request's flags override each."""
+    model = effort = None
+    if rec and rec.model:
+        model, effort = rec.model, rec.effort
+    elif rec and (w := _worker_of(rec.id)):
+        model, effort = w.model, w.effort
+    return req.model or model, req.effort or effort
+
+
+def _with_model(args, model: str | None, effort: str | None):
+    """`args` after the provider's arguments for `model` and `effort` (a function of the
+    account, as `_launch` takes it); `args` itself when there are none."""
+    if not model and not effort:
+        return args
+    return lambda acct: [*providers.get(acct.provider).model_args(model, effort),
+                         *_args_for(args, acct)]
+
+
+def _lacks_model(acct: Account, snap: Snapshot | None, model: str, t: Tuning,
+                 now: float) -> bool:
+    """Whether the account's own week for `model` is spent and not yet reset (stage 4's model
+    weeks, as `_spent_models` reads them)."""
+    prov = providers.get(acct.provider)
+    return any((wm := window_model(k)) and prov.uses_week(model, wm)
+               and w.used_pct >= t.long_exhausted_pct and w.resets_at > now
+               for k, w in (snap.windows if snap else {}).items())
+
+
+def _having_model(s: Survey, model: str | None) -> list[Verdict]:
+    """The eligible verdicts, less those whose account has `model`'s week spent."""
+    return [v for v in s.verdicts if v.eligible and not (
+        model and _lacks_model(v.account, s.snaps.get(v.account.id), model, s.tuning, s.now))]
+
+
+def _no_model_line(model: str) -> str:
+    return f"no account that can take work has {model} left this week"
+
+
+def _start(rec: SessionRecord, req: Request, args, moving: str | None = None,
+           pause: bool = False) -> int:
+    """Start a session in place of `rec`, in the current folder, with `args` (a list or a
+    function of the account), keeping its model and effort (`_carry`): on the request's account
+    (`-a`: no ranking, the trust check kept) or on the best one."""
+    model, effort = _carry(rec, req)
+    if req.account:
+        return _run_account(req.account, args, model, effort)
+    return _route(args, moving=moving, pause=pause, model=model, effort=effort)
+
+
+def _to_folder(rec: SessionRecord) -> None:
+    if rec.cwd and os.path.isdir(rec.cwd):
+        os.chdir(rec.cwd)
+
+
+def _resume_line(rec: SessionRecord) -> str:
+    """How to resume `rec` later, on its own account (the countdown's cancel, a switch)."""
+    prov = next((providers.get(a.provider) for a in _load()[0] if a.id == rec.account),
+                _provider())
+    return f"fairshare run -a {rec.account} -- {shlex.join(prov.resume_args(rec.id))}"
+
+
+def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
+    """After the launcher stopped its child, in the session's folder, by the request's kind:
+    - a switch: one line to resume the old session, then a fresh session (the launch pause
+      applies);
+    - a handoff: a fresh session with the pickup prompt, which reads the checkpoint first; for
+      HANDOFF_NOTE the launcher has the stopped session write that note first, and anything
+      wrong there is a pickup instead (one line why);
+    - a pickup: for an automatic one on a terminal, a countdown (cancel says how to resume
+      later); then the same session resumed on the best account (`_resumed`)."""
+    if req.kind == SWITCH:
+        _say(f"to resume the old session: {_resume_line(rec)}")
+        _to_folder(rec)
+        return _start(rec, req, [], pause=True)
+    if req.kind == HANDOFF or (req.kind == HANDOFF_NOTE and _write_note(rec, req)):
+        _to_folder(rec)
+        return _start(rec, req, [_pickup_prompt(rec, _now())])
     if s is not None and _interactive():
         best = next((v.account.id for v in s.verdicts if v.eligible), None)
         where = f"on {best}" if best else "(no account can take work now)"
         if not _countdown(lambda left: f"{rec.account} hit its limit ({_limit_text(s, rec.account)}"
                           f"). Continuing {where} in {left} s · Enter = now · c = cancel"):
-            prov = next((providers.get(a.provider) for a in _load()[0] if a.id == rec.account),
-                        _provider())
-            _say(f"not continued; to resume it later: fairshare run -a {rec.account} -- "
-                 f"{shlex.join(prov.resume_args(rec.id))}")
+            _say(f"not continued; to resume it later: {_resume_line(rec)}")
             return 0
-    if rec.cwd and os.path.isdir(rec.cwd):
-        os.chdir(rec.cwd)
-    return _route([_pickup_prompt(rec, _now())], moving=None if s else rec.account)
+    _to_folder(rec)
+    return _start(rec, req, _resumed(rec), moving=None if s or req.kind != PICKUP
+                  else rec.account)
 
 
 def _browser_env(hub: Path, acct: Account) -> dict[str, str]:
@@ -963,9 +1180,11 @@ def _wait_until(t: float) -> None:
         _sleep(min(left, 60.0))      # short naps: a sleeping laptop must not oversleep the target
 
 
-def _run_account(account_id: str, args: list[str]) -> int:
-    """The user's explicit choice: no ranking, no refusal. Only an account that is not signed in
-    with a subscription is stopped; a signed-out one is offered a sign-in on a terminal."""
+def _run_account(account_id: str, args, model: str | None = None,
+                 effort: str | None = None) -> int:
+    """The user's explicit choice: no ranking, no refusal, no model filter. Only an account that
+    is not signed in with a subscription is stopped; a signed-out one is offered a sign-in on a
+    terminal. `args` as `_launch` takes them, after the arguments for `model` and `effort`."""
     accounts, tuning, hub = _load()
     acct = next((x for x in accounts if x.id == account_id), None)
     if acct is None:
@@ -1012,7 +1231,7 @@ def _run_account(account_id: str, args: list[str]) -> int:
         _say(f"warning: {acct.id} is near a limit: {v.reason}; {_usable(v, now)}")
     for line in _spent_models(acct.id, snaps.get(acct.id), tuning, now):
         _say(line)
-    return _launch(v, args, explicit=True)
+    return _launch(v, _with_model(args, model, effort), explicit=True)
 
 
 def cmd_run(a) -> int:
@@ -1021,10 +1240,14 @@ def cmd_run(a) -> int:
     return _route(a.args, pause=True)
 
 
-def _route(args: list[str], moving: str | None = None, pause: bool = False) -> int:
-    """Start a session with `args` on the best account (decision 11). `moving`: the account of a
-    session picked up by request, named in one note when it could still take work. `pause`: on
-    a terminal, a choice worth making waits `launch_pause` seconds for a key (`_pause`)."""
+def _route(args, moving: str | None = None, pause: bool = False, model: str | None = None,
+           effort: str | None = None) -> int:
+    """Start a session with `args` (as `_launch` takes them) on the best account (decision 11).
+    `moving`: the account of a session picked up by request, named in one note when it could
+    still take work. `pause`: on a terminal, a choice worth making waits `launch_pause` seconds
+    for a key (`_pause`). `model`, `effort`: the session keeps them; an eligible account whose
+    week for that model is spent is skipped, and when every eligible one is, a terminal asks
+    whether to start the top one on its default model, and no terminal refuses."""
     try:
         while True:
             s = _survey()
@@ -1045,6 +1268,21 @@ def _route(args: list[str], moving: str | None = None, pause: bool = False) -> i
             if note := _preference_note(s):
                 _say(note)
             _nothing_to_rank(s)
+            if model and any(v.eligible for v in s.verdicts):
+                having = _having_model(s, model)
+                if having:
+                    s = replace(s, verdicts=[v for v in s.verdicts
+                                             if v in having or not v.eligible])
+                elif not _interactive():
+                    _say(f"{_no_model_line(model)}; name another with --model")
+                    return 1
+                elif (_say(_no_model_line(model)) or _choose(
+                        f"[d] start on {s.verdicts[0].account.id} with its default model, "
+                        "[q] quit: ", {"d", "q"})) != "d":
+                    _say("not started")
+                    return 0
+                else:
+                    model = effort = None
             top = s.verdicts[0]
             spent = _spent_models(top.account.id, s.snaps.get(top.account.id), s.tuning, s.now)
             if top.eligible:
@@ -1056,7 +1294,7 @@ def _route(args: list[str], moving: str | None = None, pause: bool = False) -> i
                     if (top := _pause(s, top)) is None:
                         _say("not started")
                         return 0
-                return _launch(top, args)
+                return _launch(top, _with_model(args, model, effort))
             _say("no account is eligible:")
             for v in s.verdicts:
                 print(f"  {v.account.id:<12} {v.reason}; {_usable(v, s.now)} (in {_in(v.usable_in)})"
@@ -1074,7 +1312,7 @@ def _route(args: list[str], moving: str | None = None, pause: bool = False) -> i
                 _say(f"starting on {top.account.id}, which is near a limit")
                 for line in spent:
                     _say(line)
-                return _launch(top, args)
+                return _launch(top, _with_model(args, model, effort))
             if choice != "w":
                 return 75
             _say(f"waiting for {soon.account.id}, {_usable(soon, s.now)} (Ctrl-C to quit)")
@@ -1102,13 +1340,29 @@ def _find_session(text: str) -> SessionRecord | None:
     return None
 
 
+def _unknown_account(account_id: str | None) -> bool:
+    """Whether `-a` names no configured account (said, with the configured ids). Checked before
+    a request goes to the launcher, which would otherwise stop the session for nothing."""
+    if account_id is None:
+        return False
+    accounts = _load()[0]
+    if any(x.id == account_id for x in accounts):
+        return False
+    _say(f"no account '{account_id}' (configured: {', '.join(x.id for x in accounts)})")
+    return True
+
+
 def cmd_pickup(a) -> int:
-    """Continue a session on the best account. Inside a session with no SESSION: this one; its
-    launcher, when it has one, stops it and continues (a manual request: no check that the
-    account is out), otherwise a background session takes it over. A SESSION (full id or unique
-    prefix) from a terminal outside a session starts in the foreground in its folder; inside a
-    session or with --bg, in the background. fairshare never stops a session it did not start."""
+    """Continue a session on the best account (or `-a`), resumed under its own id with its
+    model and effort (`--model`, `--effort` override them). Inside a session with no SESSION:
+    this one; its launcher, when it has one, stops it and resumes it (a manual request: no check
+    that the account is out), otherwise it resumes in the background. A SESSION (full id or
+    unique prefix) from a terminal outside a session resumes in the foreground in its folder;
+    inside a session or with --bg, in the background. fairshare never stops a session it did
+    not start."""
     prov = _provider()
+    if _unknown_account(a.account):
+        return 2
     here = prov.current_session()
     if a.session is None:
         if here is None:
@@ -1117,45 +1371,257 @@ def cmd_pickup(a) -> int:
         if (rec := store.session(here)) is None:
             _say(f"no record of this session ({here}) yet; it appears once its status line ran")
             return 1
+        req = Request(rec.id, True, prov.session_pid(), PICKUP, a.model, a.effort, a.account)
         if launcher := _launcher():
-            _request(launcher, rec.id, True, prov.session_pid())
+            _request(launcher, req)
             print("the launcher will stop this session and continue on the best account")
             return 0
-        return _pickup_background(rec)
+        return _pickup_background(rec, req)
     if (rec := _find_session(a.session)) is None:
         return 2
+    req = Request(rec.id, True, None, PICKUP, a.model, a.effort, a.account)
     if here or a.bg or not _interactive():
-        return _pickup_background(rec)
+        return _pickup_background(rec, req)
     if not (rec.cwd and os.path.isdir(rec.cwd)):
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
         return 1
     os.chdir(rec.cwd)
-    return _route([_pickup_prompt(rec, _now())], moving=rec.account)
+    return _start(rec, req, _resumed(rec), moving=rec.account)
 
 
-def _pickup_background(rec: SessionRecord) -> int:
-    """Start the pickup with no terminal, in the session's folder, on the top eligible account
-    that trusts that folder or can get its trust by copy (nothing can ask), and pass the tool's
-    own output through."""
+def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) -> int:
+    """Continue `rec` with no terminal, in its folder, on the request's account or the top
+    eligible one that has its model (`_carry`) and trusts that folder or can get its trust by
+    copy (nothing can ask); the tool's own output passes through. It resumes the session under
+    its own id, or, when it was not stopped by its limit (it may still run, and fairshare stops
+    no session it did not start), a copy under a new id with the record copied. `fresh`: a new
+    session with the pickup prompt instead (a handoff)."""
     if not (rec.cwd and os.path.isdir(rec.cwd)):
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
         return 1
     s = _survey()
-    if _can_work(s, rec.account):
+    if not fresh and _can_work(s, rec.account):
         _say(f"note: {rec.account} can still take work; the session is picked up as asked")
     here = Path(rec.cwd).resolve()
     accounts, _, hub = _load()
-    eligible = [v for v in s.verdicts if v.eligible]
-    acct = _start_here([v.account for v in eligible], here, accounts, hub)
+    model, effort = _carry(rec, req)
+    if req.account:
+        candidates = [x for x in accounts if x.id == req.account]
+        eligible = [v for v in s.verdicts if v.account.id == req.account]
+    else:
+        eligible = _having_model(s, model)
+        if model and not eligible and any(v.eligible for v in s.verdicts):
+            _say(f"{_no_model_line(model)}; name another with --model")
+            return 1
+        candidates = [v.account for v in eligible]
+    acct = _start_here(candidates, here, accounts, hub)
     if acct is None:
         _say("no account can take it in the background: "
              + (f"eligible: {', '.join(v.account.id for v in eligible)}, none of which trusts "
                 f"{here} ({_why_untrusted(here, accounts)}); or use `fairshare pickup "
                 f"{rec.id}` from a terminal" if eligible else "none is eligible now"))
         return 1
-    v = next(v for v in eligible if v.account is acct)
-    _say(f"picking up {rec.id} on {acct.id} ({v.reason}), in the background")
-    return _start_background(acct, f"pickup-{rec.id[:8]}", _pickup_prompt(rec, s.now), rec.cwd)
+    v = next((v for v in eligible if v.account.id == acct.id), None)
+    _say(f"picking up {rec.id} on {acct.id}" + (f" ({v.reason})" if v else "")
+         + ", in the background")
+    prov, w = providers.get(acct.provider), _worker_of(rec.id)
+    name = w.name if w else f"pickup-{rec.id[:8]}"
+    extra = prov.model_args(model, effort)
+    if fresh:
+        return _start_background(acct, name, _pickup_prompt(rec, s.now), rec.cwd, extra)
+    fork = rec.stranded_at is None
+    if code := _start_background(acct, name, _moved_prompt(rec, acct.id), rec.cwd,
+                                 [*prov.resume_args(rec.id, fork), *extra]):
+        return code
+    new = _named_session(acct, name, rec.id)
+    if new is None and not fork:
+        store.move_session(rec.id, acct.id)
+    elif new is None:
+        print(f"the copy's session id is not known yet ({name}); fairshare finds it by name later"
+              if w else f"the copy runs as {name}; its session id is not known yet")
+    else:
+        _copied(rec, new, acct, model, effort, w)
+        print(f"continued as session {new} on {acct.id}")
+    return 0
+
+
+def _named_session(acct: Account, name: str, old: str) -> str | None:
+    """The id of the session named `name` other than `old`, looked for in the provider's list
+    of running sessions for up to JOIN_WAIT seconds; None when only `old` (or nothing) is found:
+    the session went on under its own id, or the list cannot say."""
+    end = _now() + JOIN_WAIT
+    prov = providers.get(acct.provider)
+    while True:
+        live = prov.list_sessions(acct) or []
+        if any(x.id == old and x.name == name for x in live):
+            return None
+        if found := next((x.id for x in live if x.name == name and x.id != old), None):
+            return found
+        if _now() >= end:
+            return None
+        _sleep(JOIN_POLL)
+
+
+def _copied(rec: SessionRecord, new: str, acct: Account, model: str | None,
+            effort: str | None, w: Worker | None) -> None:
+    """A copy of `rec` runs as `new` on `acct`: give it its own record, copied from the old one
+    (role, parent, model, effort), and a worker's name now joins it."""
+    store.update_session(new, lambda old: old or SessionRecord(
+        new, acct.id, rec.cwd, None, _now(), role=rec.role, parent=rec.parent, model=model,
+        model_name=rec.model_name if model == rec.model else None, effort=effort))
+    if w:
+        store.join_worker(w.name, new)
+
+
+# --- Handoff: a checkpoint, then a fresh session that reads it first (decision 23).
+
+HANDOFF_NOTE_ASK = ("fairshare is handing this session over to a fresh session, which reads your "
+                    "note first. Write that note now, as plain text: what was done, what is "
+                    "next, the open decisions, and the files touched. Use no tools; answer with "
+                    "the note alone.")
+HANDOFF_WAIT_S = 300   # seconds the launcher waits for the handoff note before a pickup instead
+
+
+def _write_checkpoint(session_id: str, text: str) -> Path:
+    """Append `text` to the session's checkpoint note, dated, and clear its pending request."""
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(_now()))
+    path = store.append_checkpoint(session_id, f"## {stamp}\n{text}\n")
+    store.update_session(session_id, lambda old: old and old.checkpoint_requested is not None
+                         and replace(old, checkpoint_requested=None, request_said=None) or None)
+    return path
+
+
+def cmd_handoff(a) -> int:
+    """Hand the current session over to a fresh session that reads its checkpoint first. With
+    NOTE: the note is appended, then the launcher stops this session and starts the fresh one
+    (without a launcher, in the background). Without NOTE (the user's `!`): the launcher stops
+    this session, has it write the note in one headless turn, then starts the fresh one."""
+    prov = _provider()
+    if (here := prov.current_session()) is None:
+        _say("not inside a session: handoff is for the session it runs in; to move another "
+             "one: fairshare pickup SESSION")
+        return 2
+    if _unknown_account(a.account):
+        return 2
+    if (rec := store.session(here)) is None:
+        _say(f"no record of this session ({here}) yet; it appears once its status line ran")
+        return 1
+    launcher = _launcher()
+    req = Request(rec.id, True, prov.session_pid(), HANDOFF if a.note else HANDOFF_NOTE,
+                  a.model, a.effort, a.account)
+    if a.note:
+        print(_write_checkpoint(rec.id, a.note))
+        if launcher is None:
+            return _pickup_background(rec, req, fresh=True)
+        _request(launcher, req)
+        print("the launcher will stop this session and start a fresh one that reads the note first")
+        return 0
+    if launcher is None:
+        _say("this session was not started by fairshare, so nothing can write its note while it "
+             "waits; ask the session's agent instead: /fairshare handoff")
+        return 1
+    _request(launcher, req)
+    print("the launcher will stop this session, have it write its handoff note, and start a "
+          "fresh one that reads it first")
+    return 0
+
+
+def _write_note(rec: SessionRecord, req: Request) -> bool:
+    """In the launcher, after it stopped its child: resume that session headless for one turn
+    that writes its handoff note (no tools, its model and effort), on its own account when it
+    can take work (its cache is warm), else the top eligible one; append the answer as its
+    checkpoint. On a terminal, `c` skips. False, with one line why, when no note was written:
+    the caller picks the session up instead."""
+    def fail(why: str) -> bool:
+        _say(f"no handoff note ({why}); picking the session up instead")
+        return False
+    try:
+        s = _survey()
+    except SystemExit as e:
+        return fail(str(e))
+    own = next((v.account for v in s.verdicts if v.account.id == rec.account), None)
+    acct = own if own and _can_work(s, rec.account) else next(
+        (v.account for v in s.verdicts if v.eligible), None)
+    if acct is None:
+        return fail("no account can take work")
+    prov = providers.get(acct.provider)
+    model, effort = _carry(rec, req)
+    cmd, env = prov.note_command(acct, rec.id, prov.model_args(model, effort), HANDOFF_NOTE_ASK)
+    with tempfile.TemporaryFile() as out:
+        try:
+            proc = subprocess.Popen(cmd, env=_background_env(env), stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=subprocess.DEVNULL,
+                                    cwd=rec.cwd if rec.cwd and os.path.isdir(rec.cwd) else None)
+        except OSError as e:
+            return fail(f"cannot start {cmd[0]}: {e.strerror}")
+        how = _note_wait(proc, f"writing the handoff note for {rec.id[:8]}… · c = skip")
+        if how != "done":
+            proc.kill()
+            proc.wait()
+            return fail("skipped" if how == "skip" else f"no answer in {HANDOFF_WAIT_S} s")
+        out.seek(0)
+        text = prov.note_text(out.read().decode("utf-8", "replace"))
+    if proc.returncode or not text:
+        return fail(f"the turn failed (exit {proc.returncode})" if proc.returncode
+                    else "the answer held no note")
+    _write_checkpoint(rec.id, text)
+    _say(f"handoff note written on {acct.id}: {store.checkpoint_path(rec.id)}")
+    return True
+
+
+def _note_wait(proc: subprocess.Popen, text: str, seconds: float | None = None) -> str:
+    """Wait for `proc`: "done" when it ended, "skip" when `c` was typed (on a terminal, which
+    shows `text`; cbreak mode, always restored), "timeout" after `seconds` (HANDOFF_WAIT_S)."""
+    end = time.monotonic() + (HANDOFF_WAIT_S if seconds is None else seconds)
+    tty_fd = sys.stdin.fileno() if _interactive() else None
+    saved = None
+    try:
+        if tty_fd is not None:
+            saved = termios.tcgetattr(tty_fd)
+            tty.setcbreak(tty_fd)
+            termios.tcflush(tty_fd, termios.TCIFLUSH)
+            print(text, end="", file=sys.stderr, flush=True)
+        while proc.poll() is None:
+            if (left := end - time.monotonic()) <= 0:
+                return "timeout"
+            if tty_fd is None:
+                time.sleep(min(left, 0.2))
+            elif select.select([tty_fd], [], [], min(left, 0.2))[0] and \
+                    os.read(tty_fd, 1).lower() == b"c":
+                return "skip"
+        return "done"
+    finally:
+        if saved is not None:
+            termios.tcsetattr(tty_fd, termios.TCSADRAIN, saved)
+            print(file=sys.stderr)
+
+
+# --- Switch: bare `fairshare` inside a session started by the launcher (decision 23).
+
+SWITCH_FLAGS = ("--model", "--effort", "-a", "--account")
+
+
+def cmd_switch(a) -> int:
+    """Inside a session: ask its launcher to stop it and start a fresh session on the best
+    account (or `-a`) in the same folder, keeping its model and effort. Never a nested launch."""
+    prov = _provider()
+    here = prov.current_session()
+    if (launcher := _launcher()) is None:
+        _say("this session was not started by fairshare's launcher, so it cannot switch from "
+             "inside; /exit, then fairshare")
+        return 1
+    if _unknown_account(a.account):
+        return 2
+    accounts = _load()[0]
+    rec = store.session(here) or ((acct := _session_account(accounts)) and store.note_session(
+        SessionSeen(here, os.getcwd()), acct.id, _now()))
+    if rec is None:
+        _say(f"no record of this session ({here}); nothing switched")
+        return 1
+    _request(launcher, Request(rec.id, True, prov.session_pid(), SWITCH, a.model, a.effort,
+                               a.account))
+    print("the launcher will stop this session and start a fresh one on the best account")
+    return 0
 
 
 def _background_env(env: dict[str, str]) -> dict[str, str]:
@@ -1165,9 +1631,11 @@ def _background_env(env: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in env.items() if k not in (LAUNCHER_ENV, browser.ENV)}
 
 
-def _start_background(acct: Account, name: str, prompt: str, cwd: str) -> int:
+def _start_background(acct: Account, name: str, prompt: str, cwd: str,
+                      extra: list[str] = ()) -> int:
     """The start check on the account's hub folder, then a session with no terminal named
-    `name`, in `cwd`, whose first message is `prompt`; the tool's own output passes through."""
+    `name`, in `cwd`, with `extra` arguments (a resume, a model), whose first message is
+    `prompt`; the tool's own output passes through."""
     prov = providers.get(acct.provider)
     hub = acct.config_dir.parent.parent
     if not hub_mod.present(hub, acct.id):
@@ -1179,7 +1647,7 @@ def _start_background(acct: Account, name: str, prompt: str, cwd: str) -> int:
     except OSError as e:
         _say(f"cannot prepare {acct.id}'s folder in the hub ({e}); not started")
         return 1
-    cmd, env = prov.background(acct, name, prompt)
+    cmd, env = prov.background(acct, name, prompt, list(extra))
     try:
         return subprocess.run(cmd, env=_background_env(env), cwd=cwd,
                               stdin=subprocess.DEVNULL).returncode
@@ -1322,12 +1790,14 @@ def _join_new(w: Worker, accounts: list[Account]) -> str | None:
         _sleep(JOIN_POLL)
 
 
-def _new_worker(parent: str, acct: Account, cwd: str, name: str | None) -> Worker | None:
+def _new_worker(parent: str, acct: Account, cwd: str, name: str | None, model: str,
+                effort: str) -> Worker | None:
     """Record a new worker under `name`, or under the first free `w-<parent's first 8>-<n>`;
     None when `name` is taken."""
     now = _now()
     for n in range(1, 10_000):
-        w = Worker(name or f"w-{parent[:8]}-{n}", parent, acct.id, cwd, now)
+        w = Worker(name or f"w-{parent[:8]}-{n}", parent, acct.id, cwd, now, model=model,
+                   effort=effort)
         if store.add_worker(w):
             return w
         if name:
@@ -1336,9 +1806,10 @@ def _new_worker(parent: str, acct: Account, cwd: str, name: str | None) -> Worke
 
 
 def cmd_worker(a) -> int:
-    """Start a background session for the calling session: on --account, else the top eligible
-    account that trusts this folder or can get its trust by copy; named, recorded, and joined to
-    its session id by that name."""
+    """Start a background session for the calling session, on the model and effort the main
+    session chose (`--effort none` for a model without one): on --account, else the top
+    eligible account that has that model's week left and trusts this folder or can get its
+    trust by copy; named, recorded, and joined to its session id by that name."""
     prov = _provider()
     if (parent := prov.current_session()) is None:
         _say("not inside a session: a worker belongs to the session that starts it")
@@ -1360,9 +1831,12 @@ def cmd_worker(a) -> int:
         candidates, why = [chosen], ""
     else:
         s = _survey()
-        candidates = [v.account for v in s.verdicts if v.eligible]
-        if not candidates:
+        if not any(v.eligible for v in s.verdicts):
             _say("no account can take work now; no worker started")
+            return 1
+        candidates = [v.account for v in _having_model(s, a.model)]
+        if not candidates:
+            _say(f"{_no_model_line(a.model)}; name another with --model; no worker started")
             return 1
         why = {v.account.id: f" ({v.reason})" for v in s.verdicts}
     acct = _start_here(candidates, here, accounts, hub)
@@ -1370,13 +1844,14 @@ def cmd_worker(a) -> int:
         _say(f"{', '.join(c.id for c in candidates)} cannot work in {here}: "
              f"{_why_untrusted(here, accounts)}; no worker started")
         return 1
-    w = _new_worker(parent, acct, str(here), a.name)
+    w = _new_worker(parent, acct, str(here), a.name, a.model, a.effort)
     if w is None:
         _say(f"a worker named {a.name} is recorded already; choose another --name")
         return 2
     _say(f"starting worker {w.name} on {acct.id}{why and why[acct.id]}")
     prompt = WORKER_LINE.format(parent=parent) + "\n\n" + a.prompt
-    if code := _start_background(acct, w.name, prompt, str(here)):
+    if code := _start_background(acct, w.name, prompt, str(here),
+                                 providers.get(acct.provider).model_args(a.model, a.effort)):
         store.drop_worker(w.name)
         return code
     if sid := _join_new(w, accounts):
@@ -1385,6 +1860,27 @@ def cmd_worker(a) -> int:
         print(f"worker {w.name} started on {acct.id}; its session id is not known yet "
               "(fairshare finds it by name later)")
     return 0
+
+
+WORKER_STILL_S = 1800  # a worker whose cost has not moved this long has its cost recorded
+
+
+def _measure(w: Worker, rec: SessionRecord | None) -> bool:
+    """Record a worker's measured cost (its session's, as far as the series knows) and duration
+    (its start to its last cost movement) on its worker record. Nothing reads them yet: data for
+    sizing work later. False when there is no cost data or nothing changed."""
+    if rec is None or not rec.costs:
+        return False
+    return store.finish_worker(w.name, store.total_cost(rec.costs),
+                               max(0.0, rec.costs[-1][-1][0] - w.started))
+
+
+def _measure_still(workers: list[Worker], now: float) -> None:
+    """`_measure` each worker whose cost has not moved for WORKER_STILL_S."""
+    for w in workers:
+        if w.session and (rec := store.session(w.session)) and rec.costs \
+                and now - rec.costs[-1][-1][0] >= WORKER_STILL_S:
+            _measure(w, rec)
 
 
 # --- Checkpoints: a session's own notes of where it stands, as files (decision 22).
@@ -1457,11 +1953,7 @@ def cmd_checkpoint(a) -> int:
     if here is None:
         _say("not inside a session: a checkpoint belongs to the session that writes it")
         return 2
-    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(_now()))
-    path = store.append_checkpoint(here, f"## {stamp}\n{a.text}\n")
-    store.update_session(here, lambda old: old and old.checkpoint_requested is not None and replace(
-        old, checkpoint_requested=None, request_said=None) or None)
-    print(path)
+    print(_write_checkpoint(here, a.text))
     return 0
 
 
@@ -1477,6 +1969,7 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
     worker a checkpoint written or a stop by its limit, since watch last said so. Said things
     are marked on the session's record."""
     events = []
+    _measure_still(store.workers(here), now)
     if acct and acct.plan and (c := _tell_crossing(here, acct, t, now)):
         events.append(_warning_text(store.session(here), acct, c, accounts, t, now))
     found = []
@@ -1487,6 +1980,13 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
         size = note.stat().st_size if note and note.is_file() else 0
         rec = store.session(w.session)
         found.append((w, note, size, rec and rec.stranded_at, rec and rec.account))
+    resets = {}
+    for x in {f[4] for f in found if f[3]}:
+        a = next((a for a in accounts if a.id == x), None)
+        if a and providers.get(a.provider).resumes_at_reset and (
+                r := _limit_reset(a, store.load(x), t, now)):
+            resets[x] = (f"resets {_clock(r, now)} ({providers.get(a.provider).tool} resumes it "
+                         "then); ")
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:
@@ -1498,8 +1998,8 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
                 said.append(f"worker {w.name} wrote a checkpoint: {note}")
             if stranded and seen.get(f"stranded:{w.session}") != stranded:
                 seen[f"stranded:{w.session}"] = stranded
-                said.append(f"worker {w.name} was stopped by {account}'s limit: fairshare pickup "
-                            f"{w.session}")
+                said.append(f"worker {w.name} was stopped by {account}'s limit: "
+                            f"{resets.get(account, '')}fairshare pickup {w.session}")
         events.extend(said)
         return replace(old, reported=seen) if said else None
     store.update_session(here, change)
@@ -1519,7 +2019,7 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
     if live is None:
         return []
     state = {x.id: x.busy for x in live}
-    events = []
+    events, ended_now = [], []
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:
@@ -1528,6 +2028,7 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
         for w in (w for w in mine if w.session):
             ended, busy = f"ended:{w.session}", f"busy:{w.session}"
             if w.session not in state:
+                ended_now.append(w)
                 if not seen.get(ended):
                     seen[ended] = 1
                     said.append(f"worker {w.name} ended")
@@ -1540,6 +2041,8 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
         events.extend(said)
         return replace(old, reported=seen) if seen != old.reported else None
     store.update_session(here, change)
+    for w in ended_now:
+        _measure(w, store.session(w.session))
     return events
 
 
@@ -2345,6 +2848,13 @@ def _positive(text: str) -> int:
     return int(text)
 
 
+def _carry_flags(p: argparse.ArgumentParser) -> None:
+    """The flags of every verb that starts a session in place of another (D3)."""
+    p.add_argument("--model", help="start on this model (default: the session's latest)")
+    p.add_argument("--effort", help="at this effort level (default: the session's latest)")
+    p.add_argument("-a", "--account", metavar="ID", help="on this account, skipping the ranking")
+
+
 def _run_args(parser: argparse.ArgumentParser, rest: list[str]) -> argparse.Namespace:
     """`run [-a ID | --account ID] [--] ARGS...`. Only a leading -a/--account is fairshare's;
     everything else goes to the provider unchanged (it takes a prompt as its first argument, so a
@@ -2393,7 +2903,14 @@ def main(argv: list[str] | None = None) -> int:
                         "session: this one)")
     kp.add_argument("session", nargs="?", metavar="SESSION", help="a session id or its start")
     kp.add_argument("--bg", action="store_true", help="in the background, with no terminal")
+    _carry_flags(kp)
     kp.set_defaults(f=cmd_pickup)
+    hq = sub.add_parser("handoff", help="inside a session: a checkpoint, then a fresh session "
+                        "that reads it first (with no NOTE, the launcher has the session write it)")
+    hq.add_argument("note", nargs="?", metavar="NOTE", help="what was done, what is next, open "
+                    "decisions, files touched")
+    _carry_flags(hq)
+    hq.set_defaults(f=cmd_handoff)
     tp = sub.add_parser("transcript", help="show what a recorded session said, as text")
     tp.add_argument("session", metavar="SESSION", help="a session id or its start")
     tp.add_argument("--tail", type=_positive, default=40, metavar="N",
@@ -2406,6 +2923,9 @@ def main(argv: list[str] | None = None) -> int:
     wp = sub.add_parser("worker", help="inside a session: start a background worker session")
     wp.add_argument("--account", metavar="ID", help="default: the best account")
     wp.add_argument("--name", help="default: w-<first 8 of this session>-<n>")
+    wp.add_argument("--model", required=True, help="the worker's model, fitted to its task")
+    wp.add_argument("--effort", required=True, help="its effort level; `none` for a model "
+                    "without one")
     wp.add_argument("prompt", metavar="PROMPT")
     wp.set_defaults(f=cmd_worker)
     cq = sub.add_parser("checkpoint", help="inside a session: note where it stands; "
@@ -2434,6 +2954,11 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     if not argv and not store.config_path().exists():
         return _offer_setup()
+    if (not argv or argv[0] in SWITCH_FLAGS) and _provider().current_session():
+        sw = argparse.ArgumentParser(prog="fairshare", description="inside a session: stop it and "
+                                     "start a fresh one on the best account (a switch)")
+        _carry_flags(sw)
+        return cmd_switch(sw.parse_args(argv))
     if not argv or argv[0] == "run":
         return cmd_run(_run_args(p, argv[1:]))
     if argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):

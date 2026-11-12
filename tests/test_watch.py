@@ -104,6 +104,15 @@ class Watch(Work):
                          f"worker w-1 was stopped by b's limit: fairshare pickup {sid}\n")
         self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
 
+    def test_a_stranded_worker_says_when_its_limit_resets(self):
+        """Stage 5c: the provider resumes it then by itself; the main session decides."""
+        sid = self.worker()
+        self.snap("b", five=(100, 2), seven=(40, 50))
+        store.note_session(SessionSeen(sid), "b", NOW, stranded=True)
+        self.assertEqual(self.watch("--timeout", "5")[1],
+                         f"worker w-1 was stopped by b's limit: resets 10:00 (Claude Code resumes "
+                         f"it then); fairshare pickup {sid}\n")
+
     def test_a_worker_that_ended(self):
         self.worker(live=False)
         self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 ended\n")

@@ -16,13 +16,17 @@ providers/<p>.account_status (once per command, in parallel) ──────�
                                                            ──► browser.env, providers/<p>.launch
                                                            ──► session.run_child (a child, not exec)
 
-statusLine ──► capture ──► store.note_session (sessions/<id>.json), bar (+ `out` mark)
+statusLine ──► capture ──► store.note_session (sessions/<id>.json: + model, effort, cost series), bar
                       └──► stale? ──► detached `fairshare probe <id>` ──► read_usage ──► store
 StopFailure (rate_limit) ──► hook stop-failure ──► stranded record, probe, SIGUSR1 ──► launcher
-launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► stop child ──► countdown ──► run (pickup)
+launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► reset soon? leave it (waiting_until)
+                                    └──► stop child ──► countdown ──► resume the same id (pickup)
+                                    └──► stop child ──► [headless note turn] ──► fresh (handoff)
+                                    └──► stop child ──► fresh, no prompt (switch)
 PostToolUse / UserPromptSubmit ──► hook post-tool | prompt ──► snapshot + session record (local)
                                    ──► additionalContext: crossing warning or checkpoint request
-worker ──► survey ──► trust (copy) ──► claude --bg --name ──► workers/<name> ──► join (agents)
+worker ──► survey (model filter) ──► trust (copy) ──► claude --bg --name --model --effort ──► join
+status ──► survey ──► rows + each account's live sessions (spend in the last hour, share)
 watch (background command) ──► snapshot, records, checkpoints/ (5 s), agents (15 s) ──► exit
 
 setup ──► join ──► hub.check, browser (ask), providers/<p>.login_command, account_status
@@ -56,8 +60,11 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 3. **Real usage only.** Percentages come from the provider. Estimating limits from token counts
    was measured as unreliable (reports of ±37 points) and is out of scope.
 4. **Start-time routing.** A running session is bound to one account. Routing happens when a
-   session starts. A session stopped by its account's limit is not moved: a new session on
-   another account continues its work from the transcript (decision 19, pickup).
+   session starts. A session stopped by its account's limit (or moved on request) is resumed
+   under its own id, with its whole context, on another account (decision 19, pickup; since
+   stage 5c, decision 23): the hub shares where the tool keeps sessions, so any account can
+   resume any session. Its price is one uncached read of the context on the new account (a
+   cache write). A handoff starts fresh from a note instead.
 5. **Pure policy, no I/O.** The rule takes accounts, snapshots and a clock, so every case is a
    unit test.
 6. **No data is not zero.** An account with no snapshot is treated as a fresh window and ranked
@@ -269,7 +276,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     is that a new session variable in a later release would pass through, so as a safety net,
     when the launcher itself runs inside a session, it prints one line naming any other
     `CLAUDE_*` variable it passes on (`passed_session_vars`), and the fix is to add the name to
-    a list. Model and effort are not fairshare's business: nothing is passed. The signal rules, all in
+    a list. A plain launch passes no model or effort (the user's settings decide); a session
+    started in place of another keeps the old one's (decision 23). The signal rules, all in
     `run_child` and provider-neutral (a pickup reuses it, decision 19):
     - SIGINT and SIGQUIT do nothing in the parent. The terminal sends them to the whole
       foreground process group, so the child still gets them. They are no-op handlers, not
@@ -285,7 +293,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       a command that cannot start gives 127 (not found) or 126 with one message.
 
     **The launch pause** (owner idea, 2026-11-11). `fairshare` and `fairshare run` (not `run
-    -a`, not a pickup, not the refusal flow's `[s]tart`), on a terminal only, pause before
+    -a`, not a pickup or handoff, not the refusal flow's `[s]tart`; a switch does, decision 23),
+    on a terminal only, pause before
     starting when the choice is worth making: the chosen account is tight (week at 90%, a hot
     short window inside its grace hour, or a spent model week), the second-best eligible
     account's score is within 10% of its score, or a `warning:` line was printed this launch.
@@ -448,13 +457,26 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       override without `--output-format json` still works, but then the model-turn guard is
       blind.
 
-19. **Pickup first** (owner decision, 2026-11-11). Several sessions share one account's quota;
-    on the first day of real use one account's five-hour window went from 23% to 60% in 13
-    minutes, and the last 10% would take about four. A handoff written at a threshold cannot be
-    relied on under that load, so when an account's limit stops a session, a fresh session on
-    the best account continues the work from the transcript. Since stage 5b a session that has
-    time writes a checkpoint and runs `fairshare pickup` itself (decision 22): handoff is
-    checkpoint + pickup.
+19. **Pickup first** (owner decision, 2026-11-11; amended 2026-11-12, decision 23). Several
+    sessions share one account's quota; on the first day of real use one account's five-hour
+    window went from 23% to 60% in 13 minutes, and the last 10% would take about four. A
+    handoff written at a threshold cannot be relied on under that load, so when an account's
+    limit stops a session, the best account continues it. Until stage 5c that was a fresh
+    session reading the transcript; now it is **the same session, resumed under its own id**
+    on the best account, with its model and effort (decision 23). A session that has time may
+    write a checkpoint first (decision 22), or hand off to a fresh session (decision 23).
+    - **Reset-aware** (stage 5c). Claude Code resumes a session its limit stopped by itself,
+      once the limit resets (observed 2.1.322, 2026-11-11; `RESUMES_AT_RESET` in the adapter):
+      waiting keeps the whole context and costs no re-read, which beats a pickup when the reset
+      is near. So the launcher, after confirming an automatic request, finds when the limiting
+      window resets (`_limit_reset`: the latest reset among the plan windows at their limit, a
+      week at `long_exhausted_pct`, a short window at `short_hot_pct`). Within
+      `resume_wait_minutes` (under `[policy]`, default 30, 0 = always pick up, refused below 0)
+      it does not stop the child: it writes `waiting_until` on the session record, prints
+      nothing (the session owns the terminal) and goes back to waiting. Beyond it, the pickup
+      goes on as below. A manual pickup always moves. Background sessions have no launcher:
+      watch's stranded-worker line adds `resets <clock> (Claude Code resumes it then)` and the
+      main session decides.
     - **The session map.** capture keeps one small record per session in the state folder
       (`sessions/<id>.json`, atomic, under a lock): account, folder, transcript path, last seen,
       and when its limit stopped it. Written only when new or changed or last seen a minute ago;
@@ -471,7 +493,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       pid must never be signalled.
     - **The bar.** While the session's record is stranded and the policy says its account cannot
       take work, capture appends a red `out · ! fairshare pickup` (on its own line after the
-      user's `--then` line). Numbers newer than the stop that say the account can work clear it.
+      user's `--then` line); while it waits for the tool's own resume, `out · resumes <clock> ·
+      ! fairshare pickup to move now`. Numbers newer than the stop that say the account can work
+      clear it, and the wait with it; so does a new stop.
     - **The launcher** exports `FAIRSHARE_LAUNCHER=<its pid>` to its child. On SIGUSR1 it reads
       the request (ignored unless it is for its own child's process). An automatic request is
       confirmed by a fresh survey with probes: the session's account must be ineligible;
@@ -483,24 +507,37 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       read in cbreak mode, the terminal always restored; cancel prints `fairshare run -a <old>
       -- --resume <id>` and exits 0). Without a terminal it goes on at once. The pickup is the
       normal launch (trust offer, start check, child) in the session's folder on the top
-      eligible account, with the pickup prompt as its first argument; none eligible is decision
-      11's flow, carrying the prompt. The launcher stays the parent, so a second limit picks up
-      again.
-    - **The manual command.** `fairshare pickup [SESSION] [--bg]`. Inside a session with no
+      eligible account that has the session's model (decision 23), with `--resume <id>`, the
+      model and effort, and the moved prompt (`fairshare moved this session from account A to
+      account B because <A hit its usage limit | a move was asked for>. Continue where you left
+      off.`); building those arguments moves the session record to B (same id, not stranded,
+      everything else kept). None eligible is decision 11's flow, carrying them. The launcher
+      stays the parent, so a second limit picks up again.
+    - **The manual command.** `fairshare pickup [SESSION] [--bg] [--model M] [--effort E] [-a
+      ID]` (the flags override the record; `-a` skips the ranking, keeps the trust check, and is
+      checked before anything is asked of a launcher). Inside a session with no
       SESSION (`CLAUDE_CODE_SESSION_ID`, read through the adapter): this session, through its
       launcher when it has one, else in the background. SESSION is a full id or a unique prefix
       of a recorded one (unknown or ambiguous: exit 2, listing the matches). From a terminal
       outside a session it runs in the foreground in the recorded folder (a gone folder is
       refused); inside a session or with `--bg`, in the background: `claude --bg --name
-      pickup-<first 8> <prompt>` in the recorded folder, on the top eligible account that
-      trusts that folder or can get its trust by copy (decision 21; nothing can ask), with the
-      account's clean environment and no BROWSER (a background session would not receive it,
-      and uses the system browser), its output passed through (it names the attach command).
+      <name> --resume <id> [--fork-session] --model M --effort E <moved prompt>` (a worker keeps
+      its own name, any other session is `pickup-<first 8>`) in the recorded folder, on the top
+      eligible account that has the model and trusts that folder or can get its trust by copy
+      (decision 21; nothing can ask), with the account's clean environment and no BROWSER (a
+      background session would not receive it, and uses the system browser), its output passed
+      through (it names the attach command). `--fork-session` only when the session is not
+      marked stranded: it may still run, and fairshare stops no session it did not start. Then
+      the running sessions are looked up by that name (up to 10 s): another id under it is a
+      copy (the fork, or the tool's own copy with a `note:` line), which gets a record copied
+      from the old one (role, parent, model, effort, the new account) and a worker's name;
+      otherwise the old record is moved.
       None eligible and able: exit 1, naming which were eligible and why trust could not be had. A session whose
       account can still work is picked up anyway, with one note line: moving is a valid wish.
     - **Never stopping others' sessions.** Only the launcher stops a session, and only its own
       child. Outside it, the old session is left as it is.
-    - **The prompt** (cli text, provider-neutral): "This session continues session <id>, which
+    - **The pickup prompt** (cli text, provider-neutral; since stage 5c only a handoff's fresh
+      session uses it): "This session continues session <id>, which
       stopped at <clock> because account <old> hit its usage limit. Its folder: <cwd>. Run
       `fairshare transcript <id> --tail 40` to see where it stopped; read the full transcript
       at <path> only if something is unclear. Then continue the work. First say in one line
@@ -558,10 +595,13 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       both. Big or long work goes to workers: background sessions that can be stopped, moved and
       relaunched. A session record's optional `role` (`worker`; missing means main) and
       `parent` say which is which; fairshare's own fields are written only when set.
-    - **`fairshare worker [--account ID] [--name NAME] PROMPT`**, inside a session (the parent
-      is the provider's session id; outside one, exit 2): the account is `--account` or the top
-      eligible one by the usual survey (probes included) that trusts the folder or can get it by
-      copy (decision 21); then `claude --bg --name <name> <prompt>` in the folder with the
+    - **`fairshare worker --model M --effort E [--account ID] [--name NAME] PROMPT`**, inside
+      a session (the parent is the provider's session id; outside one, exit 2). The main session
+      chooses the model and effort (both required; `--effort none` for a model without levels,
+      which passes no effort argument; kept on the worker record). The account is `--account`
+      or the top eligible one by the usual survey (probes included) whose week for that model
+      is not spent and that trusts the folder or can get it by copy (decision 21); then `claude
+      --bg --name <name> --model M --effort E <prompt>` in the folder with the
       account's clean environment (no BROWSER: `--bg` passes no environment). The default name
       is `w-<first 8 of the parent>-<n>`, the lowest free; a name is claimed in the state
       folder (`workers/<name>.json`: parent, account, folder, start time, later the session id)
@@ -586,9 +626,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       folder (locked, append-only) and clears the session's pending request; `--request
       SESSION|NAME|all` sets `checkpoint_requested` on the named workers' records (`all`: the
       caller's workers; a worker not joined yet is joined first, or named as not asked);
-      `--show SESSION|NAME` prints a note. A pickup prompt names the note first (decision 19).
-      Handoff is checkpoint + pickup: a main session that decides to move writes one and runs
-      `fairshare pickup`.
+      `--show SESSION|NAME` prints a note. A handoff's fresh session reads the note first
+      (decision 23); a pickup resumes the session itself, which knows its own state.
     - **Warnings** (`hook post-tool`, `hook prompt`): percent crossings, 90 then 95, once each
       per plan window (by its reset) per session, recorded on the session record (`warned`); a
       higher crossing covers the lower, a new reset warns again. Nothing for an input naming a
@@ -613,6 +652,99 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       `doctor --fix` install it as the hub's shared `skills/fairshare/` with its diff shown,
       refresh it when the shipped text differs, recognise fairshare's own copy by its `name`,
       and never touch another skill (a foreign one in that folder is a doctor FAIL, left alone).
+
+23. **Model and effort, pickup, handoff, switch** (owner decisions, 2026-11-12; amends
+    decisions 4 and 19). On the first real `! fairshare pickup` the new session got the
+    default model and effort. Three verbs now start a session in place of another:
+
+    | verb | new session |
+    |---|---|
+    | `pickup` (manual, and the launcher's automatic one) | the same session, resumed under its own id on the best account |
+    | `handoff` | fresh: a new id, the pickup prompt, which reads the checkpoint note first |
+    | switch (bare `fairshare` inside a session) | fresh, no prompt |
+
+    - **The latest model and effort.** Every capture overwrites `model` (id), `model_name`
+      and `effort` on the session record from the statusLine payload (`model.id`,
+      `model.display_name`, `effort.level`; the user may change them mid-session). A payload
+      with no model keeps what is known; one with a model and no effort records `none` (the
+      model takes no effort level). Hook inputs never set them. At most one bar redraw old
+      (`refreshInterval` 60 s): accepted, no transcript read.
+    - **Every session started in place of another keeps them** (`Provider.model_args`: for
+      Claude Code `--model <id> --effort <level>`): pickup (launcher, foreground, background),
+      handoff (fresh, and its note turn) and switch. A worker's pickup uses its session
+      record's values when a capture wrote them, else the worker record's. `--model`,
+      `--effort` and `-a` on `pickup`, `handoff` and the switch override them. A record with
+      neither starts as before.
+    - **The account must have the model.** Among eligible accounts, those whose own week for
+      that model is spent (stage 4's model weeks; `Provider.uses_week` matches the report's
+      week name to the model: every word of it, case-insensitive) are skipped. This is a filter
+      in `cli.py`; the policy is unchanged. When no eligible account has the model, a terminal
+      says so in one line and asks `[d]` start on the top account with its default model (no
+      `--model`, no `--effort`) or `[q]` quit; without a terminal one line names `--model`
+      (exit 1). Never a silent swap. `-a` is the user's choice: no filter.
+    - **Handoff** (`fairshare handoff [NOTE] [flags]`, current session only; outside one,
+      exit 2 naming `fairshare pickup SESSION`). With NOTE (what the agent runs): the note is
+      appended as the checkpoint, then the launcher stops this session and starts the fresh
+      one with the same flags; without a launcher, the fresh one starts in the background.
+      Without NOTE (the user's `! fairshare handoff`: a `!` command starts no model turn and
+      holds the session while it runs, so the session cannot write the note during it): the
+      command sends the launcher a `handoff-note` request and returns; the launcher stops the
+      child, then **writes the note through a headless resume**: one turn of the stopped session
+      (`-p --output-format json --tools "" --resume <id>`, its model and effort, a
+      provider-neutral instruction: what was done, what is next, open decisions, files
+      touched), on the session's own account when it can take work (its cache is warm), else
+      the top eligible one; the answer's `result` is appended as the checkpoint; then the fresh
+      session, in the same terminal, the launcher still its parent. The terminal shows
+      `writing the handoff note for <first 8>… · c = skip`. On failure, `HANDOFF_WAIT_S` (300 s),
+      `c`, or no account that can work: one line why, then a pickup (the resume) instead: the
+      user is never left without a session. Without a launcher, no NOTE is refused (ask the
+      agent: `/fairshare handoff`).
+    - **Switch works only under a launcher.** Bare `fairshare` (or only the flags above) inside
+      a session asks its launcher to stop it and start a fresh session on the best account in
+      the same folder: the launch pause applies; before the start one line says how to resume
+      the old one (`fairshare run -a <acct> -- --resume <id>`). Without a launcher it refuses
+      (`/exit`, then `fairshare`): a nested launch no longer happens. Other subcommands behave
+      as before.
+    - **The agent chooses a worker's model** (decision 22's `worker`); the skill tells it to fit
+      model and effort to the task (cheaper and lower for mechanical work, the strongest at high
+      effort for design or many files). It never says that pickups keep model and effort:
+      fairshare does that by itself.
+    - **`/fairshare` and `! fairshare` are the same verbs.** `!` runs at once, costs no turn and
+      works when the account is out; `/` goes through the agent (a turn; the account must
+      work; the agent may act first). The skill maps `/fairshare <args>` to `fairshare <args>`,
+      except a handoff with no note, whose note the agent writes itself.
+    - **Requests** carry a kind (`pickup`, `handoff`, `handoff-note`, `switch`) and the flags
+      (`model.Request`); every kind but an automatic pickup is manual (no check that the
+      account is out).
+
+24. **Measured spend per session** (owner and planner, 2026-11-11). One interactive session on a
+    pricier model drained an account's 5-hour window and stranded a background worker, and
+    nobody could see which session it was. fairshare now records what each session actually
+    spends, no estimates:
+    - **What is kept.** Each capture with `cost.total_cost_usd` extends the session record's
+      `costs`: segments of `[time, cost]` points (`store.add_cost`). A point is added when the
+      cost moved and the last point is at least `COST_POINT_S` (5 minutes) old; otherwise the
+      latest value replaces the last point's (a segment's first point, its base, never). Points
+      older than `COST_KEEP_S` (2 hours) go, one kept before as the base. A cost lower than the
+      last starts a new segment (the session counted again from zero, as `/clear` does): never a
+      negative spend. Written under the sessions' lock, atomically; never less than before but
+      for that trim.
+    - **Spend in a span** (`store.spend`): the sum of each segment's rises whose later point
+      falls in the span (at most 5 minutes late). An account's spend: the sum over its session
+      records. The policy reads none of it; the ranking does not change.
+    - **What it is for.** `status` shows, under each account, its live sessions (seen in the
+      last 10 minutes): first 8 id characters, model, folder, role (main, or the worker's
+      name), last-hour spend in the payload's unit (`$`) and share of the account's, heaviest
+      first, at most 5, then `+N more`; `-` without cost data. The main warning (hooks and
+      watch) adds `Heaviest in the last hour: session <first 8> (<model>, <folder>, <share>%).`
+      when one other session of the account drew at least half of its last-hour spend. On a
+      subscription the cost is an API-price estimate: good for comparing sessions, not a bill.
+    - **Workers' measured cost.** When watch sees a worker ended, or watch or the main session's
+      prompt hook sees its cost still for 30 minutes (`WORKER_STILL_S`), its worker record gets
+      `cost` (the session's running total) and `duration` (start to last cost movement).
+      **Nothing reads them yet**: they are data for the banked sizing work.
+    - **Banked** (owner, 2026-11-11; not built): sizes of reserved token blocks, a "still
+      needed" ledger, and burn rate. They come after the main product, from this data.
 
 ## Known limits
 
@@ -648,6 +780,21 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   the folder variable, and its sign-in links open in the system browser.
 - A main session started with `--agent` carries `agent_id` in its hook input too, so its
   speaking hooks are silent.
+- Not yet checked live (planner, stage 5c): a real `! fairshare handoff` (note written, the
+  fresh session in the same terminal); a real background resume (same id; whether `--name`
+  renames a resumed session, else each in-place background pickup waits the full 10 s for the
+  name; `--effort` with `--bg`, documented only for `--model`); whether a background session
+  runs the statusLine (if not, a worker has no cost data and its pickup uses the worker
+  record's model); the sessions block on the real hub; a real wait-then-resume under the
+  launcher.
+- A foreground `fairshare pickup <id>` of a session still running elsewhere resumes it in place
+  (no fork: the brief scoped forking to background pickups); the docs say two processes on one
+  session interleave their transcript.
+- A session moved by pickup keeps its cost series, so up to two hours of the old account's
+  spend show under the new one. Spend counts at the later point's time, at most 5 minutes late.
+- The model-week match (`uses_week`) has seen only `Fable` as a week name.
+- Under the launcher nothing re-checks a waiting session: if the tool does not resume it at the
+  reset, the bar shows `out · ! fairshare pickup` again once the wait time has passed.
 - "Best other account" in a warning ranks the other accounts on their local snapshots only (no
   sign-in check, no twin grouping); "Workers you started" lists every recorded worker of the
   session (kept 7 days), ended ones included.
@@ -752,6 +899,11 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | `!` commands in the transcript: user messages `<bash-input>…</bash-input>`, then `<bash-stdout>…</bash-stdout>` / `<bash-stderr>…</bash-stderr>` | `T_BANG_INPUT`, `T_BANG_OUTPUT`, `transcript_text` | they show raw, as plain user messages | 2.1.322 (planner, 2026-11-11, a real transcript through `fairshare transcript`) |
 | `claude agents --json` (live sessions with `pid`, `sessionId`, `cwd`, `kind`, `name`, `startedAt`, `status` `busy`/`idle`; ended sessions not listed without `--all`; no account) | `AGENTS_ARGS`, `AGENT_ID`, `AGENT_NAME`, `AGENT_STATUS`, `AGENT_BUSY`, `AGENT_IDLE`, `list_sessions` | a worker is never joined (it hears no request, warnings treat it as a main session) and `watch` reports no ended or idle workers | 2.1.322 (planner, 2026-11-11: a `--bg --name` session appeared with its `sessionId` within 4 s); top-level shape not recorded (a list, or an object holding one, accepted) |
 | Skill format: a folder holding `SKILL.md`, front matter between `---` lines with `name` and `description` (all optional; `description` recommended; description text truncated at 1,536 characters in the listing); user skills in `<config>/skills/<name>/` | `SKILLS_DIR`, `SKILL_FILE`, `SKILL_NAME`, `SKILL_SOURCE`, `SKILL_FENCE`, `SKILL_NAME_KEY`, `skill`, `own_skill` | the skill does not load; doctor still checks the file | documented: code.claude.com/docs/en/skills, read 2026-11-11 (no date on the page); loading in a real session: not yet checked live |
+| statusLine payload `model.id`, `model.display_name`, `effort.level` (absent when the model takes no effort level; the level actually run when the set one is unsupported) | `CAPTURE_MODEL`, `CAPTURE_MODEL_ID`, `CAPTURE_MODEL_NAME`, `CAPTURE_EFFORT`, `CAPTURE_EFFORT_LEVEL`, `session_of` | no model recorded: sessions started in place of another take the default model | documented: /statusline, read 2026-11-12 |
+| statusLine payload `cost.total_cost_usd` (an estimate at list price, not a bill; resets to 0 on `/clear`) | `CAPTURE_COST`, `CAPTURE_COST_TOTAL`, `session_of` | no spend: `status` shows `-`, no heaviest clause, no worker cost | documented: /statusline, read 2026-11-12 |
+| `--resume <id>` (any project's session; the same id), `--fork-session` (a copy under a new id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line) | `RESUME_ARGS`, `FORK_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `resume_args`, `model_args`, `background` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
+| Print-mode resume for the handoff note: `-p --output-format json --tools "" --resume <id>`; the JSON's `result` (and `is_error`) | `NOTE_ARGS`, `note_command`, `note_text` | the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools), /sessions ("Access conversations from scripts"), read 2026-11-12; not run live |
+| The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (planner; a background and an interactive session) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
 | Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
@@ -783,5 +935,5 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 
 ## Not built yet
 
-OpenAI/Codex adapter · packaging for Homebrew. (Handoff at a threshold, once stage 5c, is
-checkpoint + pickup since stage 5b.)
+OpenAI/Codex adapter · packaging for Homebrew · sizes, a "still needed" ledger and burn rate
+(banked; decision 24 records the data they need).

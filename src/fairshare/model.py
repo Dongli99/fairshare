@@ -92,13 +92,21 @@ class Capture:
     then: str | None
 
 
+EFFORT_NONE = "none"   # the model takes no effort level: no effort argument is passed
+
+
 @dataclass(frozen=True)
 class SessionSeen:
     """A running session as the provider describes it to a usage hook or a hook: its id, and its
-    folder and transcript when given."""
+    folder and transcript when given. The usage hook's payload also names the model (and its
+    effort level, EFFORT_NONE when the model takes none); None: not said, keep what is known."""
     id: str
     cwd: str | None = None
     transcript: str | None = None
+    model: str | None = None          # the provider's model id
+    model_name: str | None = None     # its display name
+    effort: str | None = None
+    cost: float | None = None         # the session's running cost so far, in the payload's unit
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,12 @@ class SessionRecord:
     request_said: float | None = None # the request a hook last passed on (its time)
     warned: dict = field(default_factory=dict)  # plan window -> [its reset, level warned]
     reported: dict = field(default_factory=dict)  # what `watch` already said: key -> value
+    model: str | None = None          # the latest model id a usage hook saw
+    model_name: str | None = None     # its display name
+    effort: str | None = None         # the latest effort level (EFFORT_NONE: the model takes none)
+    waiting_until: float | None = None  # stranded, left for the provider's own resume at this reset
+    costs: list = field(default_factory=list)   # the running cost seen: series (a new one each
+                                                # time it fell) of [time, cost], see store.add_cost
 
 
 ROLE_WORKER = "worker"
@@ -131,6 +145,24 @@ class Worker:
     cwd: str
     started: float
     session: str | None = None
+    model: str | None = None          # what the main session chose for it
+    effort: str | None = None
+    cost: float | None = None         # its measured cost when it ended or went still (unread yet)
+    duration: float | None = None     # seconds from its start to its last cost movement
+
+
+@dataclass(frozen=True)
+class Request:
+    """What a command asks the launcher to do with its child's session (`kind`), with the
+    user's flags: a model, an effort, an account. `manual`: asked by the user (no check that the
+    account is out); `pid`: the session's own process, when known."""
+    session: str
+    manual: bool
+    pid: int | None = None
+    kind: str = "pickup"
+    model: str | None = None
+    effort: str | None = None
+    account: str | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +187,7 @@ class Tuning:
     min_hours: float = 1.0            # floor on time-to-reset, so a near reset stays finite
     refresh_minutes: float = 5.0      # usage this old is asked for again (the usage probe)
     launch_pause: float = 3.0         # seconds a launch with a close choice waits; 0: never
+    resume_wait_minutes: float = 30.0  # a limit resetting this soon is waited for, not picked up
 
 
 def _plan_data(name: str) -> dict:
@@ -265,6 +298,8 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
         raise ConfigError("[policy] refresh_minutes must be at least 1")
     if policy.get("launch_pause", 0) < 0:
         raise ConfigError("[policy] launch_pause must be 0 (off) or more")
+    if policy.get("resume_wait_minutes", 0) < 0:
+        raise ConfigError("[policy] resume_wait_minutes must be 0 (always pick up) or more")
     return accounts, Tuning(**policy), hub
 
 

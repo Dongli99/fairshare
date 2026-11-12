@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from fairshare import cli, hub, session, store
-from fairshare.model import ConfigError, SessionSeen, Snapshot, Window, load_accounts
+from fairshare.model import ConfigError, Request, SessionSeen, Snapshot, Window, load_accounts
 from fairshare.providers import claude
 
 from test_honest import FIXTURES, H, NOW, Fleet
@@ -414,7 +414,7 @@ class StopFailureHook(Stranded):
             self.assertEqual(self.hook({}, {"FAIRSHARE_LAUNCHER": str(launcher.pid),
                                             "CLAUDE_PID": "4321"}), (0, "", ""))
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)   # the signal arrived
-        self.assertEqual(store.take_request(launcher.pid), (SID, False, 4321))
+        self.assertEqual(store.take_request(launcher.pid), Request(SID, False, 4321))
 
     def test_ignores_a_dead_pid_and_a_stranger(self):
         dead = self.started("true")
@@ -447,7 +447,7 @@ class StopFailureHook(Stranded):
                                             "CLAUDE_CONFIG_DIR": str(self.tmp / "hub/accounts/a")})
         said, pid = r.stdout.split()
         self.assertEqual(said, "signalled", r.stderr)
-        self.assertEqual(store.take_request(int(pid))[:2], (SID, False))
+        self.assertEqual(store.take_request(int(pid)), Request(SID, False))
 
 
 class BarMark(Stranded):
@@ -625,7 +625,7 @@ class PickupLaunch(Stranded):
                 before, req = requests[n]
                 before()
                 if req:
-                    store.save_request(os.getpid(), *req, 4321)
+                    store.save_request(os.getpid(), Request(*req, 4321))
                 return session.PICKUP if on_request(4321) else 0
             return 0
         out, err = io.StringIO(), io.StringIO()
@@ -641,16 +641,18 @@ class PickupLaunch(Stranded):
     def accounts_of(self):
         return [Path(env["CLAUDE_CONFIG_DIR"]).name for _, env, _ in self.calls]
 
-    def test_a_confirmed_request_continues_on_the_best_account_with_the_prompt_first(self):
+    def test_a_confirmed_request_resumes_the_same_session_on_the_best_account(self):
         self.record()
         code, err = self.launches("run", "-a", "a", requests=[(lambda: None, (SID, False))])
         self.assertEqual(code, 0, err)
         self.assertEqual(self.accounts_of(), ["a", "b"])
         cmd, env, cwd = self.calls[1]
-        self.assertEqual(cmd[1:], [cli._pickup_prompt(store.session(SID), NOW)])
-        self.assertTrue(cmd[1].startswith(f"This session continues session {SID}, which stopped "
-                                          f"at 07:59 because account a hit its usage limit."))
-        self.assertIn(f"`fairshare transcript {SID} --tail 40`", cmd[1])
+        self.assertEqual(cmd[1:], ["--resume", SID, "fairshare moved this session from account a "
+                                   "to account b because a hit its usage limit. Continue where "
+                                   "you left off."])
+        rec = store.session(SID)                                     # the same record, moved
+        self.assertEqual((rec.account, rec.stranded_at, rec.cwd), ("b", None, str(self.work)))
+        self.assertEqual([r.id for r in store.sessions()], [SID])
         self.assertEqual(Path(cwd).resolve(), self.work.resolve())
         self.assertEqual(env["FAIRSHARE_LAUNCHER"], str(os.getpid()))
         self.counted.assert_not_called()                             # no terminal: at once
@@ -670,7 +672,7 @@ class PickupLaunch(Stranded):
         self.assertEqual(self.accounts_of(), ["a"])
         self.record()
         self.launches("run", "-a", "a", requests=[(lambda: store.save_request(
-            os.getpid(), SID, False, 99), None)])                    # pid 99: not our child
+            os.getpid(), Request(SID, False, 99)), None)])                    # pid 99: not our child
         self.assertEqual(self.accounts_of(), ["a"])
 
     def test_a_manual_request_skips_the_check_and_says_so(self):
@@ -679,7 +681,9 @@ class PickupLaunch(Stranded):
         code, err = self.launches("run", "-a", "a", requests=[(lambda: None, (SID, True))])
         self.assertEqual(self.accounts_of(), ["a", "b"])            # b ranks first
         self.assertIn("note: a can still take work; the session is picked up as asked", err)
-        self.assertIn("which was stopped at 08:00 on account a to move it", self.calls[1][0][1])
+        self.assertEqual(self.calls[1][0][1:], ["--resume", SID, "fairshare moved this session "
+                                                "from account a to account b because a move was "
+                                                "asked for. Continue where you left off."])
 
     def test_a_second_pickup_works_in_the_same_launcher(self):
         self.add("c", orgId="org-c")
@@ -692,7 +696,8 @@ class PickupLaunch(Stranded):
         code, _ = self.launches("run", "-a", "a", requests=[
             (lambda: None, (SID, False)), (b_runs_out, ("second", False))])
         self.assertEqual(self.accounts_of(), ["a", "b", "c"])
-        self.assertIn("continues session second,", self.calls[2][0][1])
+        self.assertEqual(self.calls[2][0][1:3], ["--resume", "second"])
+        self.assertIn("from account b to account c because b hit", self.calls[2][0][3])
 
     def test_with_none_eligible_the_refusal_flow_carries_the_prompt(self):
         self.record()
@@ -703,7 +708,7 @@ class PickupLaunch(Stranded):
                                   tty=True, answers=["s"])
         self.assertIn("no account is eligible", err)
         self.assertEqual(self.accounts_of(), ["a", "a"])            # started anyway, on the top
-        self.assertTrue(self.calls[1][0][1].startswith("This session continues session"))
+        self.assertEqual(self.calls[1][0][1:3], ["--resume", SID])
 
     def test_the_countdown_names_the_limit_and_cancel_says_how_to_resume(self):
         self.record()
@@ -713,7 +718,7 @@ class PickupLaunch(Stranded):
                 mock.patch.object(cli, "_countdown", lambda text, *a: texts.append(text(10))
                                   or False), mock.patch("sys.stderr", err), \
                 mock.patch.object(cli, "_route") as routed:
-            self.assertEqual(cli._continue(rec, s), 0)
+            self.assertEqual(cli._continue(rec, s, Request(SID, False)), 0)
         routed.assert_not_called()
         self.assertEqual(texts, ["a hit its limit (5h resets 11:00). Continuing on b in 10 s · "
                                  "Enter = now · c = cancel"])
@@ -727,8 +732,11 @@ class PickupCommand(Stranded):
         super().setUp()
         real = self.bin / "claude-real"
         os.rename(self.bin / "claude", real)
-        write(self.bin / "claude", f'#!/bin/sh\npwd -P > "$FAKE_LOG/cwd-$(basename '
-                                   f'"$CLAUDE_CONFIG_DIR")"\nexec "{real}" "$@"\n').chmod(0o755)
+        write(self.bin / "claude", f'#!/bin/sh\nname=$(basename "$CLAUDE_CONFIG_DIR")\n'
+                                   f'[ "$1" = "agents" ] || pwd -P > "$FAKE_LOG/cwd-$name"\n'
+                                   f'[ "$1" = "--bg" ] && printf "%s\\n" "$@" > '
+                                   f'"$FAKE_LOG/bg-$name"\n'
+                                   f'exec "{real}" "$@"\n').chmod(0o755)
 
 
     def pickup(self, *argv, env=None, tty=False):
@@ -740,7 +748,10 @@ class PickupCommand(Stranded):
         return code, out, err
 
     def bg_args(self, account):
-        return (self.log / f"args-{account}").read_text().splitlines()
+        """The arguments of the account's last background start (a later `agents` listing
+        logs its own)."""
+        path = self.log / f"bg-{account}"
+        return path.read_text().splitlines() if path.exists() else []
 
     def test_inside_a_session_with_a_launcher_it_asks_the_launcher(self):
         self.record()
@@ -751,15 +762,18 @@ class PickupCommand(Stranded):
         self.assertEqual((code, out), (0, "the launcher will stop this session and continue on "
                                           "the best account\n"))
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
-        self.assertEqual(store.take_request(launcher.pid), (SID, True, 777))
+        self.assertEqual(store.take_request(launcher.pid), Request(SID, True, 777))
 
     def test_inside_a_session_without_one_it_starts_in_the_background(self):
         self.record()
         self.trust("b")
         code, _, err = self.pickup(env={"CLAUDE_CODE_SESSION_ID": SID})
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.bg_args("b")[:3], ["--bg", "--name", "pickup-0a1b2c3d"])
-        self.assertTrue(self.bg_args("b")[3].startswith(f"This session continues session {SID}"))
+        self.assertEqual(self.bg_args("b"), ["--bg", "--name", "pickup-0a1b2c3d", "--resume",
+                                             SID, "fairshare moved this session from account a "
+                                             "to account b because a hit its usage limit. "
+                                             "Continue where you left off."])
+        self.assertEqual(store.session(SID).account, "b")           # stranded: in place
         self.assertEqual(Path((self.log / "cwd-b").read_text().strip()), self.work.resolve())
         env = dict(l.split("=", 1) for l in (self.log / "env-b").read_text().splitlines()
                    if "=" in l)
@@ -811,7 +825,7 @@ class PickupCommand(Stranded):
         self.assertEqual(self.pickup("zzz", tty=True)[0], 2)
         code, _, err = self.pickup("fff", tty=True)
         self.assertEqual(code, 0, err)
-        self.assertIn("continues session ffff,", self.fg[0][0][1])
+        self.assertEqual(self.fg[0][0][1:3], ["--resume", "ffff"])
 
     def test_foreground_from_a_terminal_runs_in_the_recorded_folder(self):
         self.record()
@@ -822,7 +836,7 @@ class PickupCommand(Stranded):
         (cmd, cwd), = self.fg
         self.assertEqual(Path(cwd).resolve(), self.work.resolve())
         self.assertEqual(cmd[0], str(self.bin / "claude"))
-        self.assertTrue(cmd[1].startswith(f"This session continues session {SID}"))
+        self.assertEqual(cmd[1:3], ["--resume", SID])
 
     def test_a_gone_folder_is_refused(self):
         self.record(cwd=self.tmp / "gone")

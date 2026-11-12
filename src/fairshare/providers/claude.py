@@ -13,14 +13,15 @@ import re
 import shlex
 import shutil
 import subprocess
+from dataclasses import replace
 from datetime import datetime, timedelta
 from importlib import resources
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import store
-from ..model import (USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT,
-                     Account, AccountStatus, Candidate, Capture, LiveSession, SessionSeen, Window,
+from ..model import (EFFORT_NONE, USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD,
+                     USAGE_SIGNED_OUT, Account, AccountStatus, Candidate, Capture, LiveSession, SessionSeen, Window,
                      model_window, plan_for, window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
@@ -44,14 +45,35 @@ USAGE_ARGS = ("-p", "--no-session-persistence", "--output-format", "json",
 USAGE_TIMEOUT = 6.0                          # seconds; measured 1.1-2.4 s
 usage_timeout = USAGE_TIMEOUT
 # A pickup in the background: `claude --bg --name <name> <prompt>` starts a session with no
-# terminal and prints how to attach to it; `--resume <id>` continues a session in a new one.
-# `--bg` passes the caller's environment on to the session (2.1.322, planner): only
-# CONFIG_DIR_ENV arrives, so nothing else can travel that way.
-BG_ARGS, NAME_ARGS, RESUME_ARGS = ("--bg",), ("--name",), ("--resume",)
+# terminal and prints how to attach to it. `--bg` passes the caller's environment on to the
+# session (2.1.322, planner): only CONFIG_DIR_ENV arrives, so nothing else can travel that way.
+# `--resume <id>` continues a session under its own id (any account can: the hub shares where
+# the tool keeps sessions), in the foreground or with `--bg` (docs: CLI reference, /sessions and
+# /agent-view, read 2026-11-12: on 2.1.257 or later the same id, or a copy with a `note:` line);
+# `--fork-session` continues a copy under a new id. `--model <id>` and `--effort <level>` set the
+# session's model and effort level (CLI reference, read 2026-11-12).
+BG_ARGS, NAME_ARGS, RESUME_ARGS, FORK_ARGS = ("--bg",), ("--name",), ("--resume",), \
+    ("--fork-session",)
+MODEL_ARGS, EFFORT_ARGS = ("--model",), ("--effort",)
+# The handoff note: one headless turn of a stopped session, resumed with the arguments above,
+# in print mode with JSON output (whose `result` is the answer's text, `is_error` an error) and
+# no tools (`--tools ""` disables every built-in tool). CLI reference, read 2026-11-12; the
+# JSON's `result`: /sessions ("Access conversations from scripts"), same day.
+NOTE_ARGS = ("-p", "--output-format", "json", "--tools", "")
 # The running sessions: `claude agents --json`, items with `sessionId`, `name` and `status`
 # (`busy` / `idle`), among others (`pid`, `cwd`, `kind`, `startedAt`); ended sessions are not
 # listed (2.1.322, planner, 2026-11-11). A background session's name appeared within 4 s.
 AGENTS_ARGS = ("agents", "--json")
+# At its limit the tool tells the agent first (a user-side record: `[Usage limit reached; a short
+# grace allowance remains, then this turn is cut off without warning. …]`), then ends the turn
+# (`isApiErrorMessage`, `error: "rate_limit"`, `You've hit your 5-hour limit · resets 8:40pm
+# (Zone)`). After the reset it queues, by itself, `I hit my usage limit while you were working,
+# but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`)
+# and the session carries on. Observed, not documented: 2.1.322, 2026-11-11 (planner; a
+# background and an interactive session). fairshare reads none of these texts; it relies only on
+# the resume, to leave a session whose limit resets soon waiting (`resume_wait_minutes`).
+RESUMES_AT_RESET = True
+resumes_at_reset = RESUMES_AT_RESET
 AGENT_ID, AGENT_NAME, AGENT_STATUS, AGENT_BUSY, AGENT_IDLE = (
     "sessionId", "name", "status", "busy", "idle")
 
@@ -114,6 +136,16 @@ CAPTURE_LIMITS, CAPTURE_USED, CAPTURE_RESET = "rate_limits", "used_percentage", 
 # The session, in the statusLine payload and in every hook's input alike (documented:
 # code.claude.com/docs/en/statusline and /hooks, read 2026-11-11).
 SESSION_ID, SESSION_TRANSCRIPT, SESSION_CWD = "session_id", "transcript_path", "cwd"
+# The statusLine payload's model (`model.id`, `model.display_name`) and effort level
+# (`effort.level`: the session's level, the one actually run when the model does not support
+# the one set; absent when the model takes no effort level). Documented: /statusline, read
+# 2026-11-12.
+CAPTURE_MODEL, CAPTURE_MODEL_ID, CAPTURE_MODEL_NAME = "model", "id", "display_name"
+CAPTURE_EFFORT, CAPTURE_EFFORT_LEVEL = "effort", "level"
+# The session's running cost (`cost.total_cost_usd`): an estimate at list price, computed by the
+# tool, not a bill; it resets to 0 when `/clear` starts a new session. Documented: /statusline,
+# read 2026-11-12.
+CAPTURE_COST, CAPTURE_COST_TOTAL = "cost", "total_cost_usd"
 # The statusLine re-runs on a timer as well as on events (seconds, minimum 1; documented). The bar
 # then re-reads the local snapshot once a minute, which costs nothing.
 STATUS_REFRESH_KEY, STATUS_REFRESH_S = "refreshInterval", 60
@@ -210,13 +242,31 @@ def parse_capture(raw: dict) -> dict[str, Window]:
     return out
 
 
-def session_of(raw: object) -> SessionSeen | None:
-    """The session a statusLine payload or a hook input describes, else None."""
-    if not isinstance(raw, dict) or not isinstance(sid := raw.get(SESSION_ID), str) or not sid:
+def _str(d: object, key: str) -> str | None:
+    v = d.get(key) if isinstance(d, dict) else None
+    return v if isinstance(v, str) and v else None
+
+
+def _session(raw: object) -> SessionSeen | None:
+    """The session a hook input (or a statusLine payload) names: id, folder, transcript."""
+    if (sid := _str(raw, SESSION_ID)) is None:
         return None
-    text = {k: v if isinstance(v := raw.get(k), str) and v else None
-            for k in (SESSION_CWD, SESSION_TRANSCRIPT)}
-    return SessionSeen(sid, text[SESSION_CWD], text[SESSION_TRANSCRIPT])
+    return SessionSeen(sid, _str(raw, SESSION_CWD), _str(raw, SESSION_TRANSCRIPT))
+
+
+def session_of(raw: object) -> SessionSeen | None:
+    """The session a statusLine payload describes, with its running cost when given and its
+    model and effort level when the payload names a model; else None."""
+    if (seen := _session(raw)) is None:
+        return None
+    cost = raw[CAPTURE_COST].get(CAPTURE_COST_TOTAL) if isinstance(raw.get(CAPTURE_COST),
+                                                                   dict) else None
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
+        seen = replace(seen, cost=float(cost))
+    if (model := _str(raw.get(CAPTURE_MODEL), CAPTURE_MODEL_ID)) is None:
+        return seen
+    return replace(seen, model=model, model_name=_str(raw[CAPTURE_MODEL], CAPTURE_MODEL_NAME),
+                   effort=_str(raw.get(CAPTURE_EFFORT), CAPTURE_EFFORT_LEVEL) or EFFORT_NONE)
 
 
 def current_session() -> str | None:
@@ -232,14 +282,50 @@ def session_pid() -> int | None:
         return None
 
 
-def resume_args(session_id: str) -> list[str]:
-    return [*RESUME_ARGS, session_id]
+def resume_args(session_id: str, fork: bool = False) -> list[str]:
+    return [*RESUME_ARGS, session_id, *(FORK_ARGS if fork else ())]
 
 
-def background(account: Account, name: str, prompt: str) -> tuple[list[str], dict[str, str]]:
+def model_args(model: str | None, effort: str | None) -> list[str]:
+    """Arguments that start a session on `model` at `effort` (EFFORT_NONE or None: no effort
+    argument); none for what is None."""
+    return [*((*MODEL_ARGS, model) if model else ()),
+            *((*EFFORT_ARGS, effort) if effort and effort != EFFORT_NONE else ())]
+
+
+def uses_week(model: str, week: str) -> bool:
+    """Whether the per-model week the usage report names `week` (`Fable`) limits `model` (an
+    id such as `claude-fable-5-2`, an alias or a display name): every word of the week's name
+    is in the model's."""
+    words = week.lower().split()
+    return bool(words) and all(w in model.lower() for w in words)
+
+
+def background(account: Account, name: str, prompt: str, extra: list[str] = ()
+               ) -> tuple[list[str], dict[str, str]]:
     """The command and environment that start a session of `account` with no terminal, named
-    `name`, with `prompt` as its first message."""
-    return [real_binary(), *BG_ARGS, *NAME_ARGS, name, prompt], clean_env(account.config_dir)
+    `name`, with `extra` arguments (a resume, a model) and `prompt` as its first message."""
+    return ([real_binary(), *BG_ARGS, *NAME_ARGS, name, *extra, prompt],
+            clean_env(account.config_dir))
+
+
+def note_command(account: Account, session_id: str, extra: list[str], prompt: str
+                 ) -> tuple[list[str], dict[str, str]]:
+    """One headless turn of the stopped session `session_id` on `account`: no tools, JSON out,
+    with `extra` arguments (a model) and `prompt` as the turn's message. The id stays the same."""
+    return ([real_binary(), *NOTE_ARGS, *resume_args(session_id), *extra, prompt],
+            clean_env(account.config_dir))
+
+
+def note_text(out: str) -> str | None:
+    """The answer's text in that turn's JSON output; None for an error or no text."""
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return None
+    text = _str(d, USAGE_RESULT)
+    return None if not isinstance(d, dict) or d.get(USAGE_IS_ERROR) is True or not text \
+        else text.strip() or None
 
 
 def list_sessions(account: Account) -> list[LiveSession] | None:
@@ -343,7 +429,7 @@ def hook_session(hook: str, raw: object) -> SessionSeen | None:
             return None
     elif (error := raw.get(HOOK_ERROR)) is not None and error != matcher:
         return None
-    return session_of(raw)
+    return _session(raw)
 
 
 def hook_output(hook: str, text: str) -> str:
