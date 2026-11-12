@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..model import Account, AccountStatus, Candidate, Capture, SessionSeen, Window
+from ..model import Account, AccountStatus, Candidate, Capture, LiveSession, SessionSeen, Window
 
 
 class Provider(Protocol):
@@ -27,7 +27,11 @@ class Provider(Protocol):
 
     def hook_session(self, hook: str, raw: object) -> SessionSeen | None:
         """For fairshare's hook named `hook` (`fairshare hook <name>`): the session its input
-        `raw` describes, when the input is the event that hook is wired for; else None."""
+        `raw` describes, when the input is the event that hook is wired for; else None. None too
+        for a hook that speaks to the model when the input comes from inside a subagent."""
+
+    def hook_output(self, hook: str, text: str) -> str:
+        """What fairshare's hook `hook` prints so that `text` reaches the model as context."""
 
     def current_session(self) -> str | None:
         """The id of the session this process runs inside (a command run by it), else None."""
@@ -43,9 +47,15 @@ class Provider(Protocol):
         """The command and the clean environment (as `launch`) that start a session of
         `account` with no terminal, named `name`, whose first message is `prompt`."""
 
+    def list_sessions(self, account: Account) -> list[LiveSession] | None:
+        """The provider's sessions running now (asked through `account`'s folder), with their
+        names and whether each is busy; None when it could not say. Never raises."""
+
     def transcript_text(self, path: Path) -> list[tuple[str, str]] | None:
-        """A session transcript's main conversation, oldest first, as ("user" | "assistant",
-        text) pairs: words only. [] when it has none; None when it cannot be read."""
+        """A session transcript's main conversation, oldest first, as (role, text) pairs:
+        "user" | "assistant", or "command" and "output" for a command the user ran in the
+        session (its output as printed). Words only. [] when it has none; None when it cannot
+        be read."""
 
     def launch(self, account: Account) -> tuple[list[str], dict[str, str]]:
         """The command and the complete environment that start this provider as `account`: the
@@ -136,6 +146,14 @@ class Provider(Protocol):
         (`<command> hook <name>`); None when it already does. Every byte outside fairshare's own
         entries stays, and no other hook is changed, moved or removed. Raises ValueError for a
         text it cannot change safely."""
+
+    def skill(self, shared: Path) -> tuple[Path, str]:
+        """Where fairshare's skill (which teaches main sessions workers, watch and checkpoints)
+        goes among the hub's shared items `shared`, and the text fairshare ships for it."""
+
+    def own_skill(self, text: str) -> bool:
+        """Whether a file at that place is fairshare's own skill (by its declared name), so
+        fairshare may refresh it; anything else there is left alone."""
 
     def hooked(self, text: str | None) -> tuple[str, ...] | None:
         """The fairshare command all of fairshare's own hooks in that file's text run, else

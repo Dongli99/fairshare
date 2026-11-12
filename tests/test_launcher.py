@@ -14,6 +14,7 @@ from fairshare.model import Account, Snapshot, Window, load_plan
 from fairshare.providers import claude
 
 from test_honest import H, NOW, ORG, Fleet
+from test_hub import own_hooks
 
 
 def args_seen(fleet, id):
@@ -198,11 +199,13 @@ class Doctor(Fleet):
         d = self.tmp / "hub" / "shared"
         d.mkdir(parents=True, exist_ok=True)
         runner = command.partition(" capture")[0]
-        hooks = {"StopFailure": [{"matcher": "rate_limit", "hooks": [
-            {"type": "command", "command": f"{runner} hook stop-failure"}]}]}
+        hooks = own_hooks(runner)
         (d / "settings.json").write_text(json.dumps(
             {"statusLine": {"type": "command", "command": command}, **({"hooks": hooks} if hook
                                                                       else {})}))
+        dest, text = claude.skill(d)                     # and fairshare's skill, current
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text)
 
     def healthy(self):
         self.add("a", orgId=ORG + "a")
@@ -224,7 +227,8 @@ class Doctor(Fleet):
             "pass  b: usage probe answers (five_hour, seven_day, 1 model week), local command",
             "pass  b: no state file yet",
             "pass  claude: usage hook in the hub calls fairshare capture",
-            "pass  claude: stop-failure hook in the hub calls fairshare hook",
+            "pass  claude: hooks in the hub (stop-failure, post-tool, prompt) call fairshare hook",
+            "pass  claude: skill in the hub is current",
             "pass  fairshare command (called by the claude usage hook) runs"])
 
     def test_a_missing_binary_fails(self):

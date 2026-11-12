@@ -14,13 +14,14 @@ import shlex
 import shutil
 import subprocess
 from datetime import datetime, timedelta
+from importlib import resources
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import store
 from ..model import (USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT,
-                     Account, AccountStatus, Candidate, Capture, SessionSeen, Window, model_window,
-                     plan_for, window_names)
+                     Account, AccountStatus, Candidate, Capture, LiveSession, SessionSeen, Window,
+                     model_window, plan_for, window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
 tool = "Claude Code"                 # the tool as users know it, for messages
@@ -44,7 +45,15 @@ USAGE_TIMEOUT = 6.0                          # seconds; measured 1.1-2.4 s
 usage_timeout = USAGE_TIMEOUT
 # A pickup in the background: `claude --bg --name <name> <prompt>` starts a session with no
 # terminal and prints how to attach to it; `--resume <id>` continues a session in a new one.
+# `--bg` passes the caller's environment on to the session (2.1.322, planner): only
+# CONFIG_DIR_ENV arrives, so nothing else can travel that way.
 BG_ARGS, NAME_ARGS, RESUME_ARGS = ("--bg",), ("--name",), ("--resume",)
+# The running sessions: `claude agents --json`, items with `sessionId`, `name` and `status`
+# (`busy` / `idle`), among others (`pid`, `cwd`, `kind`, `startedAt`); ended sessions are not
+# listed (2.1.322, planner, 2026-11-11). A background session's name appeared within 4 s.
+AGENTS_ARGS = ("agents", "--json")
+AGENT_ID, AGENT_NAME, AGENT_STATUS, AGENT_BUSY, AGENT_IDLE = (
+    "sessionId", "name", "status", "busy", "idle")
 
 # Environment variables.
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"         # picks the account's folder
@@ -111,13 +120,29 @@ STATUS_REFRESH_KEY, STATUS_REFRESH_S = "refreshInterval", 60
 
 # fairshare's own hooks in the settings file: `hooks.<event>` is a list of groups, each a
 # `matcher` and a `hooks` list of commands (documented, read 2026-11-11). Keyed by fairshare's
-# name for the hook (`fairshare hook <name>`): the tool's event and the matcher. StopFailure
-# fires instead of Stop when an API error ended the turn; its output and exit code are ignored,
-# and its input names the error in HOOK_ERROR.
+# name for the hook (`fairshare hook <name>`): the tool's event and the matcher (None: the
+# event takes none, and the group is written without one). StopFailure fires instead of Stop
+# when an API error ended the turn; its output and exit code are ignored, and its input names
+# the error in HOOK_ERROR. PostToolUse (after every tool call; "*" matches every tool) and
+# UserPromptSubmit (no matcher support: one would be ignored) take a JSON answer whose
+# `hookSpecificOutput.additionalContext` is added to the model's context (documented: /hooks,
+# read 2026-11-11). Every hook's input names a subagent or teammate it fired in by `agent_id`.
 HOOKS_KEY, HOOK_MATCHER_KEY, HOOK_LIST_KEY = "hooks", "matcher", "hooks"
 STOP_FAILURE, RATE_LIMIT = "StopFailure", "rate_limit"
-HOOK_ERROR = "error"
-FAIRSHARE_HOOKS = {"stop-failure": (STOP_FAILURE, RATE_LIMIT)}
+POST_TOOL, ALL_TOOLS, PROMPT = "PostToolUse", "*", "UserPromptSubmit"
+HOOK_ERROR, HOOK_AGENT = "error", "agent_id"
+HOOK_OUTPUT, HOOK_EVENT_NAME, HOOK_CONTEXT = "hookSpecificOutput", "hookEventName", "additionalContext"
+FAIRSHARE_HOOKS = {"stop-failure": (STOP_FAILURE, RATE_LIMIT), "post-tool": (POST_TOOL, ALL_TOOLS),
+                   "prompt": (PROMPT, None)}
+CONTEXT_EVENTS = (POST_TOOL, PROMPT)  # the events whose hooks may speak to the model
+
+# fairshare's skill, which teaches main sessions to use workers, watch and checkpoints: a folder
+# holding SKILL.md, whose front matter (between `---` lines) gives `name` and `description`
+# (documented: code.claude.com/docs/en/skills, read 2026-11-11). Shipped as package data beside
+# this file, installed as the hub's shared `skills/fairshare/`, recognised by its `name`.
+SKILLS_DIR, SKILL_FILE, SKILL_NAME = "skills", "SKILL.md", "fairshare"
+SKILL_SOURCE = "claude_skill"        # the shipped folder, in this package
+SKILL_FENCE, SKILL_NAME_KEY = "---", "name"
 
 # JSON fields of STATE_FILE that join may carry over from a user's folder, after asking, and nothing
 # else (never identity, tokens or account fields). Onboarding is marked done by these two keys, set
@@ -217,6 +242,26 @@ def background(account: Account, name: str, prompt: str) -> tuple[list[str], dic
     return [real_binary(), *BG_ARGS, *NAME_ARGS, name, prompt], clean_env(account.config_dir)
 
 
+def list_sessions(account: Account) -> list[LiveSession] | None:
+    """The sessions running now, as the tool lists them (any account's folder sees them all:
+    the hub shares where the tool keeps them); None when the list could not be had."""
+    try:
+        r = subprocess.run([real_binary(), *AGENTS_ARGS], env=clean_env(account.config_dir),
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=PROBE_TIMEOUT)
+        raw = json.loads(r.stdout)
+    except (SystemExit, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if isinstance(raw, dict):            # a list inside an object would do as well
+        raw = next((v for v in raw.values() if isinstance(v, list)), None)
+    if not isinstance(raw, list):
+        return None
+    status = {AGENT_BUSY: True, AGENT_IDLE: False}
+    return [LiveSession(i[AGENT_ID], i.get(AGENT_NAME) if isinstance(i.get(AGENT_NAME), str)
+                        else None, status.get(i.get(AGENT_STATUS)))
+            for i in raw if isinstance(i, dict) and isinstance(i.get(AGENT_ID), str)]
+
+
 # The transcript (`transcript_path`, internal and per version: one JSON record per line; fixture
 # tests/fixtures/claude-2.1.322/transcript.jsonl). Only records of these types that are not on a
 # side chain (a subagent's) are the conversation; their text is the message's content, a string
@@ -225,6 +270,27 @@ def background(account: Account, name: str, prompt: str) -> tuple[list[str], dic
 T_TYPE, T_SIDECHAIN, T_MESSAGE, T_CONTENT = "type", "isSidechain", "message", "content"
 T_ROLES = {"user": "user", "assistant": "assistant"}     # record type -> fairshare's role
 T_BLOCK_TYPE, T_TEXT_BLOCK, T_TEXT = "type", "text", "text"
+# A `!` command typed in a session is a user message of its own, `<bash-input>cmd</bash-input>`,
+# and its output another, `<bash-stdout>...</bash-stdout>` with `<bash-stderr>...</bash-stderr>`
+# (2.1.322, planner, 2026-11-11). They become the roles "command" and "output".
+T_BANG_INPUT, T_BANG_OUTPUT = "bash-input", ("bash-stdout", "bash-stderr")
+
+
+def _tagged(text: str, tag: str) -> str | None:
+    """What `<tag>...</tag>` holds in `text`, else None."""
+    m = re.search(f"<{tag}>(.*?)</{tag}>", text, re.S)
+    return m.group(1) if m else None
+
+
+def _bang(text: str) -> tuple[str, str] | None:
+    """A `!` command's message as ("command", the command) or ("output", what it printed),
+    else None."""
+    if text.startswith(f"<{T_BANG_INPUT}>") and (cmd := _tagged(text, T_BANG_INPUT)) is not None:
+        return "command", cmd.strip()
+    found = [x for tag in T_BANG_OUTPUT if (x := _tagged(text, tag)) is not None]
+    if found and text.startswith(tuple(f"<{tag}>" for tag in T_BANG_OUTPUT)):
+        return "output", "\n".join(x.strip("\n") for x in found if x.strip())
+    return None
 
 
 def _text_of(content: object) -> str | None:
@@ -238,8 +304,9 @@ def _text_of(content: object) -> str | None:
 
 def transcript_text(path: Path) -> list[tuple[str, str]] | None:
     """The main conversation of a transcript, oldest first, as (role, text) pairs with role
-    "user" or "assistant": only words, never tool calls, tool results, thinking, side chains or
-    other records. [] when it holds no such message; None when it cannot be read."""
+    "user" or "assistant", or "command" and "output" for a `!` command the user ran: only
+    words, never tool calls, tool results, thinking, side chains or other records. [] when it
+    holds no such message; None when it cannot be read."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
@@ -254,19 +321,35 @@ def transcript_text(path: Path) -> list[tuple[str, str]] | None:
                 or r.get(T_SIDECHAIN) is not False or not isinstance(r.get(T_MESSAGE), dict):
             continue
         if (text := _text_of(r[T_MESSAGE].get(T_CONTENT))) and text.strip():
-            out.append((T_ROLES[r[T_TYPE]], text.strip()))
+            role = T_ROLES[r[T_TYPE]]
+            bang = _bang(text.strip()) if role == "user" else None
+            if bang is None:
+                out.append((role, text.strip()))
+            elif bang[1]:
+                out.append(bang)
     return out
 
 
 def hook_session(hook: str, raw: object) -> SessionSeen | None:
     """For fairshare's hook `hook`: the session its input describes, when the input is the event
-    fairshare wired it for (an input naming another error is not); else None."""
+    fairshare wired it for (an input naming another error is not); else None. A hook that
+    speaks to the model gets None for an input from inside a subagent: the main session
+    decides."""
     if hook not in FAIRSHARE_HOOKS or not isinstance(raw, dict):
         return None
-    error = raw.get(HOOK_ERROR)
-    if error is not None and error != FAIRSHARE_HOOKS[hook][1]:
+    event, matcher = FAIRSHARE_HOOKS[hook]
+    if event in CONTEXT_EVENTS:
+        if raw.get(HOOK_AGENT) is not None:
+            return None
+    elif (error := raw.get(HOOK_ERROR)) is not None and error != matcher:
         return None
     return session_of(raw)
+
+
+def hook_output(hook: str, text: str) -> str:
+    """What fairshare's hook `hook` prints so that `text` reaches the model as context."""
+    return json.dumps({HOOK_OUTPUT: {HOOK_EVENT_NAME: FAIRSHARE_HOOKS[hook][0],
+                                     HOOK_CONTEXT: text}}, ensure_ascii=False)
 
 
 def launch(account: Account) -> tuple[list[str], dict[str, str]]:
@@ -673,6 +756,28 @@ def masked(item: str, text: str) -> str:
     return json.dumps(d, indent=2, ensure_ascii=False) + "\n"
 
 
+# --- fairshare's skill.
+
+def skill(shared: Path) -> tuple[Path, str]:
+    """Where fairshare's skill goes among the hub's shared items, and its shipped text."""
+    text = (resources.files(__package__) / SKILL_SOURCE / SKILL_FILE).read_text(encoding="utf-8")
+    return shared / SKILLS_DIR / SKILL_NAME / SKILL_FILE, text
+
+
+def own_skill(text: str) -> bool:
+    """Whether a skill file's front matter names it fairshare's."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != SKILL_FENCE:
+        return False
+    for line in lines[1:]:
+        if line.strip() == SKILL_FENCE:
+            return False
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == SKILL_NAME_KEY:
+            return value.strip().strip("\"'") == SKILL_NAME
+    return False
+
+
 # --- The usage hook: pure text-in, text-out. One settings file serves every account.
 
 def capture_file(shared: Path) -> Path:
@@ -737,15 +842,18 @@ def _own_hooks(d: dict) -> dict[str, tuple[int, int, dict, str]]:
 
 def hooked(text: str | None) -> tuple[str, ...] | None:
     """The fairshare command that every one of fairshare's hooks in that settings text runs, with
-    its matcher; None when one is missing (or they run different commands)."""
+    its matcher (where its event takes one); None when one is missing (or they run different
+    commands)."""
     try:
         d = json.loads(text) if text and text.strip() else {}
     except ValueError:
         return None
     found = _own_hooks(d) if isinstance(d, dict) else {}
-    runners = {hook_of(cmd)[0] for name, (_, _, g, cmd) in found.items()
-               if g.get(HOOK_MATCHER_KEY) == FAIRSHARE_HOOKS[name][1]}
-    return runners.pop() if len(found) == len(FAIRSHARE_HOOKS) and len(runners) == 1 else None
+    matched = [hook_of(cmd)[0] for name, (_, _, g, cmd) in found.items()
+               if FAIRSHARE_HOOKS[name][1] is None
+               or g.get(HOOK_MATCHER_KEY) == FAIRSHARE_HOOKS[name][1]]
+    runners = set(matched)
+    return runners.pop() if len(matched) == len(FAIRSHARE_HOOKS) and len(runners) == 1 else None
 
 
 def wire(text: str | None, command: str) -> str | None:
@@ -795,13 +903,14 @@ def wire(text: str | None, command: str) -> str | None:
             if old != hook_cmd:
                 new = _json_set(new, [HOOKS_KEY, event, gi, HOOK_LIST_KEY, hi, HOOK_COMMAND_KEY],
                                 hook_cmd)
-            if g.get(HOOK_MATCHER_KEY) != matcher:
+            if matcher is not None and g.get(HOOK_MATCHER_KEY) != matcher:
                 new = _json_set(new, [HOOKS_KEY, event, gi, HOOK_MATCHER_KEY], matcher)
             cmds = list(g[HOOK_LIST_KEY])
             cmds[hi] = {**cmds[hi], HOOK_COMMAND_KEY: hook_cmd}
-            groups[gi] = {**g, HOOK_MATCHER_KEY: matcher, HOOK_LIST_KEY: cmds}
+            groups[gi] = {**g, **({HOOK_MATCHER_KEY: matcher} if matcher is not None else {}),
+                          HOOK_LIST_KEY: cmds}
         else:
-            group = {HOOK_MATCHER_KEY: matcher,
+            group = {**({HOOK_MATCHER_KEY: matcher} if matcher is not None else {}),
                      HOOK_LIST_KEY: [{HOOK_TYPE_KEY: HOOK_TYPE, HOOK_COMMAND_KEY: hook_cmd}]}
             if event in hooks:
                 new = _json_append(new, [HOOKS_KEY, event], group)

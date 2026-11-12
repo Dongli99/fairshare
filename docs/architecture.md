@@ -20,10 +20,14 @@ statusLine ──► capture ──► store.note_session (sessions/<id>.json), 
                       └──► stale? ──► detached `fairshare probe <id>` ──► read_usage ──► store
 StopFailure (rate_limit) ──► hook stop-failure ──► stranded record, probe, SIGUSR1 ──► launcher
 launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► stop child ──► countdown ──► run (pickup)
+PostToolUse / UserPromptSubmit ──► hook post-tool | prompt ──► snapshot + session record (local)
+                                   ──► additionalContext: crossing warning or checkpoint request
+worker ──► survey ──► trust (copy) ──► claude --bg --name ──► workers/<name> ──► join (agents)
+watch (background command) ──► snapshot, records, checkpoints/ (5 s), agents (15 s) ──► exit
 
 setup ──► join ──► hub.check, browser (ask), providers/<p>.login_command, account_status
                    [--from: hub.seed, providers/<p>.merge_state] ──► accounts.toml (+ one table)
-doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ──► wire ──► repath (ask)
+doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ──► wire, skill ──► repath (ask)
 ```
 
 ## Seams
@@ -121,9 +125,11 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      every other byte; any older capture form is replaced and keeps what it wrapped). The same
      `wire` adds `refreshInterval` to the statusLine when it has none and fairshare's own hook,
      `<installed fairshare> hook stop-failure` under `hooks.StopFailure` with matcher
-     `rate_limit`, appended to that event's list (no other hook changed, moved or removed;
-     recognised by its command, like the capture). setup, join and `doctor --fix` wire all three
-     with one diff. `capture`
+     `rate_limit`, `hook post-tool` under `hooks.PostToolUse` with matcher `*` and `hook prompt`
+     under `hooks.UserPromptSubmit` (no matcher: that event takes none), each appended to its
+     event's list (no other hook changed, moved or removed; recognised by its command, like the
+     capture). setup, join and `doctor --fix` wire them all with one diff, and install
+     fairshare's skill (decision 22) beside it. `capture`
      takes no account id: it finds the account whose hub folder is the session's folder variable
      (`Provider.session_dir`); a session outside the hub records nothing and still runs `--then`.
      An id after `capture` (what the per-account wiring wrote) is accepted and ignored, so the
@@ -278,6 +284,15 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     - the exit code is the child's, or 128 plus the signal number when it died of a signal;
       a command that cannot start gives 127 (not found) or 126 with one message.
 
+    **The launch pause** (owner idea, 2026-11-11). `fairshare` and `fairshare run` (not `run
+    -a`, not a pickup, not the refusal flow's `[s]tart`), on a terminal only, pause before
+    starting when the choice is worth making: the chosen account is tight (week at 90%, a hot
+    short window inside its grace hour, or a spent model week), the second-best eligible
+    account's score is within 10% of its score, or a `warning:` line was printed this launch.
+    The eligible accounts are listed with digits, then `starting <id> in N s · Enter = now ·
+    1-N = that account · q = quit` counts down (5a's key reader: cbreak, always restored).
+    `launch_pause` under `[policy]` (seconds, default 3, 0 = off). `q` exits 0.
+
 13. **`doctor` is read-only; `doctor --fix` repairs.** One line per check, `pass` or `FAIL`, exit 0
     when all pass and 1 otherwise: the provider's command is found (with its version, from the
     adapter); `accounts.toml` loads (a config error is one FAIL line with the file's name and the
@@ -288,8 +303,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     the reason; `usage probe off (usage_args = [])` passes), and its state file reads and, when
     it holds project entries, at least
     one uses the trust field (otherwise "trust field not found; Claude Code may have renamed
-    it"); the hub's one settings file still calls capture, and its stop-failure hook still
-    calls `fairshare hook`; the `fairshare` command it calls
+    it"); the hub's one settings file still calls capture, and fairshare's three hooks
+    (stop-failure, post-tool, prompt; one line listing them) still call `fairshare hook`;
+    fairshare's skill in the hub is current (missing, outdated, or another skill in its folder
+    each FAIL); the `fairshare` command it calls
     exists and runs (`--help`; with no hook wired, the installed one). It reads settings and
     changes nothing, and prints account ids and plan names only, so the output can go into a
     public issue. `--fix` is decision 17.
@@ -333,12 +350,13 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     atomically); a remembered "only" yields as soon as a launch lands on an account that lacks
     trust there. There is no default: Enter asks again; end of input is no. `run -a <id>` asks
     about that account only (`[y]`/`[n]`) and remembers nothing.
-    - **Never in HOME, never without a terminal.** In the canonical HOME fairshare asks nothing
-      and writes nothing ("In HOME, fairshare does not ask; Claude Code's own per-session question
-      applies": Claude Code keeps HOME trust per session by design). Subfolders of HOME are normal.
-      Without a terminal nothing is asked or written and the provider asks for itself. A pickup
-      in the launcher goes through this same offer; a background pickup (no terminal) uses only
-      accounts that already trust the folder, as later workers will.
+    - **Never in HOME; without a terminal, copy only.** In the canonical HOME fairshare asks
+      nothing and writes nothing ("In HOME, fairshare does not ask; Claude Code's own per-session
+      question applies": Claude Code keeps HOME trust per session by design). Subfolders of HOME
+      are normal. Without a terminal nothing is asked; since stage 5b trust may be *copied* from
+      an account that already has it (decision 21), never created. A pickup in the launcher goes
+      through this same offer; a background pickup and a worker start use an account that
+      trusts the folder or can get its trust by copy.
     - **The write** (`Provider.trust`) goes where the provider's own dialog writes it (Claude
       Code: the main repository's root inside a repository, else the folder): under the
       provider's lock folder (wait up to 10 s; one left over, untouched for 30 s, is taken over,
@@ -434,8 +452,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     on the first day of real use one account's five-hour window went from 23% to 60% in 13
     minutes, and the last 10% would take about four. A handoff written at a threshold cannot be
     relied on under that load, so when an account's limit stops a session, a fresh session on
-    the best account continues the work from the transcript. Handoff becomes the cheaper path
-    when there is time (stage 5c); percent warnings, `watch` and checkpoints are 5b.
+    the best account continues the work from the transcript. Since stage 5b a session that has
+    time writes a checkpoint and runs `fairshare pickup` itself (decision 22): handoff is
+    checkpoint + pickup.
     - **The session map.** capture keeps one small record per session in the state folder
       (`sessions/<id>.json`, atomic, under a lock): account, folder, transcript path, last seen,
       and when its limit stopped it. Written only when new or changed or last seen a minute ago;
@@ -474,9 +493,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       outside a session it runs in the foreground in the recorded folder (a gone folder is
       refused); inside a session or with `--bg`, in the background: `claude --bg --name
       pickup-<first 8> <prompt>` in the recorded folder, on the top eligible account that
-      already trusts that folder (nothing can ask), with the account's clean environment and
-      BROWSER, its output passed through (it names the attach command). None eligible and
-      trusting: exit 1, naming which were eligible and which lacked trust. A session whose
+      trusts that folder or can get its trust by copy (decision 21; nothing can ask), with the
+      account's clean environment and no BROWSER (a background session would not receive it,
+      and uses the system browser), its output passed through (it names the attach command).
+      None eligible and able: exit 1, naming which were eligible and why trust could not be had. A session whose
       account can still work is picked up anyway, with one note line: moving is a valid wish.
     - **Never stopping others' sessions.** Only the launcher stops a session, and only its own
       child. Outside it, the old session is left as it is.
@@ -485,12 +505,16 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       `fairshare transcript <id> --tail 40` to see where it stopped; read the full transcript
       at <path> only if something is unclear. Then continue the work. First say in one line
       what you are picking up." A session moved by request says "which was stopped at <clock> on
-      account <old> to move it" instead. `_pickup_prompt` keeps one place for a step that comes
-      first (5b's checkpoint note).
+      account <old> to move it" instead. When the session has a checkpoint note (decision 22),
+      "Read its checkpoint note <path> first; it is the session's own account of where it
+      stood." comes before the transcript line.
     - **`fairshare transcript SESSION [--tail N]`** prints the main conversation's words, one
       block per message prefixed `user:` or `assistant:`, the last N (40). The adapter reads the
       file (`transcript_text`): only `user` and `assistant` records off the side chain, only text
-      blocks; never tool calls, results, thinking, request copies or other records. A file it
+      blocks; never tool calls, results, thinking, request copies or other records. A `!`
+      command the user typed (its own user messages, `<bash-input>` and `<bash-stdout>` /
+      `<bash-stderr>`) shows as `user ran: <command>` and `output:` with at most 20 lines, then
+      `… (<n> more lines)`. A file it
       cannot read or with no message prints its path and says the layout was not understood
       (exit 1). Raw records are never printed.
 
@@ -513,6 +537,83 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       user's statusLine has none): the bar re-reads the local snapshot once a minute at no cost,
       so a background probe's answer shows while the session is idle.
 
+21. **Trust: copy, never create** (owner decision, 2026-11-11; amends decision 16's "no
+    terminal: never write trust"). Without a terminal, fairshare may copy folder trust for the
+    canonical folder from an account that already trusts it (by the provider's own lookup rule)
+    to accounts that lack it, through the same write as the terminal offer (the provider's lock,
+    a backup in `<hub>/backups/`, every other key kept, read back), printing one line per
+    account written (`b now trusts <folder> (copied from a)`). It never creates trust that no
+    account has, never acts in HOME, and copies nothing to a folder with a remembered "only"
+    answer. `fairshare trust [PATH]` (default: here) copies to every joined account lacking it;
+    it says when nothing is needed, and refuses (exit 1) in HOME, for an "only" folder, and
+    when no account trusts the folder (naming the way to create trust: launch there and answer
+    the question). A background pickup and a worker start copy to the one account about to
+    start, then start it; a failed copy moves on to the next eligible account.
+
+22. **Workers and the main session** (owner decisions, 2026-11-11).
+    - **Roles.** The main session has the power: it receives fairshare's signals and decides
+      for itself and its workers. A worker gets one instruction only, "checkpoint now", and
+      makes no account decisions. A subagent gets nothing: subagents are for small, short work;
+      if the limit hits, the main session and its subagent stop together and one pickup covers
+      both. Big or long work goes to workers: background sessions that can be stopped, moved and
+      relaunched. A session record's optional `role` (`worker`; missing means main) and
+      `parent` say which is which; fairshare's own fields are written only when set.
+    - **`fairshare worker [--account ID] [--name NAME] PROMPT`**, inside a session (the parent
+      is the provider's session id; outside one, exit 2): the account is `--account` or the top
+      eligible one by the usual survey (probes included) that trusts the folder or can get it by
+      copy (decision 21); then `claude --bg --name <name> <prompt>` in the folder with the
+      account's clean environment (no BROWSER: `--bg` passes no environment). The default name
+      is `w-<first 8 of the parent>-<n>`, the lowest free; a name is claimed in the state
+      folder (`workers/<name>.json`: parent, account, folder, start time, later the session id)
+      before the start, so it is unique, and an explicit `--name` already recorded is refused.
+      The prompt gets one line first: `You are a worker for session <parent id>. When fairshare
+      asks for a checkpoint, run fairshare checkpoint "<what is done, what is next>".`
+    - **The join.** `--bg` does not pass the caller's environment to the session (it comes
+      from the provider's own pool), so neither parent nor role can travel by variable.
+      fairshare names the worker and joins the name to its session id through the provider's
+      list of running sessions (`Provider.list_sessions`, `claude agents --json`), polling up to
+      10 s; the session record then gets `role = worker` and `parent`. A join that times
+      out prints the name and says the id is not known yet; `watch` (every listing) and the
+      prompt hook (only while an unjoined worker under an hour old exists) retry it by name.
+      PostToolUse never does: it runs after every tool call.
+    - **No channel into sessions.** Agents listen. Hooks tell a busy session at its next event;
+      a waiting main session keeps `fairshare watch` running as a background command, which
+      exits when something concerns it (the provider then wakes the session with its own task
+      notification). The main session tells its workers its own way (the provider's message
+      tool, stopping them, or `fairshare checkpoint --request`).
+    - **Checkpoints are files**, durable across a limit: `fairshare checkpoint TEXT` appends
+      `## <local time>`, a newline and the text to `checkpoints/<session id>.md` in the state
+      folder (locked, append-only) and clears the session's pending request; `--request
+      SESSION|NAME|all` sets `checkpoint_requested` on the named workers' records (`all`: the
+      caller's workers; a worker not joined yet is joined first, or named as not asked);
+      `--show SESSION|NAME` prints a note. A pickup prompt names the note first (decision 19).
+      Handoff is checkpoint + pickup: a main session that decides to move writes one and runs
+      `fairshare pickup`.
+    - **Warnings** (`hook post-tool`, `hook prompt`): percent crossings, 90 then 95, once each
+      per plan window (by its reset) per session, recorded on the session record (`warned`); a
+      higher crossing covers the lower, a new reset warns again. Nothing for an input naming a
+      subagent (`agent_id`); a worker with a pending request hears the request (once per
+      request); otherwise a crossing is said for the role: the main text names the percent,
+      window, reset, the best other account by local snapshots, the advice (carry on if little
+      is left, else checkpoint and pickup) and the session's workers; the worker text says to
+      finish the step and checkpoint. The text goes as the event's documented
+      `additionalContext` (`Provider.hook_output`); nothing to say prints nothing. The hook reads
+      only the snapshot and the records: a snapshot older than twice `refresh_minutes` says
+      nothing new and starts the background probe. No burn rate (banked by the owner). Its wall
+      time with nothing to say: a median of 55 ms over 20 fresh processes (bare `python -c pass`:
+      14 ms; importing `fairshare.cli`: about 35 ms), measured 2026-11-11 on a loaded machine.
+    - **`fairshare watch [--timeout SECONDS]`**, inside a session: local state every 5 s, the
+      running sessions every 15 s; it exits 0 with one line per event: its account's crossing
+      (the same marks as the hooks: whichever tells first), a worker's checkpoint note grown, a
+      worker stranded (`fairshare pickup <id>`), a worker ended or idle after busy;
+      `nothing happened` on timeout. What it said is kept on the caller's record (`reported`),
+      so a restarted watch does not repeat itself.
+    - **The skill.** A Claude Code skill (`providers/claude_skill/SKILL.md`, package data; front
+      matter `name: fairshare`, `description`) teaches main sessions all this. setup, join and
+      `doctor --fix` install it as the hub's shared `skills/fairshare/` with its diff shown,
+      refresh it when the shipped text differs, recognise fairshare's own copy by its `name`,
+      and never touch another skill (a foreign one in that folder is a doctor FAIL, left alone).
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -533,10 +634,23 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   for that reset: a plan window spent right now confirms the pickup and shows the bar mark
   (`_spent_now`), and the countdown lets the user cancel and resume after the reset.
 - Not yet checked live (planner, after merge): `!` commands inheriting
-  `CLAUDE_CODE_SESSION_ID`; StopFailure firing on a real limit; `refreshInterval` re-runs (and
-  whether they carry fresh `rate_limits`; fairshare assumes the last payload); `--bg` passing
-  the environment through; `CLAUDE_PID` in a hook naming the session's own process (the
-  launcher ignores a request carrying another pid).
+  `CLAUDE_CODE_SESSION_ID`; StopFailure firing on a real limit; whether `refreshInterval` re-runs
+  carry fresh `rate_limits` (fairshare assumes the last payload); `CLAUDE_PID` in a hook naming
+  the session's own process (the launcher ignores a request carrying another pid); the
+  PostToolUse/UserPromptSubmit context reaching a real session; `fairshare worker` starting and
+  joining; `fairshare watch` waking a main session as a background command; the skill loading;
+  the first prompt of a `--bg` session firing UserPromptSubmit.
+- A worker's join depends on `claude agents --json` listing the session by the name given
+  with `--name`, within 10 s (seen within 4 s) or later at a retry; its top-level shape was not
+  recorded (a list, or an object holding one list, is accepted). Until joined, a worker hears no
+  request and is warned as a main session would be.
+- No environment reaches a background session (`--bg`, 2.1.322): its account comes only from
+  the folder variable, and its sign-in links open in the system browser.
+- A main session started with `--agent` carries `agent_id` in its hook input too, so its
+  speaking hooks are silent.
+- "Best other account" in a warning ranks the other accounts on their local snapshots only (no
+  sign-in check, no twin grouping); "Workers you started" lists every recorded worker of the
+  session (kept 7 days), ended ones included.
 - The ranking is greedy; it cannot promise full use of every week.
 - The usage hook calls the installed `fairshare` by the absolute path found when `setup` or
   `join` last ran; if it moves (a reinstall elsewhere), `fairshare doctor` fails and
@@ -630,10 +744,14 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | statusLine payload and common hook input: `session_id`, `transcript_path`, `cwd` | `SESSION_ID`, `SESSION_TRANSCRIPT`, `SESSION_CWD`, `session_of` | no session records: no bar mark, `pickup SESSION` finds nothing (the launch still works) | documented: code.claude.com/docs/en/statusline and /hooks ("Common input fields"), read 2026-11-11 |
 | statusLine `refreshInterval` (seconds, minimum 1, on the statusLine object) | `STATUS_REFRESH_KEY`, `STATUS_REFRESH_S`, `wire` | the bar redraws on events only | documented: /statusline, read 2026-11-11; whether a re-run carries fresh `rate_limits` is unverified (fairshare assumes the last payload) |
 | StopFailure hook: `hooks.StopFailure[{matcher: "rate_limit", hooks: [{type: "command", command}]}]`; input field `error` (`rate_limit`, `overloaded`, `authentication_failed`, ... `unknown`); output and exit code ignored | `HOOKS_KEY`, `HOOK_MATCHER_KEY`, `HOOK_LIST_KEY`, `STOP_FAILURE`, `RATE_LIMIT`, `HOOK_ERROR`, `FAIRSHARE_HOOKS`, `hook_of`, `hooked`, `hook_session` | no automatic pickup and no bar mark; `doctor` fails the hook line; `! fairshare pickup` still works | documented: /hooks, read 2026-11-11 (StopFailure input: `error`, optional `error_details`, `last_assistant_message`); hook table: 2.1.322 (planner). The wired entry passes the settings validator on 2.1.322, 2026-11-11 (`claude doctor`, throwaway folder and HOME under `env -i`, no login: no "Invalid settings"; a control with a numeric matcher was reported). Firing on a real limit: not yet checked live |
+| PostToolUse (`matcher: "*"`: every tool) and UserPromptSubmit (no matcher support) hooks; their JSON answer `{"hookSpecificOutput": {"hookEventName": <event>, "additionalContext": <text>}}` is added to the model's context | `POST_TOOL`, `ALL_TOOLS`, `PROMPT`, `HOOK_OUTPUT`, `HOOK_EVENT_NAME`, `HOOK_CONTEXT`, `CONTEXT_EVENTS`, `FAIRSHARE_HOOKS`, `hook_output` | no warnings or checkpoint requests reach sessions (watch still reports); `doctor` fails the hooks line | documented: code.claude.com/docs/en/hooks, read 2026-11-11 (no version on the page). The wired entries pass the settings validator on 2.1.322, 2026-11-11 (`claude doctor`, throwaway folder and HOME under `env -i`, no login: no "Invalid settings"; a control with a numeric PostToolUse matcher was reported). Context reaching a real session: not yet checked live |
+| `agent_id` (and `agent_type`) in every hook's input when it fires in a subagent, a teammate, or a session started with `--agent` | `HOOK_AGENT`, `hook_session` | warnings and requests would reach subagents too | documented: /hooks ("Common input fields"), read 2026-11-11 |
 | Inside a session: `CLAUDE_CODE_SESSION_ID` (full id), `CLAUDE_PID` (the session's process) | `SESSION_ID_ENV`, `SESSION_PID_ENV`, `current_session`, `session_pid` | `pickup` with no SESSION says "not inside a session"; a request carries no pid (accepted) | tool shells: 2.1.322 (planner, 2026-11-11); `!` and hooks: not yet checked live |
-| `--bg --name <name> <prompt>` (a session with no terminal, which prints how to attach), `--resume <id>` | `BG_ARGS`, `NAME_ARGS`, `RESUME_ARGS`, `background`, `resume_args` | background pickup fails with the tool's own message; the countdown's cancel hint is wrong | `--bg` 2.1.322 (trust row above); `--name` with an initial prompt and the environment passing through: not yet checked live |
+| `--bg --name <name> <prompt>` (a session with no terminal, which prints how to attach; no prompt: an idle session), `--resume <id>`; `--bg` passes no environment but the folder variable | `BG_ARGS`, `NAME_ARGS`, `RESUME_ARGS`, `background`, `resume_args` | background pickup and `worker` fail with the tool's own message; the countdown's cancel hint is wrong | 2.1.322, 2026-11-11 (planner: a marker variable set for `claude --bg --name X` was absent from the session; only `CLAUDE_CONFIG_DIR` arrived; the process comes from the tool's own pool) |
 | Transcript layout (internal, per version): one JSON record per line; `type` `user`/`assistant` with `isSidechain` false; `message.content` a string or blocks of which `text` ones are words | `T_*`, `transcript_text` | `fairshare transcript` prints the path and "layout not understood" (exit 1); the pickup prompt also names the full transcript path | 2.1.322, 2026-11-11 (planner's synthetic fixture `tests/fixtures/claude-2.1.322/transcript.jsonl`) |
-| `claude agents --json` (live sessions with `pid`, `sessionId`, `cwd`, `kind`, `name`, `startedAt`, `status`; no account) | none: seen, unused | not applicable | 2.1.322 (planner, 2026-11-11) |
+| `!` commands in the transcript: user messages `<bash-input>…</bash-input>`, then `<bash-stdout>…</bash-stdout>` / `<bash-stderr>…</bash-stderr>` | `T_BANG_INPUT`, `T_BANG_OUTPUT`, `transcript_text` | they show raw, as plain user messages | 2.1.322 (planner, 2026-11-11, a real transcript through `fairshare transcript`) |
+| `claude agents --json` (live sessions with `pid`, `sessionId`, `cwd`, `kind`, `name`, `startedAt`, `status` `busy`/`idle`; ended sessions not listed without `--all`; no account) | `AGENTS_ARGS`, `AGENT_ID`, `AGENT_NAME`, `AGENT_STATUS`, `AGENT_BUSY`, `AGENT_IDLE`, `list_sessions` | a worker is never joined (it hears no request, warnings treat it as a main session) and `watch` reports no ended or idle workers | 2.1.322 (planner, 2026-11-11: a `--bg --name` session appeared with its `sessionId` within 4 s); top-level shape not recorded (a list, or an object holding one, accepted) |
+| Skill format: a folder holding `SKILL.md`, front matter between `---` lines with `name` and `description` (all optional; `description` recommended; description text truncated at 1,536 characters in the listing); user skills in `<config>/skills/<name>/` | `SKILLS_DIR`, `SKILL_FILE`, `SKILL_NAME`, `SKILL_SOURCE`, `SKILL_FENCE`, `SKILL_NAME_KEY`, `skill`, `own_skill` | the skill does not load; doctor still checks the file | documented: code.claude.com/docs/en/skills, read 2026-11-11 (no date on the page); loading in a real session: not yet checked live |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
 | Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
@@ -665,5 +783,5 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 
 ## Not built yet
 
-OpenAI/Codex adapter · handoff at a threshold (stage 5c) · percent warnings, `watch`, checkpoints
-(stage 5b) · packaging for Homebrew.
+OpenAI/Codex adapter · packaging for Homebrew. (Handoff at a threshold, once stage 5c, is
+checkpoint + pickup since stage 5b.)

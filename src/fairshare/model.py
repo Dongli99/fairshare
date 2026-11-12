@@ -110,6 +110,35 @@ class SessionRecord:
     transcript: str | None
     seen: float                       # when a usage hook or a hook last saw it
     stranded_at: float | None = None  # when its account's limit stopped it, if it did
+    role: str | None = None           # ROLE_WORKER for a worker; None: a main session
+    parent: str | None = None         # a worker's main session (its id)
+    checkpoint_requested: float | None = None   # when its main session asked for a checkpoint
+    request_said: float | None = None # the request a hook last passed on (its time)
+    warned: dict = field(default_factory=dict)  # plan window -> [its reset, level warned]
+    reported: dict = field(default_factory=dict)  # what `watch` already said: key -> value
+
+
+ROLE_WORKER = "worker"
+
+
+@dataclass(frozen=True)
+class Worker:
+    """A background session a main session started (`fairshare worker`). Its session id is
+    known once joined: the provider lists sessions by name."""
+    name: str
+    parent: str                       # the main session's id
+    account: str
+    cwd: str
+    started: float
+    session: str | None = None
+
+
+@dataclass(frozen=True)
+class LiveSession:
+    """A running session as the provider lists it."""
+    id: str
+    name: str | None
+    busy: bool | None                 # None: the provider did not say
 
 
 @dataclass(frozen=True)
@@ -125,6 +154,7 @@ class Tuning:
     grace_hours: float = 1.0          # a hot account resetting this soon is still usable
     min_hours: float = 1.0            # floor on time-to-reset, so a near reset stays finite
     refresh_minutes: float = 5.0      # usage this old is asked for again (the usage probe)
+    launch_pause: float = 3.0         # seconds a launch with a close choice waits; 0: never
 
 
 def _plan_data(name: str) -> dict:
@@ -233,6 +263,8 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
             raise ConfigError(f"[policy] {k} must be a number")
     if policy.get("refresh_minutes", 1) < 1:
         raise ConfigError("[policy] refresh_minutes must be at least 1")
+    if policy.get("launch_pause", 0) < 0:
+        raise ConfigError("[policy] launch_pause must be 0 (off) or more")
     return accounts, Tuning(**policy), hub
 
 

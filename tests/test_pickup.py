@@ -113,7 +113,11 @@ class Wiring(unittest.TestCase):
             '"/bin/fairshare capture"}', '"/bin/fairshare capture", "refreshInterval": 60}'
         ).replace('"~/notify.sh"}]\n      }\n', '"~/notify.sh"}]\n      },\n      {"matcher": '
                   '"rate_limit", "hooks": [{"type": "command", "command": "/bin/fairshare hook '
-                  'stop-failure"}]}\n'))
+                  'stop-failure"}]}\n').replace(
+            '"~/stop.sh"}]}]\n', '"~/stop.sh"}]}],\n    "PostToolUse": [{"matcher": "*", "hooks": '
+            '[{"type": "command", "command": "/bin/fairshare hook post-tool"}]}],\n    '
+            '"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/bin/fairshare hook '
+            'prompt"}]}]\n'))
         self.assertEqual(claude.hooked(new), ("/bin/fairshare",))
         self.assertIsNone(claude.hooked(self.MINE))
 
@@ -163,17 +167,19 @@ class HookWiredInHub(Base):
 
     def doctor_line(self):
         self.go("doctor")
-        return next(l for l in self.out.splitlines() if "stop-failure hook" in l)
+        return next(l for l in self.out.splitlines() if "hooks in the hub" in l)
 
     def test_doctor_fails_without_it_and_fix_adds_it_with_its_diff(self):
         write(self.settings, json.dumps({"statusLine": {
             "type": "command", "command": f"{self.bin}/fairshare capture"}}))
-        self.assertEqual(self.doctor_line(), "FAIL  claude: stop-failure hook in the hub does "
-                                             "not call fairshare hook (run `fairshare doctor --fix`)")
+        self.assertEqual(self.doctor_line(), "FAIL  claude: hooks in the hub (stop-failure, "
+                                             "post-tool, prompt) do not all call fairshare hook "
+                                             "(run `fairshare doctor --fix`)")
         self.go("doctor", "--fix")
-        self.assertIn(f'+            "command": "{self.bin}/fairshare hook stop-failure"', self.out)
-        self.assertEqual(self.doctor_line(),
-                         "pass  claude: stop-failure hook in the hub calls fairshare hook")
+        for name in ("stop-failure", "post-tool", "prompt"):
+            self.assertIn(f'+            "command": "{self.bin}/fairshare hook {name}"', self.out)
+        self.assertEqual(self.doctor_line(), "pass  claude: hooks in the hub (stop-failure, "
+                                             "post-tool, prompt) call fairshare hook")
         self.assertEqual(claude.hooked(self.settings.read_text()), (f"{self.bin}/fairshare",))
 
     def test_the_hook_command_says_nothing_and_exits_0_whatever_it_gets(self):
@@ -758,18 +764,29 @@ class PickupCommand(Stranded):
         env = dict(l.split("=", 1) for l in (self.log / "env-b").read_text().splitlines()
                    if "=" in l)
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.tmp / "hub/accounts/b"))
-        self.assertTrue(env["BROWSER"].endswith("browsers/b"))
-        for gone in ("CLAUDE_CODE_SESSION_ID", "FAIRSHARE_LAUNCHER"):
+        for gone in ("CLAUDE_CODE_SESSION_ID", "FAIRSHARE_LAUNCHER", "BROWSER"):
             self.assertNotIn(gone, env)
         self.assertEqual(self.fg, [])
 
-    def test_background_takes_only_an_account_that_trusts_the_folder(self):
+    def test_background_copies_trust_to_the_top_account_first(self):
         self.record()
         self.snap("a", five=(10, 3), seven=(10, 20))                 # a ranks first ...
         self.trust("b")                                              # ... but only b trusts
         code, _, err = self.pickup(SID[:6], "--bg")
         self.assertEqual(code, 0, err)
         self.assertIn("note: a can still take work", err)
+        self.assertIn(f"a now trusts {self.work.resolve()} (copied from b)", err)
+        self.assertEqual(self.bg_args("a")[0], "--bg")
+        self.assertTrue(claude.trusts(self.tmp / "hub/accounts/a", self.work.resolve()))
+
+    def test_background_without_copy_takes_only_an_account_that_trusts_the_folder(self):
+        self.record()
+        self.snap("a", five=(10, 3), seven=(10, 20))                 # a ranks first ...
+        self.trust("b")                                              # ... but only b trusts
+        store.remember_trust_only(self.work.resolve())               # and copying is refused
+        code, _, err = self.pickup(SID[:6], "--bg")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("now trusts", err)
         self.assertEqual(self.bg_args("b")[0], "--bg")
         self.assertNotIn("--bg", self.bg_args("a"))                 # a was only asked who it is
 

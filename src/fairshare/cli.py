@@ -1,5 +1,5 @@
-"""fairshare CLI: status | capture | run (the default) | prefer | pickup | transcript | setup |
-join | leave | uninstall | doctor."""
+"""fairshare CLI: status | capture | run (the default) | prefer | pickup | transcript | trust |
+worker | checkpoint | watch | setup | join | leave | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -24,9 +24,10 @@ from pathlib import Path
 from . import browser
 from . import hub as hub_mod
 from . import providers, session, store
-from .model import (ACCOUNT_ID, DEFAULT_HUB, USAGE_MODEL_TURN, Account, AccountStatus, ConfigError,
-                    SessionRecord, Snapshot, Tuning, Window, load_accounts, load_plan,
-                    window_model, with_account, with_hub, without_account)
+from .model import (ACCOUNT_ID, DEFAULT_HUB, ROLE_WORKER, USAGE_MODEL_TURN, Account,
+                    AccountStatus, ConfigError, SessionRecord, SessionSeen, Snapshot, Tuning, Window, Worker,
+                    load_accounts, load_plan, window_model, with_account, with_hub,
+                    without_account)
 from .policy import HOUR, Verdict, prefer, rank
 
 
@@ -464,13 +465,18 @@ def cmd_probe(a) -> int:
 
 def cmd_hook(a) -> int:
     """Runs as one of fairshare's own hooks in the provider's settings (`hook <name>`), with the
-    hook's input on stdin. Never raises, prints nothing, exits 0: the provider may ignore or show
-    whatever a hook says."""
+    hook's input on stdin. Never raises and exits 0. It prints only what a handler gives (the
+    provider's own answer that puts a line in the model's context), else nothing."""
+    said: list[str | None] = []
+
     def work():
         raw = json.loads(sys.stdin.buffer.read())
         if handle := HOOKS.get(a.name):
-            handle(a.name, raw)
-    return _quietly(work)
+            said.append(handle(a.name, raw))
+    _quietly(work)
+    if said and said[0]:
+        print(said[0])
+    return 0
 
 
 LAUNCHER_ENV = "FAIRSHARE_LAUNCHER"   # set by the launcher for its child: its own process id
@@ -526,8 +532,147 @@ def _stop_failure(name: str, raw: object) -> None:
         _request(launcher, seen.id, False, prov.session_pid())
 
 
-STOP_FAILURE = "stop-failure"
-HOOKS = {STOP_FAILURE: _stop_failure}   # fairshare's hook name -> handler(name, input)
+# --- What the hooks say (decision 22): percent crossings, once each per window per session,
+# and a main session's request for a checkpoint, passed on to its worker.
+
+WARN_LEVELS = (90, 95)   # a plan window crossing one of these is said once per window and session
+
+
+def _crossing(rec: SessionRecord, acct: Account, snap: Snapshot, now: float
+              ) -> tuple[tuple[str, Window, int] | None, dict]:
+    """The highest crossing of WARN_LEVELS in the account's plan windows not yet warned for this
+    session in that window (by its reset), as (window, its numbers, level); and the session's
+    warned levels with every new crossing marked (a higher one covers the lower)."""
+    p, best, warned = acct.plan, None, dict(rec.warned)
+    for k in (p.short_name, p.long_name):
+        w = k and snap.windows.get(k)
+        if not w or w.resets_at <= now:
+            continue
+        level = max((x for x in WARN_LEVELS if w.used_pct >= x), default=0)
+        old = rec.warned.get(k)
+        same = (isinstance(old, list) and len(old) == 2
+                and abs(float(old[0]) - w.resets_at) <= store.SAME_WINDOW_S)
+        if not level or (same and float(old[1]) >= level):
+            continue
+        warned[k] = [w.resets_at, level]
+        if best is None or (level, w.used_pct) > (best[2], best[1].used_pct):
+            best = (k, w, level)
+    return best, warned
+
+
+def _tell_crossing(session_id: str, acct: Account, t: Tuning, now: float
+                   ) -> tuple[str, Window, int] | None:
+    """A crossing to say for the session, marked as said on its record in the same locked step
+    (a hook and `watch` both ask: whichever comes first says it). Numbers older than twice
+    `refresh_minutes` say nothing new (stale numbers must not move anyone) and start the
+    background probe, as capture does."""
+    snap = store.load(acct.id)
+    if snap is None or now - snap.captured_at > 2 * t.refresh_minutes * 60:
+        _start_probe(acct, None, now)
+        return None
+    got = []
+
+    def change(old: SessionRecord | None) -> SessionRecord | None:
+        best, warned = _crossing(old, acct, snap, now) if old else (None, {})
+        if best is None:
+            return None
+        got.append(best)
+        return replace(old, warned=warned)
+    store.update_session(session_id, change)
+    return got[0] if got else None
+
+
+def _short_state(acct: Account, snap: Snapshot | None, now: float) -> str:
+    """An account's plan windows in a few words (`5h 10% · 7d 40%`), unknown ones as `-`."""
+    p = acct.plan
+    parts = []
+    for k, hours in ((p.short_name, p.short_hours), (p.long_name, p.long_hours)):
+        w = k and snap and snap.windows.get(k)
+        if k:
+            parts.append(f"{_span(hours) if hours else k} "
+                         + (f"{w.used_pct:.0f}%" if w and w.resets_at > now else "-"))
+    return " · ".join(parts)
+
+
+def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
+    """The best other account by the local snapshots alone (no sign-in check, no probe)."""
+    others = [a for a in accounts if a.plan is not None and a.id != acct.id]
+    snaps = {a.id: s for a in others if (s := store.load(a.id))}
+    v = next((v for v in rank(others, snaps, now, t) if v.eligible), None)
+    return (f"{v.account.id} ({_short_state(v.account, snaps.get(v.account.id), now)})" if v
+            else "none can take work now")
+
+
+def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window, int],
+                  accounts: list[Account], t: Tuning, now: float) -> str:
+    """What a crossing says, by the session's role. Provider-neutral."""
+    k, w, _ = crossing
+    p = acct.plan
+    hours = p.short_hours if k == p.short_name else p.long_hours
+    window = _span(hours) if hours else k
+    if rec.role == ROLE_WORKER:
+        return (f"fairshare: this account is at {w.used_pct:.0f}% of its {window} window. You are "
+                'a worker: finish your current step, then run fairshare checkpoint "<what is '
+                'done, what is next>". Do not start a big new step; your main session decides '
+                "what happens next.")
+    workers = ", ".join(x.name for x in store.workers(rec.id)) or "none"
+    return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window (resets "
+            f"{_clock(w.resets_at, now)}). Best other account: {_best_other(acct, accounts, t, now)}"
+            ". If what is left of your work is small, carry on. Otherwise, at the next stopping "
+            'point: write a checkpoint (fairshare checkpoint "<where you stand>") and run '
+            "fairshare pickup to continue on the best account. Workers you started: "
+            f"{workers}; to have them checkpoint: fairshare checkpoint --request all.")
+
+
+CHECKPOINT_ASK = ("fairshare: your main session asks for a checkpoint now: finish your current "
+                  'step and run fairshare checkpoint "<what is done, what is next>".')
+
+
+def _ask_checkpoint(session_id: str) -> bool:
+    """Whether a worker's pending checkpoint request is to be passed on now: once per request,
+    marked in the same locked step."""
+    got = []
+
+    def change(old: SessionRecord | None) -> SessionRecord | None:
+        if (old is None or old.role != ROLE_WORKER or old.checkpoint_requested is None
+                or old.request_said == old.checkpoint_requested):
+            return None
+        got.append(True)
+        return replace(old, request_said=old.checkpoint_requested)
+    store.update_session(session_id, change)
+    return bool(got)
+
+
+def _speak(name: str, raw: object) -> str | None:
+    """`hook post-tool` and `hook prompt`: what to put in the session's context, as the
+    provider's hook answer, or None. Silent inside a subagent. A worker with a pending request
+    hears it; otherwise a new crossing of its account is said for the session's role. Reads only
+    local files, except that the prompt hook looks pending workers up by name."""
+    accounts, tuning, _ = _load()
+    if (acct := _session_account(accounts)) is None or acct.plan is None:
+        return None
+    prov = providers.get(acct.provider)
+    if (seen := prov.hook_session(name, raw)) is None:
+        return None
+    now = _now()
+    rec = store.session(seen.id)
+    if name == PROMPT_HOOK and (rec is None or rec.role is None):
+        if _join_pending(store.workers(), accounts, now):
+            rec = store.session(seen.id)
+    rec = rec or store.note_session(seen, acct.id, now)
+    if rec is None:
+        return None
+    if _ask_checkpoint(rec.id):
+        return prov.hook_output(name, CHECKPOINT_ASK)
+    if crossing := _tell_crossing(rec.id, acct, tuning, now):
+        return prov.hook_output(name, _warning_text(rec, acct, crossing, accounts, tuning, now))
+    return None
+
+
+STOP_FAILURE, POST_TOOL_HOOK, PROMPT_HOOK = "stop-failure", "post-tool", "prompt"
+HOOKS = {STOP_FAILURE: _stop_failure,   # fairshare's hook name -> handler(name, input): what to
+         POST_TOOL_HOOK: _speak,        # print, or None
+         PROMPT_HOOK: _speak}
 
 
 def _say(text: str) -> None:
@@ -538,14 +683,17 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stderr.isatty()
 
 
-def _grace_warning(v: Verdict, snaps: dict[str, Snapshot], tuning: Tuning, now: float) -> None:
-    """An account that is eligible only because its hot short window resets soon."""
+def _grace_warning(v: Verdict, snaps: dict[str, Snapshot], tuning: Tuning, now: float) -> bool:
+    """An account that is eligible only because its hot short window resets soon. True when
+    the warning was said."""
     w = (snap := snaps.get(v.account.id)) and snap.windows.get(v.account.plan.short_name)
     if w and w.used_pct >= tuning.short_hot_pct and 0 < w.resets_at - now:
         left = (w.resets_at - now) / HOUR
         if left < tuning.grace_hours:
             _say(f"warning: {v.account.id} {v.account.plan.short_name} window "
                  f"{w.used_pct:.0f}% used, resets in {int(left * 60)}m")
+            return True
+    return False
 
 
 def _choose(prompt: str, valid: set[str]) -> str | None:
@@ -695,10 +843,10 @@ def _limit_text(s: Survey, acct_id: str) -> str:
     return _usable(v, s.now)
 
 
-def _countdown(text, seconds: int = COUNTDOWN_S) -> bool:
-    """On the terminal: `text(seconds left)` on one line, counting down. False when the user
-    types `c`; True on Enter or when the time is up. Keys are read one by one (cbreak mode, what
-    was typed before is dropped) and the terminal is always restored."""
+def _read_key(text, seconds: int, keys: bytes) -> bytes | None:
+    """On the terminal: `text(seconds left)` on one line, counting down, until Enter (b"\\n"),
+    one of `keys` (that key, lower case) or the time is up (None). Keys are read one by one
+    (cbreak mode, what was typed before is dropped) and the terminal is always restored."""
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     try:
@@ -711,13 +859,57 @@ def _countdown(text, seconds: int = COUNTDOWN_S) -> bool:
                 if select.select([fd], [], [], wait)[0]:
                     key = os.read(fd, 1)
                     if key in (b"\r", b"\n"):
-                        return True
-                    if key in (b"c", b"C"):
-                        return False
-        return True
+                        return b"\n"
+                    if key.lower() in [bytes([k]) for k in keys]:
+                        return key.lower()
+        return None
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         print(file=sys.stderr)
+
+
+def _countdown(text, seconds: int = COUNTDOWN_S) -> bool:
+    """`_read_key` for a pickup: False when the user types `c`; True on Enter or when the time
+    is up."""
+    return _read_key(text, seconds, b"c") != b"c"
+
+
+TIGHT_WEEK_PCT = 90       # a chosen account whose week is this full makes a launch pause
+CLOSE_SCORE = 0.10        # so does a second-best account within this fraction of its score
+
+
+def _worth_pausing(s: Survey, top: Verdict, warned: bool) -> bool:
+    """Whether the choice is worth a pause: the chosen account is tight (week at
+    TIGHT_WEEK_PCT, a hot short window, or a spent model week), the second-best eligible one is
+    close behind, or a `warning:` line was said for this launch."""
+    p, snap = top.account.plan, s.snaps.get(top.account.id)
+    wins = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > s.now}
+    tight = (wins.get(p.long_name) and wins[p.long_name].used_pct >= TIGHT_WEEK_PCT) or (
+        p.short_name in wins and wins[p.short_name].used_pct >= s.tuning.short_hot_pct)
+    spent = _spent_models(top.account.id, snap, s.tuning, s.now)
+    second = next((v for v in s.verdicts if v.eligible and v is not top), None)
+    close = second is not None and top.score > 0 and second.score >= top.score * (1 - CLOSE_SCORE)
+    return bool(tight or spent or close or warned)
+
+
+def _pause(s: Survey, top: Verdict) -> Verdict | None:
+    """Show the eligible accounts, then count down `launch_pause` seconds: Enter or the time
+    running out starts `top`, a digit starts that account, q quits (None)."""
+    eligible = [v for v in s.verdicts if v.eligible][:9]
+    for i, v in enumerate(eligible, 1):
+        print(f"  {i} {'>' if v is top else ' '} {v.account.id:<12} {v.reason}{_age(s, v.account.id)}",
+              file=sys.stderr)
+    digits = "".join(str(i) for i in range(1, len(eligible) + 1))
+    which = digits if len(digits) == 1 else f"{digits[0]}-{digits[-1]}"
+    try:
+        key = _read_key(lambda left: f"starting {top.account.id} in {left} s · Enter = now · "
+                        f"{which} = that account · q = quit", max(1, round(s.tuning.launch_pause)),
+                        digits.encode() + b"q")
+    except (OSError, termios.error):         # not a terminal after all: no pause
+        return top
+    if key == b"q":
+        return None
+    return eligible[int(key) - 1] if key and key.isdigit() else top
 
 
 def _pickup_prompt(rec: SessionRecord, now: float) -> str:
@@ -728,7 +920,9 @@ def _pickup_prompt(rec: SessionRecord, now: float) -> str:
                "hit its usage limit")
     else:
         why = f"which was stopped at {_clock(now, now)} on account {rec.account} to move it"
-    first: list[str] = []
+    note = store.checkpoint_path(rec.id)
+    first = [f"Read its checkpoint note {note} first; it is the session's own account of where "
+             "it stood."] if note and note.is_file() else []
     return " ".join([
         f"This session continues session {rec.id}, {why}. Its folder: {rec.cwd}.", *first,
         f"Run `fairshare transcript {rec.id} --tail 40` to see where it stopped; read the full "
@@ -824,15 +1018,17 @@ def _run_account(account_id: str, args: list[str]) -> int:
 def cmd_run(a) -> int:
     if a.account:
         return _run_account(a.account, a.args)
-    return _route(a.args)
+    return _route(a.args, pause=True)
 
 
-def _route(args: list[str], moving: str | None = None) -> int:
+def _route(args: list[str], moving: str | None = None, pause: bool = False) -> int:
     """Start a session with `args` on the best account (decision 11). `moving`: the account of a
-    session picked up by request, named in one note when it could still take work."""
+    session picked up by request, named in one note when it could still take work. `pause`: on
+    a terminal, a choice worth making waits `launch_pause` seconds for a key (`_pause`)."""
     try:
         while True:
             s = _survey()
+            warned = False
             if moving and _can_work(s, moving):
                 _say(f"note: {moving} can still take work; the session is picked up as asked")
                 moving = None
@@ -845,15 +1041,21 @@ def _route(args: list[str], moving: str | None = None) -> int:
                 _say(f"sign-in check failed for {', '.join(fallback)}; {FALLBACK}")
             for line in [*_probe_lines(s).values(), *_expiry_lines(s.expires, s.now).values()]:
                 _say(line)
+                warned = warned or line.startswith("warning:")
             if note := _preference_note(s):
                 _say(note)
             _nothing_to_rank(s)
             top = s.verdicts[0]
             spent = _spent_models(top.account.id, s.snaps.get(top.account.id), s.tuning, s.now)
             if top.eligible:
-                _grace_warning(top, s.snaps, s.tuning, s.now)
+                warned = _grace_warning(top, s.snaps, s.tuning, s.now) or warned
                 for line in spent:
                     _say(line)
+                if (pause and s.tuning.launch_pause > 0 and _interactive()
+                        and _worth_pausing(s, top, warned)):
+                    if (top := _pause(s, top)) is None:
+                        _say("not started")
+                        return 0
                 return _launch(top, args)
             _say("no account is eligible:")
             for v in s.verdicts:
@@ -933,7 +1135,8 @@ def cmd_pickup(a) -> int:
 
 def _pickup_background(rec: SessionRecord) -> int:
     """Start the pickup with no terminal, in the session's folder, on the top eligible account
-    that already trusts that folder (nothing can ask), and pass the tool's own output through."""
+    that trusts that folder or can get its trust by copy (nothing can ask), and pass the tool's
+    own output through."""
     if not (rec.cwd and os.path.isdir(rec.cwd)):
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
         return 1
@@ -941,17 +1144,31 @@ def _pickup_background(rec: SessionRecord) -> int:
     if _can_work(s, rec.account):
         _say(f"note: {rec.account} can still take work; the session is picked up as asked")
     here = Path(rec.cwd).resolve()
+    accounts, _, hub = _load()
     eligible = [v for v in s.verdicts if v.eligible]
-    trusting = [v for v in eligible
-                if providers.get(v.account.provider).trusts(v.account.config_dir, here) is True]
-    if not trusting:
+    acct = _start_here([v.account for v in eligible], here, accounts, hub)
+    if acct is None:
         _say("no account can take it in the background: "
              + (f"eligible: {', '.join(v.account.id for v in eligible)}, none of which trusts "
-                f"{here} (start it once from a terminal there, or use `fairshare pickup "
-                f"{rec.id}` from a terminal)" if eligible else "none is eligible now"))
+                f"{here} ({_why_untrusted(here, accounts)}); or use `fairshare pickup "
+                f"{rec.id}` from a terminal" if eligible else "none is eligible now"))
         return 1
-    v = trusting[0]
-    acct, prov = v.account, providers.get(v.account.provider)
+    v = next(v for v in eligible if v.account is acct)
+    _say(f"picking up {rec.id} on {acct.id} ({v.reason}), in the background")
+    return _start_background(acct, f"pickup-{rec.id[:8]}", _pickup_prompt(rec, s.now), rec.cwd)
+
+
+def _background_env(env: dict[str, str]) -> dict[str, str]:
+    """A background session's environment: no launcher of ours, and no BROWSER, which would not
+    reach it anyway (the provider starts background sessions from its own pool): it uses the
+    system browser."""
+    return {k: v for k, v in env.items() if k not in (LAUNCHER_ENV, browser.ENV)}
+
+
+def _start_background(acct: Account, name: str, prompt: str, cwd: str) -> int:
+    """The start check on the account's hub folder, then a session with no terminal named
+    `name`, in `cwd`, whose first message is `prompt`; the tool's own output passes through."""
+    prov = providers.get(acct.provider)
     hub = acct.config_dir.parent.parent
     if not hub_mod.present(hub, acct.id):
         _say(_no_hub(hub))
@@ -962,14 +1179,400 @@ def _pickup_background(rec: SessionRecord) -> int:
     except OSError as e:
         _say(f"cannot prepare {acct.id}'s folder in the hub ({e}); not started")
         return 1
-    cmd, env = prov.background(acct, f"pickup-{rec.id[:8]}", _pickup_prompt(rec, s.now))
-    env = {k: v for k, v in {**env, **_browser_env(hub, acct)}.items() if k != LAUNCHER_ENV}
-    _say(f"picking up {rec.id} on {acct.id} ({v.reason}), in the background")
+    cmd, env = prov.background(acct, name, prompt)
     try:
-        return subprocess.run(cmd, env=env, cwd=rec.cwd, stdin=subprocess.DEVNULL).returncode
+        return subprocess.run(cmd, env=_background_env(env), cwd=cwd,
+                              stdin=subprocess.DEVNULL).returncode
     except OSError as e:
         _say(f"cannot start {cmd[0]}: {e.strerror}")
         return 127 if isinstance(e, FileNotFoundError) else 126
+
+
+# --- Folder trust without a terminal: copy, never create (decision 21).
+
+def _copy_refused(here: Path) -> str | None:
+    """Why trust for the canonical folder `here` may not be copied, else None: never in HOME
+    (the provider keeps trust there per session), never where the user answered "only"."""
+    if here == Path.home().resolve():
+        return "fairshare writes no trust in HOME"
+    if store.trust_only(here):
+        return f"you answered \"only\" for {here} before, so fairshare copies no trust there"
+    return None
+
+
+def _trusting(accounts: list[Account], here: Path) -> list[Account]:
+    """The joined accounts (with a plan) whose state trusts `here`."""
+    return [a for a in accounts if a.plan is not None
+            and providers.get(a.provider).trusts(a.config_dir, here) is True]
+
+
+def _copy_trust(to: Account, source: Account, here: Path, hub: Path, tell) -> bool:
+    """Write trust for `here` into `to`'s state, as the provider's own dialog would (lock,
+    backup, read back), because `source` already trusts it. One line: through `tell` when
+    written, on stderr when not."""
+    try:
+        key = providers.get(to.provider).trust(to.config_dir, here,
+                                               hub_mod.backup_dir(hub, f"trust-{to.id}"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        _say(f"{to.id}: trust not written ({e})")
+        return False
+    tell(f"{to.id} now trusts {key} (copied from {source.id})")
+    return True
+
+
+def _start_here(candidates: list[Account], here: Path, accounts: list[Account],
+                hub: Path) -> Account | None:
+    """The first of `candidates` that trusts `here`, or that can get trust by copy (copied now,
+    one line); None when none can."""
+    refused, sources = _copy_refused(here), _trusting(accounts, here)
+    for c in candidates:
+        if any(t.id == c.id for t in sources):
+            return c
+        src = None if refused else next((t for t in sources if t.provider == c.provider), None)
+        if src and _copy_trust(c, src, here, hub, _say):
+            return c
+    return None
+
+
+def _why_untrusted(here: Path, accounts: list[Account]) -> str:
+    """Why trust could not be had for `here` without a terminal."""
+    if refused := _copy_refused(here):
+        return refused
+    if not _trusting(accounts, here):
+        return ("no account trusts it, so there is nothing to copy: start a session there from a "
+                "terminal and answer the trust question")
+    return "copying trust failed"
+
+
+def cmd_trust(a) -> int:
+    """Copy folder trust for PATH (default: here) from an account that trusts it to every
+    joined account that lacks it. Never creates trust, never in HOME, never where the user
+    answered "only". Needs no terminal."""
+    here = Path(a.path or os.getcwd()).expanduser().resolve()
+    if not here.is_dir():
+        _say(f"{here} is not a folder")
+        return 2
+    accounts, _, hub = _load()
+    _require_hub(hub)
+    if here == Path.home().resolve():
+        _say(f"{here} is HOME: {_copy_refused(here)} (each session there asks for itself)")
+        return 1
+    sources = _trusting(accounts, here)
+    lacking = [x for x in accounts if x.plan is not None and x not in sources]
+    if not lacking:
+        print(f"every account already trusts {here}; nothing to copy")
+        return 0
+    if refused := _copy_refused(here):
+        _say(f"{refused}; nothing copied")
+        return 1
+    if not sources:
+        _say(f"no account trusts {here}, and fairshare never creates trust: start a session "
+             "there from a terminal (`fairshare`) and answer the question")
+        return 1
+    failed = 0
+    for x in lacking:
+        src = next((t for t in sources if t.provider == x.provider), None)
+        if src is None:
+            _say(f"{x.id}: no account of its provider trusts {here}; nothing copied")
+            failed += 1
+        elif not _copy_trust(x, src, here, hub, print):
+            failed += 1
+    return 1 if failed else 0
+
+
+# --- Workers: background sessions a main session starts (decision 22).
+
+WORKER_LINE = ("You are a worker for session {parent}. When fairshare asks for a checkpoint, run "
+               'fairshare checkpoint "<what is done, what is next>".')
+JOIN_WAIT = 10.0       # seconds a new worker's session id is looked for by its name
+JOIN_POLL = 0.5        # seconds between looks
+JOIN_RETRY_S = 3600    # a worker still unjoined this long after its start is no longer looked for
+
+
+def _joined(w: Worker, session_id: str, now: float) -> None:
+    """Note a worker's session id, and mark its session record as a worker's."""
+    store.join_worker(w.name, session_id)
+    store.update_session(session_id, lambda old: replace(
+        old or SessionRecord(session_id, w.account, w.cwd, None, now),
+        role=ROLE_WORKER, parent=w.parent))
+
+
+def _join_pending(pending: list[Worker], accounts: list[Account], now: float) -> dict[str, str]:
+    """Look the unjoined workers among `pending` up by name, with one listing of the running
+    sessions; join each one found. {name: session id} of those joined."""
+    todo = [w for w in pending if w.session is None and now - w.started < JOIN_RETRY_S]
+    acct = next((a for w in todo for a in accounts if a.id == w.account), None)
+    live = acct and providers.get(acct.provider).list_sessions(acct)
+    found = {}
+    for w in todo:
+        if sid := next((x.id for x in live or [] if x.name == w.name), None):
+            _joined(w, sid, now)
+            found[w.name] = sid
+    return found
+
+
+def _join_new(w: Worker, accounts: list[Account]) -> str | None:
+    """A new worker's session id, looked for by its name for up to JOIN_WAIT seconds."""
+    end = _now() + JOIN_WAIT
+    while True:
+        if sid := _join_pending([w], accounts, w.started).get(w.name):
+            return sid
+        if _now() >= end:
+            return None
+        _sleep(JOIN_POLL)
+
+
+def _new_worker(parent: str, acct: Account, cwd: str, name: str | None) -> Worker | None:
+    """Record a new worker under `name`, or under the first free `w-<parent's first 8>-<n>`;
+    None when `name` is taken."""
+    now = _now()
+    for n in range(1, 10_000):
+        w = Worker(name or f"w-{parent[:8]}-{n}", parent, acct.id, cwd, now)
+        if store.add_worker(w):
+            return w
+        if name:
+            return None
+    return None
+
+
+def cmd_worker(a) -> int:
+    """Start a background session for the calling session: on --account, else the top eligible
+    account that trusts this folder or can get its trust by copy; named, recorded, and joined to
+    its session id by that name."""
+    prov = _provider()
+    if (parent := prov.current_session()) is None:
+        _say("not inside a session: a worker belongs to the session that starts it")
+        return 2
+    if a.name is not None and not ACCOUNT_ID.fullmatch(a.name):
+        _say(f"worker name {a.name!r}: use letters, digits, '.', '-' or '_'")
+        return 2
+    here = Path(os.getcwd()).resolve()
+    accounts, _, hub = _load()
+    _require_hub(hub)
+    if a.account:
+        chosen = next((x for x in accounts if x.id == a.account), None)
+        if chosen is None:
+            _say(f"no account '{a.account}' (configured: {', '.join(x.id for x in accounts)})")
+            return 2
+        if chosen.plan is None:
+            _say(f"{chosen.id}: {chosen.plan_error}")
+            return 1
+        candidates, why = [chosen], ""
+    else:
+        s = _survey()
+        candidates = [v.account for v in s.verdicts if v.eligible]
+        if not candidates:
+            _say("no account can take work now; no worker started")
+            return 1
+        why = {v.account.id: f" ({v.reason})" for v in s.verdicts}
+    acct = _start_here(candidates, here, accounts, hub)
+    if acct is None:
+        _say(f"{', '.join(c.id for c in candidates)} cannot work in {here}: "
+             f"{_why_untrusted(here, accounts)}; no worker started")
+        return 1
+    w = _new_worker(parent, acct, str(here), a.name)
+    if w is None:
+        _say(f"a worker named {a.name} is recorded already; choose another --name")
+        return 2
+    _say(f"starting worker {w.name} on {acct.id}{why and why[acct.id]}")
+    prompt = WORKER_LINE.format(parent=parent) + "\n\n" + a.prompt
+    if code := _start_background(acct, w.name, prompt, str(here)):
+        store.drop_worker(w.name)
+        return code
+    if sid := _join_new(w, accounts):
+        print(f"worker {w.name} started on {acct.id} (session {sid[:8]})")
+    else:
+        print(f"worker {w.name} started on {acct.id}; its session id is not known yet "
+              "(fairshare finds it by name later)")
+    return 0
+
+
+# --- Checkpoints: a session's own notes of where it stands, as files (decision 22).
+
+def _target_workers(target: str, here: str | None) -> list[Worker] | None:
+    """The workers `target` names: `all` (the calling session's), a worker's name, or its
+    session id or the start of one. None (said why) when it names none."""
+    if target == "all":
+        if here is None:
+            _say("`all` means this session's workers, and this is not inside a session")
+            return None
+        return store.workers(here)
+    if w := store.worker(target):
+        return [w]
+    found = [w for w in store.workers() if w.session and w.session.startswith(target)]
+    if len(found) != 1:
+        _say(f"no worker is named {target!r} or has a session starting with it"
+             if not found else f"{target!r} matches {len(found)} workers; give more of the id")
+        return None
+    return found
+
+
+def _request_checkpoints(target: str, here: str | None) -> int:
+    """Ask each named worker for a checkpoint: its hooks pass it on at its next event."""
+    found = _target_workers(target, here)
+    if found is None:
+        return 2
+    if not found:
+        print("this session has no workers")
+        return 0
+    accounts, now, left = _load()[0], _now(), 0
+    joined = _join_pending(found, accounts, now)
+    for w in found:
+        if (sid := w.session or joined.get(w.name)) is None:
+            print(f"{w.name}: its session id is not known yet; not asked (try again shortly)")
+            left += 1
+            continue
+        store.update_session(sid, lambda old: replace(
+            old or SessionRecord(sid, w.account, w.cwd, None, now, role=ROLE_WORKER,
+                                 parent=w.parent),
+            checkpoint_requested=now, request_said=None))
+        print(f"{w.name} (session {sid[:8]}): asked for a checkpoint")
+    return 1 if left else 0
+
+
+def _show_checkpoint(target: str) -> int:
+    """Print the checkpoint note of a session (its id or start) or of a worker (its name)."""
+    w = store.worker(target)
+    ids = [w.session] if w and w.session else [i for i in store.checkpointed()
+                                                 if i.startswith(target)]
+    if len(ids) != 1 or not (path := store.checkpoint_path(ids[0])) or not path.is_file():
+        _say(f"no checkpoint note for {target!r}" if len(ids) < 2
+             else f"{target!r} matches {len(ids)} notes; give more of the id")
+        return 1
+    print(path.read_text(encoding="utf-8"), end="")
+    return 0
+
+
+def cmd_checkpoint(a) -> int:
+    """`checkpoint TEXT`: append a note to this session's checkpoint file and clear its pending
+    request. `--request X`: ask workers for one. `--show X`: print a session's note."""
+    here = _provider().current_session()
+    if a.request:
+        return _request_checkpoints(a.request, here)
+    if a.show:
+        return _show_checkpoint(a.show)
+    if not a.text:
+        _say('say where you stand: fairshare checkpoint "<what is done, what is next>"')
+        return 2
+    if here is None:
+        _say("not inside a session: a checkpoint belongs to the session that writes it")
+        return 2
+    stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(_now()))
+    path = store.append_checkpoint(here, f"## {stamp}\n{a.text}\n")
+    store.update_session(here, lambda old: old and old.checkpoint_requested is not None and replace(
+        old, checkpoint_requested=None, request_said=None) or None)
+    print(path)
+    return 0
+
+
+# --- `fairshare watch`: a main session waits on it as a background command (decision 22).
+
+WATCH_LOCAL_S = 5.0    # seconds between looks at local state (snapshot, records, notes)
+WATCH_LIST_S = 15.0    # seconds between listings of the running sessions (a subprocess)
+
+
+def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tuning,
+                 now: float) -> list[str]:
+    """What concerns the session `here` in local state: a new crossing of its account, and per
+    worker a checkpoint written or a stop by its limit, since watch last said so. Said things
+    are marked on the session's record."""
+    events = []
+    if acct and acct.plan and (c := _tell_crossing(here, acct, t, now)):
+        events.append(_warning_text(store.session(here), acct, c, accounts, t, now))
+    found = []
+    for w in store.workers(here):
+        if not w.session:
+            continue
+        note = store.checkpoint_path(w.session)
+        size = note.stat().st_size if note and note.is_file() else 0
+        rec = store.session(w.session)
+        found.append((w, note, size, rec and rec.stranded_at, rec and rec.account))
+
+    def change(old: SessionRecord | None) -> SessionRecord | None:
+        if old is None:
+            return None
+        seen, said = dict(old.reported), []
+        for w, note, size, stranded, account in found:
+            if size > seen.get(f"checkpoint:{w.session}", 0):
+                seen[f"checkpoint:{w.session}"] = size
+                said.append(f"worker {w.name} wrote a checkpoint: {note}")
+            if stranded and seen.get(f"stranded:{w.session}") != stranded:
+                seen[f"stranded:{w.session}"] = stranded
+                said.append(f"worker {w.name} was stopped by {account}'s limit: fairshare pickup "
+                            f"{w.session}")
+        events.extend(said)
+        return replace(old, reported=seen) if said else None
+    store.update_session(here, change)
+    return events
+
+
+def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
+    """From the running sessions: each worker of `here` that ended (no longer listed) or went
+    idle after it was seen busy, once each; pending joins are retried first."""
+    mine = store.workers(here)
+    if not mine:
+        return []
+    joined = _join_pending(mine, accounts, now)
+    mine = [replace(w, session=w.session or joined.get(w.name)) for w in mine]
+    acct = next((a for w in mine for a in accounts if a.id == w.account), None)
+    live = acct and providers.get(acct.provider).list_sessions(acct)
+    if live is None:
+        return []
+    state = {x.id: x.busy for x in live}
+    events = []
+
+    def change(old: SessionRecord | None) -> SessionRecord | None:
+        if old is None:
+            return None
+        seen, said = dict(old.reported), []
+        for w in (w for w in mine if w.session):
+            ended, busy = f"ended:{w.session}", f"busy:{w.session}"
+            if w.session not in state:
+                if not seen.get(ended):
+                    seen[ended] = 1
+                    said.append(f"worker {w.name} ended")
+                continue
+            seen.pop(ended, None)
+            if state[w.session]:
+                seen[busy] = 1
+            elif state[w.session] is False and seen.pop(busy, None):
+                said.append(f"worker {w.name} went idle")
+        events.extend(said)
+        return replace(old, reported=seen) if seen != old.reported else None
+    store.update_session(here, change)
+    return events
+
+
+def cmd_watch(a) -> int:
+    """Block until something concerns the calling session, print one line per event and exit 0;
+    `nothing happened` when --timeout runs out. Local state every WATCH_LOCAL_S seconds, the
+    running sessions every WATCH_LIST_S. Writes only what it said (and joins) on the session's
+    record, so a restarted watch does not repeat itself."""
+    if (here := _provider().current_session()) is None:
+        _say("not inside a session: watch waits for what concerns the session that runs it")
+        return 2
+    accounts, tuning, _ = _load()
+    start = _now()
+    rec = store.session(here)
+    acct = next((x for x in accounts if rec and x.id == rec.account), None) \
+        or _session_account(accounts)
+    if rec is None:
+        rec = store.note_session(SessionSeen(here), acct.id if acct else "", start)
+    next_list = start
+    while True:
+        now = _now()
+        events = _watch_local(here, acct, accounts, tuning, now)
+        if now >= next_list:
+            events += _watch_live(here, accounts, now)
+            next_list = now + WATCH_LIST_S
+        if events:
+            print("\n".join(events))
+            return 0
+        if a.timeout is not None and now >= start + a.timeout:
+            print("nothing happened")
+            return 0
+        _sleep(WATCH_LOCAL_S if a.timeout is None else min(WATCH_LOCAL_S,
+                                                            start + a.timeout - now))
 
 
 def cmd_transcript(a) -> int:
@@ -983,8 +1586,23 @@ def cmd_transcript(a) -> int:
         _say(f"{rec.transcript}: could not be read, or its layout was not understood; "
              "nothing shown")
         return 1
-    print("\n\n".join(f"{role}: {text}" for role, text in said[-a.tail:]))
+    print("\n\n".join(_block(role, text) for role, text in said[-a.tail:]))
     return 0
+
+
+OUTPUT_LINES = 20      # a command's output in `fairshare transcript` shows at most this many lines
+
+
+def _block(role: str, text: str) -> str:
+    """One message of `fairshare transcript`; a command the user ran and its output, shortened."""
+    if role == "command":
+        return f"user ran: {text}"
+    if role == "output":
+        lines = text.splitlines()
+        more = len(lines) - OUTPUT_LINES
+        return "output:\n" + "\n".join(lines[:OUTPUT_LINES]) + (
+            f"\n… ({more} more lines)" if more > 0 else "")
+    return f"{role}: {text}"
 
 
 def _duration(text: str) -> float:
@@ -1119,6 +1737,38 @@ def _wire(prov, hub: Path, installed: str) -> str | None:
 def _wire_hub(prov, hub: Path, installed: str) -> None:
     if note := _wire(prov, hub, installed):
         print(f"usage hook: {note}")
+    if note := _install_skill(prov, hub):
+        print(f"skill: {note}")
+
+
+def _skill_state(prov, hub: Path) -> tuple[Path, str, str | None, str]:
+    """fairshare's skill in the hub: its place, the shipped text, what is there (None: nothing),
+    and a word for it: current, missing, outdated or foreign (someone else's skill)."""
+    dest, text = prov.skill(hub_mod.shared_dir(hub))
+    there = _read(dest) if dest.exists() else None
+    word = ("missing" if there is None else "current" if there == text
+            else "outdated" if prov.own_skill(there) else "foreign")
+    return dest, text, there, word
+
+
+def _install_skill(prov, hub: Path) -> str | None:
+    """Install or refresh fairshare's skill in the hub, its diff shown first; another skill of
+    that name is never touched. What happened, or None when it was current."""
+    dest, text, there, word = _skill_state(prov, hub)
+    if word == "current":
+        return None
+    if word == "foreign":
+        return f"{dest} is not fairshare's skill; left alone"
+    print(hub_mod.diff(prov, dest.name, (there or "").encode(), text.encode(),
+                       f"{dest.name} (fairshare's skill)").rstrip("\n"))
+
+    def change(old: str | None) -> str | None:
+        if old == text:
+            return None
+        if old is not None and not prov.own_skill(old):
+            raise ValueError("not fairshare's skill")
+        return text
+    return hub_mod.edit_shared(hub, dest, change, "skill")
 
 
 def _copy_state(prov, source: Path, account: Account, hub: Path) -> None:
@@ -1568,6 +2218,9 @@ def _fix(hub_arg: Path | None) -> bool:
                            f"usage hook: {note or 'unchanged'}")
             except ValueError as e:
                 report(False, f"usage hook: {settings} {e}; left as it is")
+        if (_skill_state(prov, hub)[3]) != "current":
+            note = _install_skill(prov, hub)
+            report(bool(note and note.startswith("updated")), f"skill: {note}")
         if old is not None:
             text = _read(settings)
             try:
@@ -1666,11 +2319,16 @@ def _doctor() -> int:
         if cap:
             callers.setdefault(cap.runner, []).append(prov.name)
         runner = prov.hooked(text)
-        check(runner is not None, f"{prov.name}: stop-failure hook in the hub "
-              + ("calls fairshare hook" if runner else "does not call fairshare hook "
-                                                      "(run `fairshare doctor --fix`)"))
+        check(runner is not None, f"{prov.name}: hooks in the hub ({', '.join(HOOKS)}) "
+              + ("call fairshare hook" if runner else "do not all call fairshare hook "
+                                                     "(run `fairshare doctor --fix`)"))
         if runner and runner not in callers:
             callers[runner] = []
+        where, _, _, word = _skill_state(prov, hub)
+        check(word == "current", f"{prov.name}: skill in the hub is " + {
+            "current": "current", "missing": "missing (run `fairshare doctor --fix`)",
+            "outdated": "outdated (run `fairshare doctor --fix`)",
+            "foreign": f"not fairshare's: {where.parent.name}/ holds another skill"}[word])
     if not callers and (installed := _installed()):
         callers[(installed,)] = []
     if not callers:
@@ -1741,6 +2399,28 @@ def main(argv: list[str] | None = None) -> int:
     tp.add_argument("--tail", type=_positive, default=40, metavar="N",
                     help="the last N messages (default 40)")
     tp.set_defaults(f=cmd_transcript)
+    sp = sub.add_parser("trust", help="copy folder trust from an account that has it to the "
+                        "accounts that lack it (never creates trust)")
+    sp.add_argument("path", nargs="?", metavar="PATH", help="default: the current folder")
+    sp.set_defaults(f=cmd_trust)
+    wp = sub.add_parser("worker", help="inside a session: start a background worker session")
+    wp.add_argument("--account", metavar="ID", help="default: the best account")
+    wp.add_argument("--name", help="default: w-<first 8 of this session>-<n>")
+    wp.add_argument("prompt", metavar="PROMPT")
+    wp.set_defaults(f=cmd_worker)
+    cq = sub.add_parser("checkpoint", help="inside a session: note where it stands; "
+                        "--request asks workers for one, --show prints a note")
+    cq.add_argument("text", nargs="?", metavar="TEXT")
+    one = cq.add_mutually_exclusive_group()
+    one.add_argument("--request", metavar="SESSION|NAME|all",
+                     help="ask a worker (or all of this session's) for a checkpoint")
+    one.add_argument("--show", metavar="SESSION|NAME", help="print a session's checkpoint note")
+    cq.set_defaults(f=cmd_checkpoint)
+    ap = sub.add_parser("watch", help="inside a session: wait until something concerns it "
+                        "(its account's limit, its workers), then say what")
+    ap.add_argument("--timeout", type=_positive, metavar="SECONDS",
+                    help="give up after this long: `nothing happened`")
+    ap.set_defaults(f=cmd_watch)
     rp = sub.add_parser("probe", help=argparse.SUPPRESS)  # capture starts it in the background
     rp.add_argument("id")
     rp.set_defaults(f=cmd_probe)

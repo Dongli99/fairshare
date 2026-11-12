@@ -12,7 +12,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from .model import SessionRecord, SessionSeen, Snapshot, Window
+from .model import SessionRecord, SessionSeen, Snapshot, Window, Worker
 
 
 def config_path() -> Path:
@@ -149,14 +149,35 @@ def _sessions() -> Path:
     return state_dir() / "sessions"
 
 
+def _num(v: object) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _text(v: object) -> str | None:
+    return v if isinstance(v, str) and v else None
+
+
 def _read_session(path: Path) -> SessionRecord | None:
     try:
         d = json.loads(path.read_text())
         return SessionRecord(path.stem, str(d["account"]), d.get("cwd"), d.get("transcript"),
                              float(d["seen"]), None if d.get("stranded_at") is None
-                             else float(d["stranded_at"]))
+                             else float(d["stranded_at"]), _text(d.get("role")),
+                             _text(d.get("parent")),
+                             _num(d.get("checkpoint_requested")), _num(d.get("request_said")),
+                             d["warned"] if isinstance(d.get("warned"), dict) else {},
+                             d["reported"] if isinstance(d.get("reported"), dict) else {})
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
+
+
+_SESSION_BASE = ("account", "cwd", "transcript", "seen", "stranded_at")
+
+
+def _write_session(dest: Path, rec: SessionRecord) -> None:
+    """The record's file: the base fields always, the others only when set."""
+    _write_json(dest, f"{rec.id}.json", {k: v for k, v in vars(rec).items()
+                                         if k in _SESSION_BASE or (k != "id" and v)})
 
 
 def session(session_id: str) -> SessionRecord | None:
@@ -172,32 +193,140 @@ def sessions() -> list[SessionRecord]:
     return [r for p in found if (r := _read_session(p))]
 
 
+def _drop_old(dest: Path, now: float) -> None:
+    for p in dest.glob("*.json"):
+        if (r := _read_session(p)) and now - r.seen > SESSION_KEEP_S:
+            with contextlib.suppress(OSError):
+                p.unlink()
+
+
 def note_session(seen: SessionSeen, account_id: str, now: float,
                  stranded: bool | None = None) -> SessionRecord | None:
     """Record that `seen` runs on `account_id`, keeping its folder and transcript (a field the
-    provider left out keeps its old value). `stranded` True marks it stopped by its account's
-    limit now, False clears that, None leaves it. Written only when it is new or changed, or
-    last seen SESSION_WRITE_S ago or more, so a redraw costs no write; each write drops the
-    records unseen for SESSION_KEEP_S. Under a lock: a hook and a usage hook may arrive
-    together. None for an id that cannot be a file name."""
+    provider left out keeps its old value) and every other field. `stranded` True marks it
+    stopped by its account's limit now, False clears that, None leaves it. Written only when it
+    is new or changed, or last seen SESSION_WRITE_S ago or more, so a redraw costs no write;
+    each write drops the records unseen for SESSION_KEEP_S. Under a lock: a hook and a usage
+    hook may arrive together. None for an id that cannot be a file name."""
     if not _SESSION_ID.fullmatch(seen.id):
         return None
     dest = _sessions()
     dest.mkdir(parents=True, exist_ok=True)
     with locked(dest / ".lock"):
         old = _read_session(dest / f"{seen.id}.json")
-        new = SessionRecord(seen.id, account_id, seen.cwd or (old and old.cwd),
-                            seen.transcript or (old and old.transcript), now,
-                            now if stranded else None if stranded is False
-                            else old and old.stranded_at)
+        new = replace(old or SessionRecord(seen.id, account_id, None, None, now),
+                      account=account_id, cwd=seen.cwd or (old and old.cwd),
+                      transcript=seen.transcript or (old and old.transcript), seen=now,
+                      stranded_at=now if stranded else None if stranded is False
+                      else old and old.stranded_at)
         if old and replace(old, seen=now) == new and now - old.seen < SESSION_WRITE_S:
             return old
-        _write_json(dest, f"{seen.id}.json", {k: v for k, v in vars(new).items() if k != "id"})
+        _write_session(dest, new)
+        _drop_old(dest, now)
+    return new
+
+
+def update_session(session_id: str, change) -> SessionRecord | None:
+    """Apply `change` (the record, or None when there is none -> the new record, or None for no
+    change) under the sessions' lock, so a hook and `watch` cannot both act on the old record.
+    The record as it stands afterwards (None when there is none)."""
+    if not _SESSION_ID.fullmatch(session_id):
+        return None
+    dest = _sessions()
+    dest.mkdir(parents=True, exist_ok=True)
+    with locked(dest / ".lock"):
+        old = _read_session(dest / f"{session_id}.json")
+        new = change(old)
+        if new is None or new == old:
+            return old
+        _write_session(dest, new)
+    return new
+
+
+def _workers() -> Path:
+    return state_dir() / "workers"
+
+
+def _read_worker(path: Path) -> Worker | None:
+    try:
+        d = json.loads(path.read_text())
+        return Worker(path.stem, str(d["parent"]), str(d["account"]), str(d["cwd"]),
+                      float(d["started"]), _text(d.get("session")))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _save_worker(w: Worker) -> None:
+    _write_json(_workers(), f"{w.name}.json", {k: v for k, v in vars(w).items() if k != "name"})
+
+
+def add_worker(w: Worker) -> bool:
+    """Record a new worker; False when a worker of that name is recorded already (its name
+    must be unique: it is how its session is found). Drops the records started SESSION_KEEP_S
+    ago or more."""
+    if not _SESSION_ID.fullmatch(w.name):
+        return False
+    dest = _workers()
+    dest.mkdir(parents=True, exist_ok=True)
+    with locked(dest / ".lock"):
         for p in dest.glob("*.json"):
-            if (r := _read_session(p)) and now - r.seen > SESSION_KEEP_S:
+            if (old := _read_worker(p)) and w.started - old.started > SESSION_KEEP_S:
                 with contextlib.suppress(OSError):
                     p.unlink()
-    return new
+        if (dest / f"{w.name}.json").exists():
+            return False
+        _save_worker(w)
+    return True
+
+
+def drop_worker(name: str) -> None:
+    """Forget a worker that never started."""
+    with contextlib.suppress(OSError), locked(_workers() / ".lock"):
+        (_workers() / f"{name}.json").unlink()
+
+
+def worker(name: str) -> Worker | None:
+    if not _SESSION_ID.fullmatch(name):
+        return None
+    return _read_worker(_workers() / f"{name}.json")
+
+
+def workers(parent: str | None = None) -> list[Worker]:
+    """The recorded workers (of the main session `parent`, when given), oldest first."""
+    found = sorted(_workers().glob("*.json")) if _workers().is_dir() else []
+    return sorted((w for p in found if (w := _read_worker(p))
+                   and (parent is None or w.parent == parent)), key=lambda w: (w.started, w.name))
+
+
+def join_worker(name: str, session_id: str) -> None:
+    """Note the session id a worker turned out to have."""
+    with locked(_workers() / ".lock"):
+        if (w := worker(name)) and w.session != session_id:
+            _save_worker(replace(w, session=session_id))
+
+
+def _checkpoints() -> Path:
+    return state_dir() / "checkpoints"
+
+
+def checkpoint_path(session_id: str) -> Path | None:
+    """Where a session's checkpoint note is (it may not exist); None for a bad id."""
+    return _checkpoints() / f"{session_id}.md" if _SESSION_ID.fullmatch(session_id) else None
+
+
+def checkpointed() -> list[str]:
+    """The ids of the sessions that have a checkpoint note."""
+    return sorted(p.stem for p in _checkpoints().glob("*.md")) if _checkpoints().is_dir() else []
+
+
+def append_checkpoint(session_id: str, text: str) -> Path:
+    """Append `text` to the session's checkpoint note, under a lock; never rewrites it."""
+    path = checkpoint_path(session_id)
+    if path is None:
+        raise ValueError(f"not a session id: {session_id!r}")
+    with locked(_checkpoints() / ".lock"), open(path, "a", encoding="utf-8") as f:
+        f.write(text)
+    return path
 
 
 def _requests() -> Path:

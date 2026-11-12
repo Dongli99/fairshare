@@ -54,6 +54,11 @@ Known limit: below the "nearly full" line, short-window usage plays no part in t
    arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` starts the account
    `work` instead, skipping the ranking (a warning if it is near a limit); this replaces a
    per-account alias. For a shorter name, make your own alias for `fairshare`.
+   When the choice is close (the chosen account is nearly spent, the next one is within 10% of
+   it, or a warning was printed), `fairshare` pauses for a moment on a terminal: it lists the
+   accounts that can take work and shows `starting a in 3 s · Enter = now · 1-2 = that account ·
+   q = quit`. Set `launch_pause = 0` under `[policy]` in `accounts.toml` to turn it off (or
+   another number of seconds); `run -a` and pickups never pause.
 5. Use each account normally. Every launch asks each account for its usage (below), and every
    session refreshes its account's snapshot as it goes.
 
@@ -98,14 +103,51 @@ fairshare wires in the hub's settings), the session is marked as stopped, and:
 - the status bar ends in a red `out · ! fairshare pickup` while that account cannot take work.
   Typing `! fairshare pickup` in the session asks its launcher to move it now (no check that the
   account is out: you asked); in a session not started by `fairshare`, it starts the
-  continuation in the background instead (`claude --bg`, on the best account that already
-  trusts the folder; Claude Code prints how to attach to it) and leaves your session alone;
+  continuation in the background instead (`claude --bg`, on the best account that trusts the
+  folder or can get that trust copied from another account; Claude Code prints how to attach to
+  it; background sessions open links in the system browser) and leaves your session alone;
 - from a terminal, `fairshare pickup <id>` (the session id or its first characters) continues a
   recorded session in the foreground, in its folder; `--bg` does it in the background.
 
 fairshare never stops a session it did not start. `fairshare transcript <id> [--tail N]` prints
 what a recorded session said (the last 40 messages by default), words only: no tool calls,
-tool output or thinking.
+tool output or thinking. A `!` command you typed shows as `user ran: <command>` and its output
+as `output:`, at most 20 lines.
+
+**Working with workers.** A session started by `fairshare` is the *main* session: it hears
+fairshare's warnings and decides for itself and its workers. Small, short work can go to a
+subagent as usual (fairshare tells subagents nothing). Big or long work goes to a *worker*, a
+background Claude Code session that can be stopped, moved and picked up on its own. fairshare
+installs a skill in the hub (`skills/fairshare/`) that teaches the main session all of this; you
+can also run the commands yourself, from inside a session:
+- `fairshare worker "<prompt>"` starts one on the best account (`--account ID` to choose,
+  `--name NAME` to name it; default `w-<first 8 of this session>-<n>`) in the current folder and
+  prints `worker w-1a2b3c4d-1 started on b (session 9f8e7d6c)`. Its prompt starts with one line
+  telling it to checkpoint when asked.
+- `fairshare watch` waits until something concerns this session and prints one line per event:
+  its account crossed 90% or 95%, a worker wrote a checkpoint (with the note's path), a worker
+  was stopped by its limit (with `fairshare pickup <id>`), or a worker ended or went idle. The
+  main session keeps it running as a background command and starts it again after each event;
+  `--timeout SECONDS` gives up with `nothing happened`.
+- `fairshare checkpoint "<what is done, what is next>"` appends a dated note to this session's
+  checkpoint file (in fairshare's state folder) and prints its path; a later pickup of the
+  session reads it first. `fairshare checkpoint --request <worker name | session | all>` asks
+  workers for one (each hears it at its next step); `--show <worker or session>` prints a note.
+- A worker stopped by its limit: `fairshare pickup <its session id>` continues it on the best
+  account, in the background. To move the main session itself: write a checkpoint, then
+  `fairshare pickup`.
+
+**What the warnings say.** When the session's account crosses 90%, and again 95%, of a window
+(once each per window and session; a new window starts over), fairshare adds one line to the
+session's context at its next step (Claude Code's `PostToolUse` and `UserPromptSubmit` hooks,
+which fairshare wires in the hub). A main session reads, for example: `fairshare: account a is
+at 91% of its 5h window (resets 11:00). Best other account: b (5h 10% · 7d 40%). If what is left
+of your work is small, carry on. Otherwise, at the next stopping point: write a checkpoint ...
+and run fairshare pickup to continue on the best account. Workers you started: ...`. A worker
+reads that it should finish its current step and checkpoint, and that its main session decides
+what happens next. Subagents hear nothing. Numbers older than twice `refresh_minutes` warn
+nothing (fairshare asks for fresh ones instead). The hook reads only local files; with nothing
+to say it prints nothing and takes well under a tenth of a second.
 
 **Fresher usage in a session.** A snapshot's time now says when its numbers were last known to
 be current: a status bar that redraws the same numbers no longer makes them look fresh. When
@@ -151,6 +193,14 @@ keeps trust there for one session only, by design), and without a terminal it as
 Claude Code asks for itself. What it writes is exactly what Claude Code's own "Yes, I trust this
 folder" writes, in the same place, with a backup in `<hub>/backups/`.
 
+Without a terminal fairshare never creates trust, but it may *copy* it: `fairshare trust
+[PATH]` (default: the current folder) gives every account that lacks trust for that folder the
+trust another account already has, one line per account (`b now trusts /path (copied from
+a)`). It refuses in your home folder, for a folder where you answered `[o]` only, and when no
+account trusts the folder yet (then start a session there from a terminal and answer the
+question). A worker start and a background pickup copy trust the same way to the one account
+about to start.
+
 **Browser per account.** If you keep each account in its own browser profile, join (and setup)
 asks which one opens that account's sign-in: the default browser, one of your Chrome profiles
 (listed by name), or a command. It is stored as one line in the account's table in
@@ -186,9 +236,10 @@ the file and line, not a traceback.
 `fairshare doctor` checks the setup and changes nothing: the `claude` command is found (with its
 version), `accounts.toml` loads, the hub is where it is configured, each account's plan exists,
 its sign-in check answers (with the date the sign-in ends), its usage probe answers (or is off)
-and its `.claude.json` still holds folder trust where fairshare expects it, the hub's statusLine still calls capture, its stop-failure hook still calls `fairshare hook`, and the `fairshare` command they call runs.
+and its `.claude.json` still holds folder trust where fairshare expects it, the hub's statusLine still calls capture, its three hooks (stop-failure, post-tool, prompt) still call `fairshare hook`, fairshare's skill in the hub is current, and the `fairshare` command they call runs.
 One line per check; exit 0 when all pass. `fairshare doctor --fix` repairs what it can first
-(a moved hub, missing links, a stale or missing hook), one line per fix.
+(a moved hub, missing links, a stale or missing hook, a missing or outdated skill, shown as a
+diff), one line per fix.
 
 `fairshare uninstall` changes nothing (there is nothing to undo in your own folders): it says
 where the config, state and hub are and what the hub holds, how to remove the installed

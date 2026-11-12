@@ -60,6 +60,23 @@ SECRETS = ("s3cr3t-value", "mcp-secret-value", "example.invalid", "org-", "Examp
            "user-work")
 
 
+def own_hooks(runner: str) -> dict:
+    """fairshare's three hooks as `wire` writes them, running `runner`."""
+    return {"StopFailure": [{"matcher": "rate_limit", "hooks": [
+                {"type": "command", "command": f"{runner} hook stop-failure"}]}],
+            "PostToolUse": [{"matcher": "*", "hooks": [
+                {"type": "command", "command": f"{runner} hook post-tool"}]}],
+            "UserPromptSubmit": [{"hooks": [
+                {"type": "command", "command": f"{runner} hook prompt"}]}]}
+
+
+OWN_HOOKS_TEXT = ('{"StopFailure": [{"matcher": "rate_limit", "hooks": [{"type": "command", '
+                  '"command": "{r} hook stop-failure"}]}], "PostToolUse": [{"matcher": "*", '
+                  '"hooks": [{"type": "command", "command": "{r} hook post-tool"}]}], '
+                  '"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "{r} hook '
+                  'prompt"}]}]}')
+
+
 def write(p: Path, text: str) -> Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text)
@@ -305,9 +322,7 @@ class Join(UserFolders):
                          {"statusLine": {"type": "command",
                                          "command": f"{self.bin}/fairshare capture",
                                          "refreshInterval": 60},
-                          "hooks": {"StopFailure": [{"matcher": "rate_limit", "hooks": [
-                              {"type": "command",
-                               "command": f"{self.bin}/fairshare hook stop-failure"}]}]}})
+                          "hooks": own_hooks(f"{self.bin}/fairshare")})
         self.assertEqual(store.subscription_seen("account-1")[0], True)
         self.asked.assert_not_called()
         self.assert_untouched()
@@ -752,23 +767,20 @@ class Pure(unittest.TestCase):
         self.assertEqual(new, self.THEIRS.replace('"~/l.sh \'a b\'"',
                                                   '"/bin/fairshare capture --then \'~/l.sh \'\\"\'\\"\'a b\'\\"\'\\"\'\'"')
                          .replace('"padding": 0}', '"padding": 0, "refreshInterval": 60}')
-                         .replace('}\n}\n', '},\n  "hooks": {"StopFailure": [{"matcher": "rate_limit", '
-                                  '"hooks": [{"type": "command", "command": "/bin/fairshare hook '
-                                  'stop-failure"}]}]}\n}\n'))
+                         .replace('}\n}\n', '},\n  "hooks": '
+                                  + OWN_HOOKS_TEXT.replace("{r}", "/bin/fairshare") + '\n}\n'))
         self.assertEqual(claude.wired(new), Capture(("/bin/fairshare",), "~/l.sh 'a b'"))
         self.assertIsNone(claude.wire(new, "/bin/fairshare"))             # already wired
 
     def test_wire_adds_a_hook_where_there_is_none(self):
         self.assertEqual(claude.wire('{\n  "theme": "dark"\n}\n', "fairshare"),
                          '{\n  "theme": "dark",\n  "statusLine": {"type": "command", "command": '
-                         '"fairshare capture", "refreshInterval": 60},\n  "hooks": {"StopFailure": '
-                         '[{"matcher": "rate_limit", "hooks": [{"type": "command", "command": '
-                         '"fairshare hook stop-failure"}]}]}\n}\n')
+                         '"fairshare capture", "refreshInterval": 60},\n  "hooks": '
+                         + OWN_HOOKS_TEXT.replace("{r}", "fairshare") + '\n}\n')
         self.assertEqual(json.loads(claude.wire(None, "f")),
                          {"statusLine": {"type": "command", "command": "f capture",
                                          "refreshInterval": 60},
-                          "hooks": {"StopFailure": [{"matcher": "rate_limit", "hooks": [
-                              {"type": "command", "command": "f hook stop-failure"}]}]}})
+                          "hooks": own_hooks("f")})
         self.assertEqual(json.loads(claude.wire("{}", "f"))["statusLine"]["command"], "f capture")
 
     def test_an_older_capture_is_replaced_and_keeps_what_it_wrapped(self):
