@@ -418,8 +418,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       per launch. `disableAllHooks` through `--settings` stops them, and beats a folder's own
       `settings.json` that sets it false (verified 2.1.322, 2026-11-11).
     - **Recorded like a capture.** Each answer's windows go through `store.record` (same lock,
-      same merge: a lower value for the same window is still refused, since usage never falls
-      within one window), as a probe: the snapshot's time moves even when nothing changed. Then the snapshots are loaded and ranked as before; the policy does not
+      same merge), as a probe: the snapshot's time moves even when nothing changed, and a
+      lower value for the same window is taken when it falls by more than rounding (1 point;
+      the provider can credit usage back within a window), under the stored exact reset. Then the snapshots are loaded and ranked as before; the policy does not
       change. Twins (one login in several folders) are each probed. `doctor` probes and records
       nothing. `run`'s wait loop re-surveys after each sleep, so it probes again at the reset.
     - **Parsing.** Only lines starting with a known label are read (`USAGE_SESSION`,
@@ -796,9 +797,13 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 - The usage probe's "not signed in" is read from the cost summary a signed-out folder prints
   instead; an API-key login presumably prints the same (not verified), but such an account is
   already left out by the sign-in check.
-- Idle sessions redraw their statusLine with old values. Within one window (reset times within
-  an hour of each other) a lower used % is treated as stale and the stored one kept, so usage
-  cannot roll back; an idle redraw of unchanged values leaves the snapshot's time (decision 20).
+- Idle sessions redraw their statusLine with old values. A capture passes on only the windows
+  that changed since that session last drew them on that account (its record's `drawn`; all
+  of them on its first draw there), so a repeat says nothing, even after a probe lowered the
+  stored value. Within one window (reset times within an hour of each other) a lower used %
+  from a capture is still treated as stale and the stored one kept; only the probe can lower
+  it (usage can fall within a window when the provider credits some back). An idle redraw of
+  unchanged values leaves the snapshot's time (decision 20).
 - An account at 100% of its short window that resets within `grace_hours` is eligible by the
   policy (for new launches). For a session the provider already stopped, pickup does not wait
   for that reset: a plan window spent right now confirms the pickup and shows the bar mark

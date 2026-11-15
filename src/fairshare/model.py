@@ -132,6 +132,8 @@ class SessionRecord:
                                                 # time it fell) of [time, cost], see store.add_cost
     continues: str | None = None      # the session this one continues under a new id
     moved_to: str | None = None       # the session that continues this one (store.link_session)
+    drawn: dict = field(default_factory=dict)   # the windows its usage hook last drew:
+                                                # {account: {key: [used_pct, resets_at]}}
 
 
 ROLE_WORKER = "worker"

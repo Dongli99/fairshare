@@ -98,6 +98,31 @@ class Sessions(Base):
         self.capture(rate_limits={"seven_day": {"used_percentage": 40, "resets_at": 4e9}})
         self.assertEqual(self.out, "a · 5h - · 7d 40%\n")
 
+    def week(self, sid, pct):
+        self.clock[0] += 1
+        self.capture(sid=sid, rate_limits={"seven_day": {"used_percentage": pct,
+                                                         "resets_at": 4e9}})
+        return store.load("a").windows["seven_day"].used_pct
+
+    def test_a_session_redrawing_what_it_drew_last_says_nothing_new(self):
+        """An idle session open across a credit-back keeps redrawing its old number; once a
+        probe has the lower one, that redraw must not put the old number back."""
+        self.assertEqual(self.week("idle", 82), 82)               # its first draw counts
+        store.record("a", {"seven_day": Window(34, 4e9)}, self.clock[0], probe=True)
+        self.assertEqual(self.week("idle", 82), 34)               # unchanged since: ignored
+        self.assertEqual(store.session("idle").drawn, {"a": {"seven_day": [82, 4e9]}})
+        self.assertEqual(self.week("active", 36), 36)             # another session's news
+        self.assertEqual(self.week("idle", 83), 83)               # its own number moved: news
+
+    def test_a_session_moved_to_another_account_draws_anew_there(self):
+        seen = SessionSeen("s")
+        self.assertEqual(store.drawn_news(seen, "a", {"seven_day": Window(50, 4e9)}, T0),
+                         {"seven_day": Window(50, 4e9)})
+        self.assertEqual(store.drawn_news(seen, "a", {"seven_day": Window(50, 4e9)}, T0), {})
+        store.move_session("s", "b")
+        self.assertEqual(store.drawn_news(seen, "b", {"seven_day": Window(50, 4e9)}, T0),
+                         {"seven_day": Window(50, 4e9)})
+
 
 class Wiring(unittest.TestCase):
     """fairshare's StopFailure hook and the statusLine's refresh, in the hub's settings."""

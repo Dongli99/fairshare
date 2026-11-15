@@ -220,6 +220,16 @@ def total_cost(series: list) -> float | None:
     return sum(seg[-1][1] for seg in series) if series else None
 
 
+def _drawn(v: object) -> dict:
+    """Drawn windows as stored; {} for anything that is not them."""
+    if not isinstance(v, dict) or not all(
+            isinstance(ws, dict) and all(isinstance(w, list) and len(w) == 2
+                                         and all(_num(x) is not None for x in w)
+                                         for w in ws.values()) for ws in v.values()):
+        return {}
+    return v
+
+
 def _read_session(path: Path) -> SessionRecord | None:
     try:
         d = json.loads(path.read_text())
@@ -233,7 +243,7 @@ def _read_session(path: Path) -> SessionRecord | None:
                              _text(d.get("model")), _text(d.get("model_name")),
                              _text(d.get("effort")), _num(d.get("waiting_until")),
                              _costs(d.get("costs")), _text(d.get("continues")),
-                             _text(d.get("moved_to")))
+                             _text(d.get("moved_to")), _drawn(d.get("drawn")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -317,6 +327,26 @@ def update_session(session_id: str, change) -> SessionRecord | None:
             return old
         _write_session(dest, new)
     return new
+
+
+def drawn_news(seen: SessionSeen, account_id: str, fresh: dict[str, Window],
+               now: float) -> dict[str, Window]:
+    """The windows in a usage hook's `fresh` that are news: changed since this session last
+    drew them on `account_id` (all of them on its first draw there). An idle session redraws
+    the last values it received, so a window it repeats says nothing, however it compares with
+    the snapshot (after a probe that lowered it, say). Each draw is kept in the session's
+    record (created when there is none), written only when it changed."""
+    def change(old: SessionRecord | None) -> SessionRecord:
+        rec = old or SessionRecord(seen.id, account_id, seen.cwd, seen.transcript, now)
+        drawn = {k: [w.used_pct, w.resets_at] for k, w in fresh.items()}
+        before = rec.drawn.get(account_id, {})
+        news.update({k: w for k, w in fresh.items() if before.get(k) != drawn[k]})
+        return replace(rec, drawn={account_id: drawn})
+    news: dict[str, Window] = {}
+    if not _SESSION_ID.fullmatch(seen.id):
+        return dict(fresh)
+    update_session(seen.id, change)
+    return news
 
 
 def move_session(session_id: str, account_id: str) -> SessionRecord | None:

@@ -430,8 +430,10 @@ def cmd_capture(a) -> int:
         payload = json.loads(raw)
         fresh = acct and prov.parse_capture(payload)
         now = _now()
-        snap = store.record(acct.id, fresh, now) if fresh else acct and store.load(acct.id)
         seen = acct and prov.session_of(payload)
+        if fresh and seen:
+            fresh = store.drawn_news(seen, acct.id, fresh, now)
+        snap = store.record(acct.id, fresh, now) if fresh else acct and store.load(acct.id)
         if seen:
             with contextlib.suppress(OSError):
                 out = _stranded(acct, seen, snap, tuning, now)
