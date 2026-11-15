@@ -90,6 +90,25 @@ class StaleRedraw(unittest.TestCase):
         m = store.merge(self.OLD, {"seven_day": Window(50, 500_000)}, 200.0)
         self.assertEqual(m.captured_at, 100.0)
 
+    def test_a_probe_lower_in_the_same_window_is_taken(self):
+        """Usage can fall inside a window (the provider credits some back): the provider's own
+        usage probe is current by construction, so its lower value replaces the stored one."""
+        old = Snapshot(100.0, {**self.OLD.windows, "seven_day:Fable": Window(91, 500_000)})
+        m = store.merge(old, {"seven_day": Window(34, 500_000 - 60),     # reset to the minute
+                              "seven_day:Fable": Window(0, 500_000)}, 200.0, probe=True)
+        self.assertEqual(m.windows["seven_day"], Window(34, 500_000))     # the exact reset kept
+        self.assertEqual(m.windows["seven_day:Fable"], Window(0, 500_000))
+        self.assertEqual(m.windows["five_hour"], Window(40, 10_000))    # omitted: kept
+        self.assertEqual(m.captured_at, 200.0)
+
+    def test_a_probe_a_point_lower_is_rounding(self):
+        m = store.merge(self.OLD, {"seven_day": Window(59, 500_000)}, 200.0, probe=True)
+        self.assertEqual(m.windows["seven_day"], Window(60, 500_000))
+
+    def test_a_probe_never_takes_an_already_expired_window(self):
+        m = store.merge(self.OLD, {"five_hour": Window(3, 9_000)}, 9_500.0, probe=True)
+        self.assertEqual(m.windows["five_hour"], Window(40, 10_000))
+
 
 
 class ConcurrentCaptures(unittest.TestCase):

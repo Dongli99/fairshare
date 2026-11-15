@@ -89,22 +89,32 @@ def preference(now: float) -> tuple[str, float] | None:
 
 
 SAME_WINDOW_S = 3600   # resets this close together belong to the same window
+PROBE_ROUNDING = 1.0   # the probe's text gives whole percents: a fall this small is rounding
 
 
 def merge(old: Snapshot | None, fresh: dict[str, Window], now: float,
           probe: bool = False) -> Snapshot:
     """A payload may omit a window that is still running; keep the old one until it expires.
-    Idle sessions redraw with the last values they received, and usage never falls within one
-    window, so a lower value for the same window is stale: keep the stored one. A fresh window
-    already past its reset is a redraw from before the reset: never taken. The snapshot's time
-    says when its numbers were last known to be current: it moves when a window's value or
-    reset changed or a window appeared, or when they came from the provider's own usage probe
-    (`probe`), never for a redraw of equal values, so idle redraws cannot make it look fresh."""
+    Idle sessions redraw with the last values they received, so a lower value for the same
+    window from a redraw is stale: keep the stored one. Usage can still fall within a window
+    (the provider credits some back), and the provider's own usage probe (`probe`) is current
+    by construction: its lower value for the same window is taken when it falls by more than
+    rounding, under the stored reset (the probe gives the reset to the minute only). A fresh
+    window already past its reset is a redraw from before the reset: never taken. The
+    snapshot's time says when its numbers were last known to be current: it moves when a
+    window's value or reset changed or a window appeared, or when they came from a probe, never
+    for a redraw of equal values, so idle redraws cannot make it look fresh."""
     kept = {k: w for k, w in (old.windows if old else {}).items() if w.resets_at > now}
-    taken = {k: w for k, w in fresh.items()
-             if w.resets_at > now                  # a redraw of a window that already reset
-             and not (k in kept and w.used_pct < kept[k].used_pct
-                     and abs(w.resets_at - kept[k].resets_at) <= SAME_WINDOW_S)}
+    taken = {}
+    for k, w in fresh.items():
+        if w.resets_at <= now:                     # a redraw of a window that already reset
+            continue
+        was = kept.get(k)
+        if was and w.used_pct < was.used_pct and abs(w.resets_at - was.resets_at) <= SAME_WINDOW_S:
+            if not probe or was.used_pct - w.used_pct <= PROBE_ROUNDING:
+                continue                           # stale, or rounding
+            w = Window(w.used_pct, was.resets_at)  # credited back
+        taken[k] = w
     changed = any(kept.get(k) != w for k, w in taken.items())
     return Snapshot(now if probe or changed or old is None else old.captured_at,
                     {**kept, **taken})
