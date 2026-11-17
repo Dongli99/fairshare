@@ -24,7 +24,7 @@ $ fairshare       # starts a session on the account at the top of that list
 ## Quick start
 
 ```
-pipx install fairshare
+pipx install fairshare-cli      # the command is `fairshare`
 fairshare setup
 fairshare
 ```
@@ -92,7 +92,7 @@ one pure function in [`src/fairshare/policy.py`](https://github.com/Dongli99/fai
 
 ```
 fairshare uninstall        # changes nothing; says where everything is
-pipx uninstall fairshare
+pipx uninstall fairshare-cli
 ```
 
 `uninstall` lists the config, the state folder (usage snapshots, session records, checkpoint

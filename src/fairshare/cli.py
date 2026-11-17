@@ -2414,7 +2414,7 @@ def _installed() -> str | None:
 def _need_installed(command: str) -> str:
     if not (installed := _installed()):
         raise SystemExit("fairshare: no installed `fairshare` found on PATH; install it first "
-                         f"(pipx install fairshare), then run `fairshare {command}` again")
+                         f"(pipx install fairshare-cli), then run `fairshare {command}` again")
     return installed
 
 
@@ -2910,7 +2910,7 @@ def cmd_uninstall(_a) -> int:
         backups = hub / "backups"
         print(f"  backups: {len(list(backups.iterdir())) if backups.is_dir() else 0} "
               "folder(s) of things fairshare moved aside")
-    print("To remove the installed fairshare: pipx uninstall fairshare (or however you installed "
+    print("To remove the installed fairshare: pipx uninstall fairshare-cli (or however you installed "
           "it). The config, the state and the hub stay until you delete them yourself.")
     if hub is not None:
         for prov in providers.REGISTRY.values():

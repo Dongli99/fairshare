@@ -387,7 +387,7 @@ hook, a missing or outdated skill, shown as a diff), one line per fix, then runs
 - where the hub is and what it holds;
 - that the hub's accounts stay signed in (on macOS, one keychain entry per folder), and that
   `fairshare leave --logout <id>` signs one out before you delete the hub;
-- how to remove the installed fairshare (`pipx uninstall fairshare`);
+- how to remove the installed fairshare (`pipx uninstall fairshare-cli`);
 - a prompt for your own agent to merge the hub's history back into your own folders. It leaves
   out what join never copies (`sessions/`) and fairshare's own skill.
 

@@ -350,7 +350,7 @@ class Setup(UserFolders):
         (self.bin / "fairshare").unlink()
         with self.assertRaises(SystemExit) as e:
             self.go("setup")
-        self.assertIn("install it first (pipx install fairshare)", str(e.exception))
+        self.assertIn("install it first (pipx install fairshare-cli)", str(e.exception))
         self.assertFalse(self.cfg.exists())
 
     def test_a_config_that_cannot_be_parsed_is_refused_not_replaced(self):
@@ -896,7 +896,7 @@ class BareAndUninstall(UserFolders):
                           for p in self.tmp.rglob("*") if p.name != LOGIN}, everything)
         self.assertIn(f"Hub: {self.hub}", self.out)
         self.assertIn("accounts: claude, claude-old, play, work", self.out)
-        self.assertIn("pipx uninstall fairshare", self.out)
+        self.assertIn("pipx uninstall fairshare-cli", self.out)
         self.assertIn(f"one shared folder, {self.hub / 'shared'}", self.out)
         self.assertIn("history.jsonl: append the lines my file lacks", self.out)
         self.assertIn("~/.claude-work", self.out)
