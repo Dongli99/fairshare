@@ -40,13 +40,21 @@ class SpentShortWindow(unittest.TestCase):
                 v = rank([acct("a")], {"a": snap((used, FORTY), (10, 20))}, T0)[0]
                 self.assertEqual(v.eligible, eligible)
 
-    def test_nearly_full_and_resetting_in_40_minutes_keeps_todays_behaviour(self):
+    def test_nearly_full_and_resetting_in_40_minutes_is_used_only_when_nothing_else_works(self):
+        # b can work now: a's grace does not hold (what is left of its window lasts minutes)
         snaps = {"a": snap((90, FORTY), (10, 20)), "b": snap((10, 3), (80, 150))}
-        vs = rank([acct("a"), acct("b")], snaps, T0)
-        self.assertEqual([v.account.id for v in vs], ["a", "b"])
-        self.assertTrue(vs[0].eligible)
-        self.assertAlmostEqual(vs[0].score, 90 / 20)               # not scaled: inside the grace
-        self.assertEqual(vs[0].usable_in, 0.0)
+        a, b = rank([acct("a"), acct("b")], snaps, T0)
+        self.assertEqual((a.account.id, a.eligible, b.eligible), ("a", False, True))
+        self.assertAlmostEqual(a.score, 90 / 20 * 0.10)            # scaled like any hot window
+        self.assertAlmostEqual(a.usable_in, FORTY)
+        # alone, or with nothing else able to work, the grace holds
+        for others in ([], [("b", snap((95, 3), (10, 20)))]):
+            with self.subTest(others=others):
+                vs = rank([acct("a")] + [acct(i) for i, _ in others],
+                          {"a": snaps["a"], **dict(others)}, T0)
+                self.assertEqual((vs[0].account.id, vs[0].eligible), ("a", True))
+                self.assertAlmostEqual(vs[0].score, 90 / 20)       # not scaled: inside the grace
+                self.assertEqual(vs[0].usable_in, 0.0)
 
     def test_a_spent_week_and_a_spent_short_window_wait_for_the_later(self):
         v = rank([acct("a")], {"a": snap((100, 4), (99, 2))}, T0)[0]

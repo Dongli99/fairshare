@@ -21,6 +21,7 @@ import termios
 import time
 import tomllib
 import tty
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -34,7 +35,7 @@ from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, NOTE_THINKING, NOTE_WR
                     Tuning, Window, Worker,
                     load_accounts, load_plan, window_model, with_account, with_hub,
                     without_account)
-from .policy import HOUR, Verdict, prefer, rank
+from .policy import HOUR, Verdict, prefer, rank, spread
 
 
 def _load():
@@ -185,7 +186,8 @@ def _survey() -> Survey:
             ranked.append(a)
         else:
             twins.append((a, seen[key].id))
-    verdicts = rank(ranked, snaps, now, tuning)
+    verdicts = spread(rank(ranked, snaps, now, tuning), _running(store.sessions(), now),
+                      CLOSE_SCORE)
     if pref := store.preference(now):
         verdicts = prefer(verdicts, pref[0])
     return Survey(verdicts, out, twins, notes, failed, snaps, tuning, now, pref, usage, expires)
@@ -253,6 +255,12 @@ def _spent_models(acct_id: str, snap: Snapshot | None, t: Tuning, now: float) ->
             and w.resets_at > now]
 
 
+def _top(verdicts: list[Verdict]) -> Verdict:
+    """The account a launch starts on: the first that can take work, else the top-ranked. A
+    nearly full short window can outscore an account that can work; it still takes no session."""
+    return next((v for v in verdicts if v.eligible), verdicts[0])
+
+
 def _usable(v: Verdict, now: float) -> str:
     """When a spent account can take work again."""
     return f"usable at {_clock(now + v.usable_in * HOUR, now)}"
@@ -272,7 +280,7 @@ def _preference_note(s: Survey) -> str | None:
     return note
 
 
-LIVE_S = 600           # a session seen this recently is live (status's sessions block)
+LIVE_S = 600           # a session seen this recently is live (status, and spreading launches)
 SPEND_SPAN_S = 3600    # spend is shown and compared over this span: the last hour
 SESSIONS_SHOWN = 5     # status shows at most this many sessions per account
 
@@ -294,6 +302,16 @@ def _about(rec: SessionRecord) -> tuple[str, str]:
     return rec.model_name or rec.model or "-", (Path(rec.cwd).name if rec.cwd else "") or "-"
 
 
+def _live(rec: SessionRecord, now: float) -> bool:
+    """Seen within LIVE_S and not gone on under a new id."""
+    return now - rec.seen <= LIVE_S and not rec.moved_to
+
+
+def _running(recs: list[SessionRecord], now: float) -> dict[str, int]:
+    """How many live sessions each account has."""
+    return Counter(r.account for r in recs if _live(r, now))
+
+
 def _sessions_block(acct_id: str, recs: list[SessionRecord], now: float) -> list[str]:
     """status's lines for an account's live sessions, heaviest in the last hour first, at most
     SESSIONS_SHOWN, then `+N more`: id start, model, folder, role, spend and its share of the
@@ -302,7 +320,7 @@ def _sessions_block(acct_id: str, recs: list[SessionRecord], now: float) -> list
     mine = [r for r in recs if r.account == acct_id]
     spent = _hour_spend(mine, now)
     total = sum(x for x in spent.values() if x)
-    live = sorted((r for r in mine if now - r.seen <= LIVE_S and not r.moved_to),
+    live = sorted((r for r in mine if _live(r, now)),
                   key=lambda r: (-(spent[r.id] if spent[r.id] is not None else -1), r.id))
     lines = []
     for r in live[:SESSIONS_SHOWN]:
@@ -335,9 +353,9 @@ def cmd_status(_a) -> int:
     if s.preference and not _honoured(s):
         print(_preference_note(s))
     probes, expiring = _probe_lines(s), _expiry_lines(s.expires, s.now)
-    recs = store.sessions()
+    recs, top = store.sessions(), _top(s.verdicts) if s.verdicts else None
     for i, v in enumerate(s.verdicts):
-        mark, aid = (">" if i == 0 else " "), v.account.id
+        mark, aid = (">" if v is top else " "), v.account.id
         flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
         if i == 0 and _honoured(s):
             flag = f"  [preferred until {_clock(s.preference[1], s.now)}]"
@@ -721,7 +739,8 @@ def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float
     check, no probe), or None; and those snapshots."""
     others = [a for a in accounts if a.plan is not None and a.id != acct.id]
     snaps = {a.id: s for a in others if (s := store.load(a.id))}
-    return next((v for v in rank(others, snaps, now, t) if v.eligible), None), snaps
+    return next((v for v in spread(rank(others, snaps, now, t), _running(store.sessions(), now),
+                                   CLOSE_SCORE) if v.eligible), None), snaps
 
 
 def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
@@ -1436,13 +1455,13 @@ def _route(args, moving: str | None = None, pause: bool = False, model: str | No
                     _say(f"{_no_model_line(model)}; name another with --model")
                     return 1
                 elif (_say(_no_model_line(model)) or _choose(
-                        f"[d] start on {s.verdicts[0].account.id} with its default model, "
+                        f"[d] start on {_top(s.verdicts).account.id} with its default model, "
                         "[q] quit: ", {"d", "q"})) != "d":
                     _say("not started")
                     return 0
                 else:
                     model = effort = None
-            top = s.verdicts[0]
+            top = _top(s.verdicts)
             spent = _spent_models(top.account.id, s.snaps.get(top.account.id), s.tuning, s.now)
             if top.eligible:
                 warned = _grace_warning(top, s.snaps, s.tuning, s.now) or warned

@@ -86,6 +86,10 @@ arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` star
 per-account alias. Only a leading `-a` is fairshare's: `fairshare run -- -a x` passes `-a x` on.
 For a shorter name, make your own alias for `fairshare`.
 
+When two accounts are within 10% of each other, a new session goes to the one with fewer
+sessions running, so sessions started together spread out. `fairshare status` marks with `>` the
+account the next session would start on.
+
 If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `handoff` and `join` say
 so first and stop, before any sign-in check or usage probe.
 
@@ -428,7 +432,7 @@ and `leave` edit it as text, keeping your comments, with a backup each time. Key
   (default 5, at least 1), and the ranking's thresholds `short_hot_pct` (85: a short window this
   full is "nearly full"), `long_exhausted_pct` (98: a week or a short window this full is spent
   and cannot take work until it resets) and `grace_hours` (1: a nearly full, not spent, short
-  window resetting this soon still takes work). Every number must be finite; `nan` and `inf` are a config error.
+  window resetting this soon still takes work, when no other account can). Every number must be finite; `nan` and `inf` are a config error.
 
 `status_args` replaces the sign-in check's arguments and `usage_args` the usage probe's (default
 `auth status --json` and `-p --no-session-persistence --output-format json --settings

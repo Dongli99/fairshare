@@ -139,11 +139,16 @@ class Short(unittest.TestCase):
                   (acct("cool"), snap((10, 3), (10, 48)))])
         self.assertEqual(r[0], "cool")
 
-    def test_hot_short_resetting_soon_is_usable(self):
-        # hot but resets in 30 min: should be about as good as cool, not penalised
+    def test_hot_short_resetting_soon_is_usable_when_nothing_else_is(self):
+        # Amended (architecture decision 26): hot but resets in 30 min was "about as good as cool,
+        # not penalised"; what is left of it lasts minutes, so it is used only when no account
+        # can work without the grace.
+        r = rank([(acct("hot_soon"), snap((95, 0.5), (10, 12))),
+                  (acct("hot_late"), snap((95, 3), (10, 160)))])
+        self.assertEqual(r[0], "hot_soon")
         r = rank([(acct("hot_soon"), snap((95, 0.5), (10, 12))),
                   (acct("cool"), snap((10, 3), (10, 160)))])
-        self.assertEqual(r[0], "hot_soon")
+        self.assertEqual(r[0], "cool")
 
     def test_hot_short_resets_in_exactly_grace(self):
         r = rank([(acct("edge"), snap((95, 1.0), (10, 12))),

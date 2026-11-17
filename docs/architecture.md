@@ -76,8 +76,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
    across the boundary and mis-ranked spent weeks. Now a nearly-full short window scales the
    score (a soft preference) and a spent window, the week or the short one (both at
    `long_exhausted_pct`), sets it to `-hours until the later of them resets` (a hard fact,
-   below any usable account; decision 25). `Verdict.eligible` survives only so the CLI can
-   report it.
+   below any usable account; decision 25). The order stays one; `Verdict.eligible` says
+   which accounts may take a session, and every start takes the first eligible one in it
+   (decisions 11, 25, 26).
 
 8. **Volatile facts live in one place.** A provider renames commands, flags, environment
    variables, files, JSON fields, window names and plans, and adds or drops subscriptions. Each
@@ -266,9 +267,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     naming the key and the account; per account, and `join`/`leave` leave it untouched).
     Parsing stays code, so an override can change the command, not the output format.
 
-11. **`run` does not launch an account that cannot take work.** If the top verdict is eligible it
-    launches as before (with one warning line when it is eligible only because its hot short
-    window resets within the grace period). If none is eligible it prints one line per account
+11. **`run` does not launch an account that cannot take work.** It launches on the first
+    eligible verdict, which a nearly full short window may outrank (with one warning line when
+    it is eligible only because its hot short window resets within the grace period, decision
+    26). If none is eligible it prints one line per account
     (reason, and when it is usable again, from `Verdict.usable_in`) and, without a terminal,
     exits 75 (`EX_TEMPFAIL`: try again later). On a terminal it offers `[w]ait` for the soonest account, `[s]tart` on the top-ranked one after a warning,
     or `[q]uit` (the default). Waiting sleeps to the target time in short naps, then checks
@@ -874,9 +876,41 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     - **Workers** are unchanged: they have no launcher; `watch` tells the main session, which
       decides.
 
+26. **Close starts spread out; the grace hour is a last resort** (amends decisions 7 and 25).
+    A simulation of two Pro accounts through the real `rank` (a session every 30 minutes, each
+    spending about eight times as much of the 5-hour window as of the week, the ratio measured
+    on Pro) showed launches alternating when the weekly resets are close, and one account
+    taking nearly every launch when they are days apart, as intended (its budget expires
+    first). It also showed two faults:
+    - **The grace hour took sessions it could not serve.** A 5-hour window at 96% with 30
+      minutes to go was eligible by the grace and won on its week, while the other account sat at
+      12%. What is left of such a window lasts minutes, so the session stops at its limit and
+      waits (decision 25). Now `rank` honours the grace only while no account is eligible
+      without it; otherwise such an account is scored like any nearly full window and is
+      ineligible until its reset (`usable_in` = time to the reset). Alone, or beside accounts that
+      are all spent or nearly full, it is used as before, with the warning line. The cost: when
+      that account also holds the week closest to expiring, a session started now stays on the
+      other one.
+    - **Sessions started together landed on one account.** The score sees usage only once a
+      session works, so a second launch a minute after the first ranks the accounts as the first
+      did. `policy.spread` (pure) takes the live session count per account (records seen within
+      `LIVE_S`, the 10 minutes `status` uses, not gone on under a new id): of the eligible
+      accounts scoring within `CLOSE_SCORE` (10%) of the best eligible one, the one with the
+      fewest goes first; ties keep the ranking. Outside 10% the score stands: the weekly pace
+      outweighs spreading. The survey applies it before a preference, and so does the best
+      other account the bar and the warnings name, so `status`, launches, switches, pickups,
+      handoffs and those hints agree. A session counts once its status line first draws, as it
+      starts. The launch pause still shows the close call.
+    - **A launch took the top verdict even when it could not take work.** A nearly full short
+      window can outscore an eligible account (decision 7); `run` then said no account was
+      eligible. Launches now take the first eligible verdict, as pickups always did, and `status`
+      marks that one with `>`.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
+- Spreading counts sessions, not their spend: an idle open session counts like a busy one, and
+  two launches within the same second do not see each other.
 - A snapshot's age is read only to show it (`usage as of`); an account whose probe is off or
   failing is ranked on its snapshot until its windows reset.
 - The usage probe's reset minute is approximate (it was seen to differ by a minute between runs

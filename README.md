@@ -83,8 +83,11 @@ The score is the share of the week's budget it must burn per hour to use it all;
 score wins. That sends work to the account whose reset is nearest and whose budget is least
 used. Capacity is the plan's size (Pro = 1).
 
-- If the short (5-hour) window is nearly full and not resetting within the hour, the score is
-  scaled by what is left of that window.
+- If the short (5-hour) window is nearly full, the score is scaled by what is left of that
+  window, and new sessions go to an account that can work now. One resetting within the hour is
+  still used when no other account can.
+- Between accounts within 10% of each other, a new session goes to the one with fewer sessions
+  running.
 - An account whose week or short window is spent ranks below every usable account, however soon
   it resets: it cannot take work until then.
 

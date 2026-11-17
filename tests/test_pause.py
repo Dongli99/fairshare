@@ -51,14 +51,33 @@ class Pause(Fleet):
         self.assertIn("  2   b            seven_day 15% used, resets in 50h", err)
         self.assertEqual(self.launched_id(), "a")              # the time ran out: the top one
 
+    def test_a_close_call_goes_to_the_account_with_fewer_live_sessions(self):
+        self.snap("a", five=(10, 2), seven=(10, 50))           # score 1.8
+        self.snap("b", five=(10, 2), seven=(15, 50))           # 1.7: within 10%
+        store.note_session(SessionSeen("s1"), "a", NOW)        # a session just started on a
+        _, err = self.run_with()
+        self.assertEqual(self.texts, ["starting b in 3 s · Enter = now · 1-2 = that account · "
+                                      "q = quit"])
+        self.assertIn("  1 > b ", err)
+        self.assertEqual(self.launched_id(), "b")
+
+    def test_a_session_not_seen_lately_does_not_count(self):
+        self.snap("a", five=(10, 2), seven=(10, 50))
+        self.snap("b", five=(10, 2), seven=(15, 50))
+        store.note_session(SessionSeen("s1"), "a", NOW - cli.LIVE_S - 1)
+        self.run_with()
+        self.assertEqual(self.launched_id(), "a")
+
     def test_each_tight_trigger(self):
-        cases = {"week at 90%": dict(five=(10, 2), seven=(92, 10)),
-                 "hot short window (inside its grace hour)": dict(five=(90, 0.5), seven=(10, 10))}
-        for label, top in cases.items():
+        # b: eligible far behind; for the grace hour, b cannot work (else the grace does not hold)
+        cases = {"week at 90%": (dict(five=(10, 2), seven=(92, 10)), (97, 100)),
+                 "hot short window (inside its grace hour)": (dict(five=(90, 0.5), seven=(10, 10)),
+                                                              (99, 100))}
+        for label, (top, other_week) in cases.items():
             with self.subTest(label):
                 self.keys.clear()
                 self.snap("a", **top)
-                self.snap("b", five=(10, 2), seven=(97, 100))
+                self.snap("b", five=(10, 2), seven=other_week)
                 self.run_with()
                 self.assertEqual(len(self.keys), 1)
                 self.assertEqual(self.launched_id(), "a")

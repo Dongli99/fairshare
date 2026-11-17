@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 
 from fairshare.model import Account, Snapshot, Tuning, Window, load_plan
-from fairshare.policy import rank
+from fairshare.policy import rank, spread
 
 H = 3600.0
 NOW = 1_000_000.0
@@ -56,9 +56,10 @@ class FiveHourGuard(unittest.TestCase):
         snaps = {"a": snap((95, 4), (10, 20)), "b": snap((10, 3), (20, 20))}
         self.assertEqual(order([acct("a"), acct("b")], snaps), ["b", "a"])
 
-    def test_hot_account_resetting_within_an_hour_is_still_eligible(self):
-        snaps = {"a": snap((95, 0.5), (10, 20)), "b": snap((10, 3), (80, 150))}
-        self.assertEqual(order([acct("a"), acct("b")], snaps)[0], "a")
+    def test_hot_account_resetting_within_an_hour_is_eligible_when_no_other_is(self):
+        snaps = {"a": snap((95, 0.5), (10, 20)), "b": snap((95, 3), (80, 150))}
+        v = rank([acct("a"), acct("b")], snaps, NOW)
+        self.assertEqual((v[0].account.id, v[0].eligible), ("a", True))
 
     def test_all_hot_picks_whichever_frees_first(self):
         snaps = {"a": snap((95, 4), (10, 20)), "b": snap((90, 2), (10, 20))}
@@ -73,6 +74,32 @@ class FiveHourGuard(unittest.TestCase):
     def test_reset_exactly_at_the_grace_hour_counts_as_hot(self):
         v = rank([acct("a")], {"a": snap((95, 1.0), (10, 20))}, NOW)[0]
         self.assertFalse(v.eligible)
+
+
+class GraceIsALastResort(unittest.TestCase):
+    """The grace hour holds only while no account is eligible without it (decision 26)."""
+
+    def test_an_account_that_can_work_takes_the_launch(self):
+        # Seen in a simulation: a's 5h 96% with 30 minutes to go would have taken a session
+        # that stops at its limit in minutes, while b sat at 12%.
+        snaps = {"a": snap((96, 0.5), (63.5, 43.5)), "b": snap((12, 4.5), (51.5, 91.5))}
+        a, b = sorted(rank([acct("a"), acct("b")], snaps, NOW), key=lambda v: v.account.id)
+        self.assertFalse(a.eligible)
+        self.assertTrue(b.eligible)
+        self.assertAlmostEqual(a.usable_in, 0.5)                   # at its reset
+        self.assertIn("five_hour 96% used, resets in 30m", a.reason)
+
+    def test_a_hot_account_outside_the_grace_keeps_its_usable_in(self):
+        snaps = {"a": snap((95, 4), (10, 20)), "b": snap((10, 3), (20, 20))}
+        a = next(v for v in rank([acct("a"), acct("b")], snaps, NOW) if v.account.id == "a")
+        self.assertAlmostEqual(a.usable_in, 3.0)                   # reset minus the grace hour
+
+    def test_a_spent_or_hot_other_leaves_the_grace_in_place(self):
+        for other in (snap((99, 3), (10, 20)), snap((10, 3), (99, 20)), snap((90, 3), (10, 20))):
+            with self.subTest(other=other):
+                v = rank([acct("a"), acct("b")],
+                         {"a": snap((95, 0.5), (10, 20)), "b": other}, NOW)
+                self.assertEqual([x.account.id for x in v if x.eligible], ["a"])
 
 
 class OneRuleNotTwoTiers(unittest.TestCase):
@@ -152,3 +179,32 @@ class Capacity(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Spread(unittest.TestCase):
+    """Sessions started close together do not all land on one account."""
+    CLOSE = 0.10
+
+    def ids(self, snaps, running, accounts=None):
+        vs = rank(accounts or [acct(i) for i in snaps], snaps, NOW)
+        return [v.account.id for v in spread(vs, running, self.CLOSE)]
+
+    def test_within_close_the_account_with_fewer_sessions_goes_first(self):
+        snaps = {"a": snap((10, 3), (40, 72)), "b": snap((10, 3), (42, 72))}   # 3% apart
+        self.assertEqual(self.ids(snaps, {}), ["a", "b"])
+        self.assertEqual(self.ids(snaps, {"a": 1}), ["b", "a"])
+        self.assertEqual(self.ids(snaps, {"a": 1, "b": 1}), ["a", "b"])      # a tie: the ranking
+
+    def test_outside_close_the_ranking_stands(self):
+        snaps = {"a": snap((10, 3), (50, 48)), "b": snap((10, 3), (50, 96))}   # 2x apart
+        self.assertEqual(self.ids(snaps, {"a": 3}), ["a", "b"])
+
+    def test_close_is_measured_from_the_best_eligible_and_never_picks_an_ineligible_one(self):
+        # hot: outscores both but cannot take work; a and b are close
+        snaps = {"hot": snap((90, 3), (50, 2)), "a": snap((10, 3), (40, 72)),
+                 "b": snap((10, 3), (42, 72))}
+        self.assertEqual(self.ids(snaps, {"a": 2, "hot": 0}), ["hot", "b", "a"])
+
+    def test_nothing_eligible_is_left_alone(self):
+        snaps = {"a": snap((10, 3), (99, 5)), "b": snap((10, 3), (99, 9))}
+        self.assertEqual(self.ids(snaps, {"a": 4}), ["a", "b"])

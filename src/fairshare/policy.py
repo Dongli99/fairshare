@@ -1,7 +1,7 @@
 """The routing rule. Pure: accounts + snapshots + now in, ranked verdicts out. No I/O."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .model import Account, Snapshot, Tuning
 
@@ -67,9 +67,29 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Ver
 
 def rank(accounts: list[Account], snaps: dict[str, Snapshot], now: float,
          t: Tuning = Tuning()) -> list[Verdict]:
-    """Best first: highest score, ties by id."""
+    """Best first: highest score, ties by id. The grace hour holds only while no account is
+    eligible without it: what is left of a nearly full window lasts minutes, so a session started
+    there soon stops at its limit and waits, while another account could work now."""
     vs = [evaluate(a, snaps.get(a.id), now, t) for a in accounts]
+    firm = [evaluate(a, snaps.get(a.id), now, replace(t, grace_hours=0.0)) for a in accounts]
+    if any(f.eligible for f in firm):
+        vs = [f if v.eligible else v for v, f in zip(vs, firm)]
     return sorted(vs, key=lambda v: (-v.score, v.account.id))
+
+
+def spread(verdicts: list[Verdict], running: dict[str, int], close: float) -> list[Verdict]:
+    """Of the eligible accounts scoring within `close` (a fraction) of the best eligible one, the
+    one with the fewest sessions `running` (by account id) goes where that best one was; ties keep
+    the ranking. Sessions started close together then do not all draw on one account, which the
+    score alone cannot see: their usage shows only once they work."""
+    eligible = [v for v in verdicts if v.eligible]
+    if not eligible:
+        return verdicts
+    near = [v for v in eligible if v.score >= eligible[0].score * (1 - close)]
+    pick = min(near, key=lambda v: running.get(v.account.id, 0))
+    out = [v for v in verdicts if v is not pick]
+    out.insert(verdicts.index(eligible[0]), pick)
+    return out
 
 
 def prefer(verdicts: list[Verdict], account_id: str) -> list[Verdict]:

@@ -211,6 +211,20 @@ class Refusal(Fleet):
         self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
         self.assertIn("warning: a five_hour window 95% used, resets in 30m", err)
 
+    def test_an_eligible_account_launches_though_a_hot_one_outscores_it(self):
+        # a: half its week left, resetting in 2h (score 25); its 5h window 90% for 3h: hot,
+        # scaled to 2.5 and still ranked first, but it takes no session. b can work.
+        self.add("a", orgId=ORG + "a")
+        self.add("b", orgId=ORG + "b")
+        self.snap("a", five=(90, 3), seven=(50, 2))
+        self.snap("b", seven=(50, 96))
+        _, _, err = self.go("run")
+        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/b"))
+        self.assertNotIn("no account is eligible", err)
+        _, out, _ = self.go("status")
+        rows = [(l[0], l[2:].split()[0]) for l in out.splitlines() if not l.startswith("   ")]
+        self.assertEqual(rows, [(" ", "a"), (">", "b")])          # ranked by score, b marked
+
 
 class Prompt(Fleet):
     def test_start_launches_the_top_ranked_not_the_soonest(self):
