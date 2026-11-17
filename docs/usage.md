@@ -29,17 +29,39 @@ would create one.
 
 The prompt says that the first folder joined decides the shared settings, CLAUDE.md and keybindings, and
 shows the order `all` would use: signed-in folders first, and among those the default
-`~/.claude` first; then the rest. Typing numbers joins in the order you type. When a later
+`~/.claude` first; then the rest. Typing numbers joins in the order you type. On a terminal
+each folder joined is first asked a name (`Name for ~/.claude [claude]:`; Enter keeps the
+folder's alias or name, and a name that is not a valid id or is already an account's or a hub
+folder's is asked again); without a terminal the alias or name is used. When a later
 folder's settings differ, the diff is shown, followed by one line naming the file to edit if you
 want that folder's settings instead. A file that is new in the hub (fairshare's skill on a first
 setup, say) is reported in one line (`installed <what> in <path>`); diffs are kept for changes to
 a file that already exists.
 
+setup always leaves a complete hub, even when it joins nothing; until an account is joined,
+`fairshare`, `run` and `status` say ``no accounts yet: `fairshare join <name>` signs one in``
+(exit 1). If the `claude` command is not on PATH, setup still writes the config and builds the
+hub, then says once that Claude Code must be installed (``no Claude Code command found on
+PATH; install it, then run `fairshare setup` again to join accounts``) and joins nothing (exit 1). It
+ends with ``start sessions with `fairshare`; plain `claude` still uses ~/.claude, outside the
+hub``: fairshare never edits your shell files.
+
 `fairshare join [ID] [--from FOLDER]` adds one account. It makes the account's folder in the
 hub, runs Claude Code's own sign-in there (your browser; fairshare never sees a token), and
-checks who signed in. A login that is already another account's is "one quota", and you are
-asked before it is kept. On a terminal it first asks which browser that account's sign-in links
-open in (see [Browser per account](#browser-per-account)). `--from` copies your folder's
+checks who signed in. If the `claude` command is not on PATH it says so and stops before
+creating any folder. Without an ID, a terminal is asked a name (`Name for the new account
+[account-1]:`, or the `--from` folder's alias or name as the default); without a terminal the
+default is used. On a terminal it then asks which browser that account's sign-in links open in
+(see [Browser per account](#browser-per-account)).
+
+A login that is already another account's shares its quota, so keeping both adds nothing. On a
+terminal join says so (`play signed in as the same account as work, so they share one quota:
+keeping both adds nothing.`), explains that the browser was usually still signed in to that
+account (sign out on claude.ai, or choose another browser profile), and offers `[Enter] sign in
+again · k = keep anyway · n = don't add`. Enter runs the sign-in in the same folder again,
+offering the browser choice again, and checks again; `k` keeps it; `n` leaves it out (its
+folder stays). Without a terminal it is not added, and join says `same login as work: one
+quota`. `--from` copies your folder's
 history, transcripts, settings, CLAUDE.md, skills, plugins, commands, agents, rules and
 workflows into the hub (a clashing file keeps both; the first folder's settings win and later
 differences are shown), and, after asking, the per-project trust, your MCP servers, the "first
@@ -64,8 +86,8 @@ arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` star
 per-account alias. Only a leading `-a` is fairshare's: `fairshare run -- -a x` passes `-a x` on.
 For a shorter name, make your own alias for `fairshare`.
 
-If the `claude` command is not on PATH, `fairshare`, `run`, `pickup` and `handoff` say so first
-and stop, before any sign-in check or usage probe.
+If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `handoff` and `join` say
+so first and stop, before any sign-in check or usage probe.
 
 **The launch pause.** When the choice is close (the chosen account is nearly spent, the next one
 is within 10% of it, or a warning was printed), `fairshare` pauses for a moment on a terminal:
@@ -399,7 +421,7 @@ from the model.
 | code | when |
 |---|---|
 | 0 | done; for `run`, the session's own exit code is passed through |
-| 1 | an error: a config error, no hub at the configured path, an account that cannot be used, a failed `doctor` check |
+| 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check |
 | 2 | a usage error: an unknown command or account id, `setup` or `join` without a terminal |
 | 75 | no account can take work and there is no terminal to ask (or you chose not to wait) |
 | 126, 127 | Claude Code could not be started (126) or was not found (127) |

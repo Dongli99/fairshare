@@ -39,14 +39,17 @@ dependencies.
 holds a Claude Code config folder per account, all linked to one shared set of history,
 transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know that:
 
-- it lists the Claude Code folders it finds and asks which to join;
+- it lists the Claude Code folders it finds, asks which to join and, for each, a name (Enter
+  keeps the folder's own);
 - each account you join gets a new folder in the hub and **one browser sign-in** there, through
   Claude Code's own sign-in (fairshare never sees a token);
 - it copies your history, settings and skills into the hub. Your own folders are not changed:
   fairshare never writes them, and to label them it runs Claude Code's own sign-in check there;
 - **the first folder joined decides the shared settings, CLAUDE.md and keybindings**. Later folders'
   differences are shown, not applied. `all` joins signed-in folders first, your default
-  `~/.claude` first among them; type numbers to choose the order yourself.
+  `~/.claude` first among them; type numbers to choose the order yourself;
+- it does not touch your shell files: plain `claude` still uses `~/.claude`, outside the hub.
+  Start sessions with `fairshare`.
 
 ## Everyday use
 

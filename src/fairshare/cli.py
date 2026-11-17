@@ -120,6 +120,7 @@ def _unconfirmed(a: Account) -> str | None:
 
 
 NOT_SIGNED_IN = "not signed in"
+NO_ACCOUNTS = "no accounts yet: `fairshare join <name>` signs one in"
 FALLBACK = "went by its last confirmation as a subscription login and the plan in accounts.toml"
 
 
@@ -137,6 +138,8 @@ def _require_hub(hub: Path) -> None:
 def _survey() -> Survey:
     """Check every account once, then rank those that can take work."""
     accounts, tuning, hub = _load()
+    if not accounts:                         # before the hub: none to start, nothing to create
+        raise SystemExit(f"fairshare: {NO_ACCOUNTS}")
     _require_hub(hub)
     now = _now()
     live, twins, notes, failed, usage, expires = [], [], {}, [], {}, {}
@@ -1314,14 +1317,14 @@ def _run_account(account_id: str, args, model: str | None = None,
     return _launch(v, _with_model(args, model, effort), explicit=True, continues=continues)
 
 
-def _no_tool() -> bool:
-    """Whether the provider's command is missing from PATH (said): checked first by every
-    command that starts a session, before any sign-in check or probe, so the cause is the one
-    line shown."""
+def _no_tool(then: str = "try again") -> bool:
+    """Whether the provider's command is missing from PATH (said, ending with `then`): checked
+    first by every command that starts a session or signs one in, before any sign-in check,
+    probe or folder, so the cause is the one line shown."""
     prov = _provider()
     if prov.find_binary() is not None:
         return False
-    _say(f"no {prov.tool} command found on PATH; install it, then try again")
+    _say(f"no {prov.tool} command found on PATH; install it, then {then}")
     return True
 
 
@@ -2411,7 +2414,7 @@ def _installed() -> str | None:
 def _need_installed(command: str) -> str:
     if not (installed := _installed()):
         raise SystemExit("fairshare: no installed `fairshare` found on PATH; install it first "
-                         f"(pipx install .), then run `fairshare {command}` again")
+                         f"(pipx install fairshare), then run `fairshare {command}` again")
     return installed
 
 
@@ -2614,10 +2617,39 @@ def _ask_browser(account_id: str) -> str | None:
     return None
 
 
+def _ask_name(where: str, default: str, taken: set[str], hub: Path) -> str:
+    """A name for the account joined from `where`, asked until it is a valid id that no
+    configured account and no hub folder has. The default may name a hub folder: join reuses it,
+    as it does without the question."""
+    while True:
+        name = input(f"Name for {where} [{default}]: ").strip() or default
+        if not ACCOUNT_ID.fullmatch(name):
+            print(f"account id {name!r}: use letters, digits, '.', '-' or '_'")
+        elif name in taken:
+            print(f"{name} is already joined")
+        elif name != default and hub_mod.account_dir(hub, name).exists():
+            print(f"{name} is taken by a folder already in the hub")
+        else:
+            return name
+
+
+def _same_login(account_id: str, twin: str, prov) -> str:
+    """On a terminal, what to do with an account that signed in as `twin`'s login: "" (sign in
+    again), "k" (keep anyway) or "n" (don't add)."""
+    print(f"{account_id} signed in as the same account as {twin}, so they share one quota: "
+          "keeping both adds nothing.")
+    print(f"Usually the browser was still signed in to that account. Sign out on {prov.web}, "
+          "or choose another browser profile, then:")
+    while (choice := input("[Enter] sign in again · k = keep anyway · n = don't add "
+                           ).strip().lower()) not in ("", "k", "n"):
+        pass
+    return choice
+
+
 def _join(account_id: str | None, source: Path | None) -> int:
     """Create the account's folder in the hub with its links, run the provider's own sign-in in
     it, check who signed in, copy from the user's folder when asked, and add it to the config.
-    An id already joined is only signed in again."""
+    An id already joined is only signed in again. With no id, a terminal is asked for one."""
     accounts, _, hub = _load()
     if account_id in {a.id for a in accounts}:
         acct = next(a for a in accounts if a.id == account_id)
@@ -2638,7 +2670,11 @@ def _join(account_id: str | None, source: Path | None) -> int:
             _say(f"{source} is inside the hub; name one of your own folders")
             return 2
     taken = {a.id for a in accounts}
-    account_id = account_id or _default_id(source, taken, hub)
+    if account_id is None:
+        account_id = _default_id(source, taken, hub)
+        if _interactive():
+            where = _tilde(source, Path.home()) if source is not None else "the new account"
+            account_id = _ask_name(where, account_id, taken, hub)
     if not ACCOUNT_ID.fullmatch(account_id):
         _say(f"account id {account_id!r}: use letters, digits, '.', '-' or '_'")
         return 2
@@ -2652,28 +2688,37 @@ def _join(account_id: str | None, source: Path | None) -> int:
     for note in hub_mod.check(hub, account_id, prov):
         print(note)
     spec = _ask_browser(account_id) if _interactive() else None
-    print(f"Signing in {account_id}: follow the sign-in the provider opens.")
-    cmd, env = prov.login_command(folder)
-    if code := session.run_child(cmd, {**env, **browser.env(hub, account_id, spec)}):
-        _say(f"the sign-in did not finish (exit {code}); {account_id} not added; its folder "
-             f"stays at {folder}")
-        return 1
-    acct = Account(account_id, prov.name, load_plan(prov.default_plan), folder, browser=spec)
-    st = prov.account_status(acct)
-    if st is not None:
+    while True:                              # again while the login is another account's
+        print(f"Signing in {account_id}: follow the sign-in the provider opens.")
+        cmd, env = prov.login_command(folder)
+        if code := session.run_child(cmd, {**env, **browser.env(hub, account_id, spec)}):
+            _say(f"the sign-in did not finish (exit {code}); {account_id} not added; its folder "
+                 f"stays at {folder}")
+            return 1
+        acct = Account(account_id, prov.name, load_plan(prov.default_plan), folder, browser=spec)
+        st = prov.account_status(acct)
+        if st is None:
+            _say(f"the sign-in check for {account_id} gave no answer; it is added with plan "
+                 f"{prov.default_plan}, and `fairshare status` checks it again")
+            break
         store.record_subscription(account_id, st.logged_in and st.usable, _now())
         if not (st.logged_in and st.usable):
             _say(f"{account_id} is {'not a subscription login' if st.logged_in else 'not signed in'}"
                  f"; not added; its folder stays at {folder}")
             return 1
-        if twins := _twins(acct, st, accounts):
+        if not (twins := _twins(acct, st, accounts)):
+            break
+        if not _interactive():
             print(f"same login as {twins[0]}: one quota")
-            if not _yes(f"Keep {account_id} anyway?"):
-                print(f"{account_id} not added; its folder stays at {folder}")
-                return 1
-    else:
-        _say(f"the sign-in check for {account_id} gave no answer; it is added with plan "
-             f"{prov.default_plan}, and `fairshare status` checks it again")
+            choice = "n"
+        else:
+            choice = _same_login(account_id, twins[0], prov)
+        if choice == "k":
+            break
+        if choice == "n":
+            print(f"{account_id} not added; its folder stays at {folder}")
+            return 1
+        spec = _ask_browser(account_id)
     if source is not None:
         settings = prov.capture_file(hub_mod.shared_dir(hub)).name
         prepare = {settings: lambda text: prov.wire(text, shlex.quote(installed)) or text}
@@ -2690,6 +2735,8 @@ def _join(account_id: str | None, source: Path | None) -> int:
 
 
 def cmd_join(a) -> int:
+    if _no_tool():
+        return 1
     try:
         return _join(a.id, Path(a.source).expanduser() if a.source else None)
     except EOFError:
@@ -2740,6 +2787,11 @@ def _setup() -> int:
         hub_text = input(f"Hub folder (holds what every account shares) [{DEFAULT_HUB}]: ").strip()
         _edit_config(lambda text: with_hub(text, hub_text or DEFAULT_HUB))
     hub = _load()[2]
+    hub_mod.accounts_dir(hub).mkdir(parents=True, exist_ok=True)    # a hub even with none joined
+    if _no_tool("run `fairshare setup` again to join accounts"):
+        for prov in providers.REGISTRY.values():
+            _wire_hub(prov, hub, installed)
+        return 1
     found = [c for prov in providers.REGISTRY.values() for c in prov.discover(home)
              if not c.config_dir.resolve().is_relative_to(hub.resolve())]
     print("Your own folders (fairshare copies from them and never changes them):" if found else
@@ -2765,11 +2817,14 @@ def _setup() -> int:
         return 2
     for c in [c for c in picked if c.id in joined]:
         print(f"{c.id} is already joined; skipped (`fairshare join {c.id}` signs it in again)")
-    failed = [c.id for c in picked if c.id not in joined and _join(c.id, c.config_dir) != 0]
+    failed = [c.id for c in picked if c.id not in joined and _join(None, c.config_dir) != 0]
     for prov in providers.REGISTRY.values():         # each join did this; also with none picked
         _wire_hub(prov, hub, installed)
     if failed:
         _say(f"not joined: {', '.join(failed)}")
+    prov = _provider()
+    print(f"start sessions with `fairshare`; plain `{prov.command}` still uses {prov.default_dir}, "
+          "outside the hub")
     return 1 if failed else 0
 
 

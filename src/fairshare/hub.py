@@ -25,15 +25,19 @@ def shared_dir(hub: Path) -> Path:
     return hub / "shared"
 
 
+def accounts_dir(hub: Path) -> Path:
+    return hub / "accounts"
+
+
 def account_dir(hub: Path, account_id: str) -> Path:
-    return hub / "accounts" / account_id
+    return accounts_dir(hub) / account_id
 
 
 def present(hub: Path, account_id: str | None = None) -> bool:
     """Whether a hub is at `hub` (its shared/ and accounts/ folders, and the account's folder
     when one is named). A launch never builds a hub: after a move it would silently start an
     empty one at the old path."""
-    return shared_dir(hub).is_dir() and (hub / "accounts").is_dir() and (
+    return shared_dir(hub).is_dir() and accounts_dir(hub).is_dir() and (
         account_id is None or account_dir(hub, account_id).is_dir())
 
 

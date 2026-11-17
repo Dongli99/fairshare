@@ -14,6 +14,9 @@ from ..model import (Account, AccountStatus, Candidate, Capture, LiveSession, No
 class Provider(Protocol):
     name: str
     tool: str                # the provider's tool as users know it, for messages
+    command: str             # the command users type to start the tool, for messages
+    default_dir: str         # the folder the tool uses when told none, as users write it
+    web: str                 # where users sign in and out in a browser, for messages
     default_plan: str        # proposed at join when the sign-in check names no plan
     shared: tuple[str, ...]  # what every account shares through the hub; "x/" names a folder
     not_copied: tuple[str, ...]  # of those, what join never copies in: live state, keys

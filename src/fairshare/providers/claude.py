@@ -27,10 +27,12 @@ from ..model import (EFFORT_NONE, NOTE_THINKING, NOTE_WRITING, USAGE_MODEL_TURN,
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
 tool = "Claude Code"                 # the tool as users know it, for messages
+web = "claude.ai"                    # where a subscription signs in and out in a browser
 default_plan = "claude-pro"
 
 # The command-line tool.
 BINARY = "claude"
+command = BINARY
 STATUS_ARGS = ("auth", "status", "--json")   # the sign-in check; accounts.toml may override it
 LOGIN_ARGS = ("auth", "login")               # interactive: the tool owns the browser sign-in
 LOGOUT_ARGS = ("auth", "logout")
@@ -134,6 +136,7 @@ STATE_LOCK_STALE = 30.0              # a lock folder untouched this long is left
                                      # writes past an old one itself (one seen 25 s old)
 DEFAULT_DIR = ".claude"              # the folder used without CONFIG_DIR_ENV; its STATE_FILE is
                                      # beside it in HOME
+default_dir = "~/" + DEFAULT_DIR
 ACCOUNT_DIR_GLOB = ".claude*"        # folders under HOME that may be accounts (discovery only)
 RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".bash_aliases",
             ".profile")              # read-only, for aliases that set CONFIG_DIR_ENV

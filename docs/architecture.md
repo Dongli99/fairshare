@@ -148,8 +148,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
    - **`join [<id>] [--from <folder>]`** creates the folder with its links (the start check), runs
      the provider's own sign-in in it (`Provider.login_command`, interactive; fairshare never sees
      a token), then the sign-in check: not signed in or not a subscription login adds nothing;
-     the same identity as a configured account says "same login as <x>: one quota" and asks
-     before keeping it; a check that gives no answer adds it with the default plan and a warning.
+     the same identity as a configured account shares its quota: on a terminal join says so,
+     suggests signing out on the provider's site (`Provider.web`) or another browser profile,
+     and offers Enter (the sign-in again in the same folder, the browser asked again, then the
+     check again), `k` (keep anyway) or `n` (don't add; the folder stays); without a terminal it
+     is not added ("same login as <x>: one quota"). A check that gives no answer adds it with the
+     default plan and a warning. A missing provider command stops join before any folder.
      `--from` COPIES (never moves) the shared items of a user's folder into `shared/`, except
      `Provider.not_copied` (Claude Code: `sessions/`, the running sessions and their keys): folders
      merge as above, `.jsonl` lines are appended, and a single file is copied only when `shared/`
@@ -159,13 +163,22 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      go into the new account's state file, adding only what it lacks; identity, tokens and
      account fields never. The Claude in Chrome consent keys are in that same asked-for group
      (consent is per account, like trust). The prompt names counts and server names only. The source is never
-     written. Default id: the folder's alias or name, else the lowest free `account-N`.
+     written. Default id: the folder's alias or name, else the lowest free `account-N`; with no
+     id given, a terminal is asked a name with that default, asked again until it is a valid id
+     no configured account and no hub folder has (the default may name a hub folder: join reuses
+     it).
    - **`leave <id> [--logout]`** removes the account's table from `accounts.toml`; its folder and
      login stay. `--logout` runs the provider's sign-out in that folder first (a failure changes
      nothing).
    - **`setup`** asks the hub folder (default shown; not asked again once set), lists the user's
-     folders that discovery finds and runs `join <id> --from <folder>` for each one picked (one
-     already joined is marked and skipped). A folder qualifies only with its own state file, or as
+     folders that discovery finds and runs `join --from <folder>` for each one picked (one
+     already joined is marked and skipped; on a terminal each is asked a name). It always leaves
+     a complete hub (`shared/` and `accounts/`), even with none joined; with no account, a launch
+     and `status` say "no accounts yet" before checking the hub. A missing provider command
+     still gets the config and the hub, one line saying to install it, and no join. setup ends
+     with one line: start sessions with `fairshare`; the provider's own command
+     (`Provider.command`) still uses its default folder (`Provider.default_dir`), outside the
+     hub. It never edits shell files. A folder qualifies only with its own state file, or as
      the provider's default folder with HOME's state file beside it, or when an rc alias names
      it: shared items alone (a folder of shared sessions) do not make an account. fairshare
      never writes the user's folders; each folder's label comes from the provider's own sign-in
@@ -258,7 +271,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     or `[q]uit` (the default). Waiting sleeps to the target time in short naps, then checks
     every account again and re-ranks from fresh snapshots: it never launches on the old
     ranking. `[q]uit` exits 75, Ctrl-C 130, neither launching. Before any of this, a launch
-    (`run`, bare `fairshare`, `pickup`, `handoff`) whose provider binary is not on PATH says so
+    (`run`, bare `fairshare`, `pickup`, `handoff`; also `join`) whose provider binary is not on PATH says so
     and stops, before any sign-in check or probe.
 
 12. **The launcher.** `fairshare` with no arguments starts a session on the best account;

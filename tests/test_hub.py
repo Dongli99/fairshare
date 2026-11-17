@@ -296,6 +296,41 @@ class Setup(UserFolders):
     def test_picking_some_joins_those_only(self):
         self.assertEqual(self.go("setup", answers=["", "3"]), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["play"])
+        self.assertTrue(self.out.endswith("start sessions with `fairshare`; plain `claude` still "
+                                          "uses ~/.claude, outside the hub\n"), self.out)
+        self.assert_untouched()
+
+    def test_joining_none_leaves_a_hub_that_says_no_accounts_yet(self):
+        self.assertEqual(self.go("setup", answers=["", ""]), 0, self.err)
+        self.assertIn("start sessions with `fairshare`", self.out)
+        self.assertTrue(hub.present(self.hub))
+        for argv in (["status"], ["run"], []):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit) as e:
+                self.go(*argv)
+            self.assertEqual(str(e.exception),
+                             "fairshare: no accounts yet: `fairshare join <name>` signs one in")
+        self.assert_untouched()
+
+    def test_a_hub_left_without_accounts_folder_says_no_accounts_yet_too(self):
+        self.config()
+        hub.shared_dir(self.hub).mkdir(parents=True)        # what an older setup left
+        with self.assertRaises(SystemExit) as e:
+            self.go("status")
+        self.assertNotIn("no hub", str(e.exception))
+        self.assertIn("no accounts yet", str(e.exception))
+
+    def test_on_a_terminal_each_folder_is_asked_a_name(self):
+        # play takes the name work would default to; work's default is then refused
+        answers = ["", "3 4", "x y", "work", "", "", "job", "", "y"]
+        self.person("job", "zoe")
+        self.assertEqual(self.go("setup", tty=True, answers=answers), 0, self.err)
+        self.assertEqual(self.ids_in_config(), ["work", "job"])
+        prompts = [c.args[0] for c in self.asked.call_args_list]
+        self.assertEqual([p for p in prompts if p.startswith("Name")],
+                         ["Name for ~/.claude-play [play]: "] * 2
+                         + ["Name for ~/.claude-work [work]: "] * 2)
+        self.assertIn("work is already joined\n", self.out)
+        self.assertEqual((hub.shared_dir(self.hub) / "CLAUDE.md").read_text(), "play rules\n")
         self.assert_untouched()
 
     def test_a_chosen_hub_folder_is_stored(self):
@@ -315,7 +350,7 @@ class Setup(UserFolders):
         (self.bin / "fairshare").unlink()
         with self.assertRaises(SystemExit) as e:
             self.go("setup")
-        self.assertIn("install it first", str(e.exception))
+        self.assertIn("install it first (pipx install fairshare)", str(e.exception))
         self.assertFalse(self.cfg.exists())
 
     def test_a_config_that_cannot_be_parsed_is_refused_not_replaced(self):
@@ -324,6 +359,35 @@ class Setup(UserFolders):
             self.go("setup")
         self.assertIn("fix it or move it aside", str(e.exception))
         self.assertEqual(self.cfg.read_text(), "hub = \n")
+
+
+class NoTool(UserFolders):
+    """Claude Code is not installed."""
+
+    def setUp(self):
+        super().setUp()
+        (self.bin / "claude").unlink()
+        if shutil.which("claude"):
+            self.skipTest("a claude command is on /usr/bin or /bin")
+
+    def test_join_stops_before_any_folder(self):
+        self.config()
+        self.assertEqual(self.go("join", "a"), 1)
+        self.assertEqual(self.err, "fairshare: no Claude Code command found on PATH; install it, "
+                                   "then try again\n")
+        self.assertFalse(self.hub.exists())
+        self.assertEqual(self.ids_in_config(), [])
+
+    def test_setup_prepares_the_hub_says_so_once_and_joins_nothing(self):
+        self.assertEqual(self.go("setup", answers=[""]), 1)
+        self.assertEqual(self.err, "fairshare: no Claude Code command found on PATH; install it, "
+                                   "then run `fairshare setup` again to join accounts\n")
+        self.assertEqual(self.asked.call_count, 1)                # the hub folder only
+        self.assertEqual(load_accounts(self.cfg)[2], self.hub)
+        self.assertTrue(hub.present(self.hub))
+        self.assertTrue((hub.shared_dir(self.hub) / "settings.json").is_file())
+        self.assertEqual(self.ids_in_config(), [])
+        self.assert_untouched()
 
 
 class Join(UserFolders):
@@ -374,18 +438,85 @@ class Join(UserFolders):
         state = json.loads((hub.account_dir(self.hub, "w2") / ".claude.json").read_text())
         self.assertEqual(state, {"userID": "u-w2", "numStartups": 0})
 
-    def test_same_login_as_another_account_asks_before_keeping_it(self):
+    def twin(self):
+        """work joined; play's sign-in gives the same person."""
         self.config()
         self.person("play", "alice")                             # the same person as work
         self.go("join", "--from", "~/.claude-work", answers=["n"])
-        self.assertEqual(self.go("join", "--from", "~/.claude-play", answers=["n"]), 1)
-        self.assertIn("same login as work: one quota", self.out)
+
+    def test_same_login_without_a_terminal_is_not_added_and_said(self):
+        self.twin()
+        self.assertEqual(self.go("join", "--from", "~/.claude-play"), 1)
+        self.assertIn("same login as work: one quota\n", self.out)
+        self.assertIn(f"play not added; its folder stays at {hub.account_dir(self.hub, 'play')}",
+                      self.out)
+        self.asked.assert_not_called()
         self.assertEqual(self.ids_in_config(), ["work"])
         self.assertTrue(hub.account_dir(self.hub, "play").is_dir())      # nothing deleted
-        self.assertEqual(self.go("join", "--from", "~/.claude-play", answers=["y"]), 0)
-        self.assertEqual(self.ids_in_config(), ["work", "play"])
         for secret in SECRETS:
             self.assertNotIn(secret, self.out + self.err)
+
+    def test_same_login_on_a_terminal_explains_and_offers_three_ways(self):
+        for answers, code, ids in ((["", "", "k"], 0, ["work", "play"]),
+                                   (["", "", "x", "n"], 1, ["work"])):
+            with self.subTest(answers=answers):
+                self.twin()
+                self.assertEqual(self.go("join", "--from", "~/.claude-play", tty=True,
+                                         answers=answers), code, self.err)
+                self.assertIn("play signed in as the same account as work, so they share one "
+                              "quota: keeping both adds nothing.\nUsually the browser was still "
+                              "signed in to that account. Sign out on claude.ai, or choose "
+                              "another browser profile, then:\n", self.out)
+                prompts = [c.args[0] for c in self.asked.call_args_list]
+                self.assertEqual(prompts[-1],
+                                 "[Enter] sign in again · k = keep anyway · n = don't add ")
+                self.assertEqual(self.ids_in_config(), ids)
+                self.assertTrue(hub.account_dir(self.hub, "play").is_dir())
+                self.assertEqual(self.calls("play").count("auth login"), 1)
+                for secret in SECRETS:
+                    self.assertNotIn(secret, self.out + self.err)
+                shutil.rmtree(self.hub)
+                self.cfg.unlink()
+                for f in self.log.iterdir():
+                    f.unlink()
+
+    def test_enter_signs_in_again_offering_the_browser_and_checks_again(self):
+        self.twin()
+        real = cli._same_login
+
+        def then_sign_out(*a):                  # the user signs out on the site meanwhile
+            choice = real(*a)
+            self.person("play", "bob")
+            return choice
+        with mock.patch.object(cli, "_same_login", then_sign_out):
+            code = self.go("join", "--from", "~/.claude-play", tty=True,
+                           answers=["", "", "", "2", "/usr/bin/true"])
+        self.assertEqual(code, 0, self.err)
+        self.assertEqual(self.calls("play"), ["auth login", "auth status --json"] * 2)
+        self.assertEqual(self.out.count("Which browser should play's sign-in links open in?"), 2)
+        self.assertEqual(self.out.count("Signing in play:"), 2)
+        self.assertEqual(self.ids_in_config(), ["work", "play"])
+        self.assertEqual(load_accounts(self.cfg)[0][1].browser, "command:/usr/bin/true")
+        self.assertIn("joined play", self.out)
+
+    def test_without_an_id_a_terminal_is_asked_a_name(self):
+        self.config()
+        self.person("a2", "ann")
+        hub.account_dir(self.hub, "ghost").mkdir(parents=True)
+        self.assertEqual(self.go("join", tty=True,
+                                 answers=["bad/name", "ghost", "a2", ""]), 0, self.err)
+        prompts = [c.args[0] for c in self.asked.call_args_list]
+        self.assertEqual(prompts[:4], ["Name for the new account [account-1]: "] * 3
+                         + ["Choose [1]: "])
+        self.assertIn("account id 'bad/name': use letters, digits, '.', '-' or '_'\n", self.out)
+        self.assertIn("ghost is taken by a folder already in the hub\n", self.out)
+        self.assertEqual(self.ids_in_config(), ["a2"])
+
+    def test_the_default_name_is_taken_on_enter(self):
+        self.config()
+        self.person("account-1", "ann")
+        self.assertEqual(self.go("join", tty=True, answers=["", ""]), 0, self.err)
+        self.assertEqual(self.ids_in_config(), ["account-1"])
 
     def test_a_sign_in_that_fails_adds_nothing(self):
         self.config()
