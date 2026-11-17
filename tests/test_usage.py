@@ -85,6 +85,18 @@ class Parse(unittest.TestCase):
                                                 late)["five_hour"].resets_at,
                              at(2026, 11, 12, 9))
 
+    def test_the_comma_form_of_2_1_326_on_linux(self):
+        """Recorded 2026-11-17 on Ubuntu 24.04 (en_US.UTF-8); the same release on macOS prints
+        "Nov 17 at 4pm"."""
+        got = claude.parse_usage(
+            "You are currently using your subscription to power your Claude Code usage\n\n"
+            "Current session: 0% used · resets Nov 17, 4pm (America/Vancouver)\n"
+            "Current week (all models): 48% used · resets Nov 19, 2:59am (America/Vancouver)\n",
+            RECORDED)
+        van = ZoneInfo("America/Vancouver")
+        self.assertEqual(windows(got), {"five_hour": (0, at(2026, 11, 17, 16, zone=van)),
+                                        "seven_day": (48, at(2026, 11, 19, 2, 59, zone=van))})
+
     def test_the_year_rolls_over(self):
         dec30 = at(2026, 12, 30, 12)
         got = claude.parse_usage("Current week (all models): 50% used · resets Jan 2 at 3am "

@@ -241,7 +241,8 @@ _MODEL_LABEL = (_spaced(USAGE_MODEL_WEEK.partition("{}")[0]) + r"\s*(?P<model>[^
 _USAGE_LINE = re.compile(r"^\s*(?P<label>" + "|".join(_spaced(x) for x in USAGE_WINDOWS)
                          + "|" + _MODEL_LABEL + r")\s*:\s*(?P<pct>\d+(?:\.\d+)?)\s*%\s*(?:used)?"
                          r"\s*(?:\u00b7\s*resets\s+(?P<when>.*?))?\s*$", re.I)
-_WHEN = re.compile(r"(?:(?P<month>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2})\s+at\s+)?"
+# "Nov 17 at 4pm" on macOS; "Nov 17, 4pm" from the same release on Linux (2.1.326)
+_WHEN = re.compile(r"(?:(?P<month>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2})(?:\s+at\s+|\s*,\s*))?"
                    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<half>am|pm)"
                    r"\s*(?:\((?P<zone>[^()]+)\))?", re.I)
 
