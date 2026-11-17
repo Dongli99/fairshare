@@ -25,10 +25,16 @@ def state_dir() -> Path:
 
 
 def load(account_id: str) -> Snapshot | None:
+    """The account's snapshot; None when there is none or it cannot be read. A window whose
+    numbers are not numbers is left out, as if never seen, so that the next probe refills it."""
     try:
         d = json.loads((state_dir() / "snapshots" / f"{account_id}.json").read_text())
-        return Snapshot(d["captured_at"], {k: Window(**v) for k, v in d["windows"].items()})
-    except (OSError, ValueError, KeyError, TypeError):
+        windows = {k: Window(pct, at) for k, v in d["windows"].items() if isinstance(v, dict)
+                   and (pct := _num(v.get("used_pct"))) is not None
+                   and (at := _num(v.get("resets_at"))) is not None}
+        return Snapshot(float(d["captured_at"]), windows) if _num(d["captured_at"]) is not None \
+            else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
 

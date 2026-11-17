@@ -109,8 +109,9 @@ class Provider(Protocol):
         that look like session state and that launch() passes through. Empty otherwise."""
 
     def discover(self, home: Path) -> list[Candidate]:
-        """The user's own folders under `home`, signed in or not, for setup to show. Must not
-        read a login."""
+        """The user's own folders under `home`, signed in or not, for setup to show: the
+        provider's default folder (the one its tool uses when told none) first. Must not read a
+        login."""
 
     def account_status(self, account: Account) -> AccountStatus | None:
         """Ask the provider whether `account` is signed in, with what kind of login, under which

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shlex
 import tomllib
@@ -264,16 +265,24 @@ def _account(a: dict, hub: Path) -> Account:
     provider = a.get("provider") or (plan.provider if plan else _sole_provider())
     if not provider:
         raise ValueError(f"{error}, and no provider is named")
-    args, usage = a.get("status_args"), a.get("usage_args")
-    if isinstance(usage, list) and not all(isinstance(x, str) for x in usage):
-        raise ValueError("usage_args must be a string or a list of strings")
+    args, usage = _args(a, "status_args"), _args(a, "usage_args")
     if (spec := a.get("browser")) is not None:
         browser.parse(spec)                  # raises ValueError saying what is accepted
-    return Account(a["id"], provider, plan, hub / "accounts" / a["id"],
-                   tuple(shlex.split(args)) if args else None,
-                   None if usage is None else tuple(usage if isinstance(usage, list)
-                                                    else shlex.split(usage)),
+    return Account(a["id"], provider, plan, hub / "accounts" / a["id"], args or None, usage,
                    capacity, error, spec)
+
+
+def _args(a: dict, key: str) -> tuple[str, ...] | None:
+    """An account's command override `key`: a string (split as a shell would) or a list of
+    strings; None when absent."""
+    v = a.get(key)
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return tuple(shlex.split(v))
+    if isinstance(v, list) and all(isinstance(x, str) for x in v):
+        return tuple(v)
+    raise ValueError(f"{key} of {a['id']} must be a string or a list of strings")
 
 
 def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
@@ -307,8 +316,8 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
     for k, v in policy.items():
         if k not in Tuning.__dataclass_fields__:
             raise ConfigError(f"[policy] unknown key {k!r}; valid keys: {valid}")
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
-            raise ConfigError(f"[policy] {k} must be a number")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise ConfigError(f"[policy] {k} must be a number (not nan or inf)")
     if policy.get("refresh_minutes", 1) < 1:
         raise ConfigError("[policy] refresh_minutes must be at least 1")
     if policy.get("launch_pause", 0) < 0:

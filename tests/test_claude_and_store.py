@@ -3,7 +3,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import json
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from fairshare import store
 from fairshare.model import Snapshot, Window
@@ -39,6 +42,40 @@ class Store(unittest.TestCase):
             self.assertEqual(again.windows["five_hour"].used_pct, 30)     # replaced
             expired = store.merge(again, {}, 1000.0)                      # both past reset
             self.assertEqual(expired.windows, {})
+
+
+class WrongTypes(unittest.TestCase):
+    """A snapshot written with wrong types (a hand edit, another format) loads without the
+    windows it cannot use, so nothing crashes and the next probe refills them."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        env = mock.patch.dict(os.environ, {"FAIRSHARE_STATE": d.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.file = Path(d.name) / "snapshots" / "claude.json"
+        self.file.parent.mkdir()
+
+    def test_the_reviews_repro_drops_the_window_and_a_probe_heals_it(self):
+        self.file.write_text('{"captured_at": 1, "windows": {"seven_day": '
+                             '{"used_pct": 50, "resets_at": null}}}')
+        self.assertEqual(store.load("claude"), Snapshot(1.0, {}))
+        store.record("claude", {"seven_day": Window(41.0, 900.0)}, 100.0, probe=True)
+        self.assertEqual(store.load("claude").windows, {"seven_day": Window(41.0, 900.0)})
+
+    def test_each_wrong_type_drops_only_its_window(self):
+        self.file.write_text(json.dumps({"captured_at": 1, "windows": {
+            "five_hour": {"used_pct": "50", "resets_at": 9}, "seven_day": {"used_pct": 5,
+                                                                          "resets_at": 9},
+            "x": [1, 2], "y": {"used_pct": True, "resets_at": 9}, "z": {"used_pct": 1}}}))
+        self.assertEqual(store.load("claude"), Snapshot(1.0, {"seven_day": Window(5, 9)}))
+
+    def test_a_wrong_capture_time_or_window_table_reads_as_no_snapshot(self):
+        for text in ('{"captured_at": "1", "windows": {}}', '{"captured_at": 1, "windows": []}',
+                     '[]'):
+            self.file.write_text(text)
+            self.assertIsNone(store.load("claude"), text)
 
 
 class StaleRedraw(unittest.TestCase):

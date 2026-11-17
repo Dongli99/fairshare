@@ -910,6 +910,11 @@ class Transcript(Stranded):
                 self.assertEqual((code, out), (1, ""))
                 self.assertIn(f"{path}: could not be read, or its layout was not understood", err)
 
+    def test_a_record_with_no_transcript_says_so(self):
+        store.note_session(SessionSeen("s-none", str(self.work), None), "a", NOW)
+        self.assertEqual(self.go("transcript", "s-none"),
+                         (1, "", "fairshare: no transcript recorded for s-none\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

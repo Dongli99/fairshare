@@ -233,20 +233,39 @@ class WorkerCommand(Work):
         code, out, _ = self.worker("x", env={"FAKE_BG_FAIL": "1"})
         self.assertEqual((code, out, store.workers()), (3, "", []))
 
-    def test_a_join_that_times_out_says_so_and_a_later_retry_finds_it(self):
+    def test_a_join_without_a_list_says_so_and_a_later_retry_finds_it(self):
         self.trusted("a")
         start = self.clock[0]
         code, out, _ = self.worker("x", env={"FAKE_NO_LIST": "1"})
         self.assertEqual(code, 0)
         self.assertEqual(out, "worker w-9f8e7d6c-1 started on a; its session id is not known "
                               "yet (fairshare finds it by name later)\n")
-        self.assertGreaterEqual(self.clock[0] - start, cli.JOIN_WAIT)   # waited, on the clock
-        self.assertLess(self.clock[0] - start, cli.JOIN_WAIT + 1)
+        self.assertEqual(self.clock[0], start)     # no list before the start: no wait, no guess
         self.assertIsNone(store.worker("w-9f8e7d6c-1").session)
         accounts = load_accounts(self.tmp / "accounts.toml")[0]
         found = cli._join_pending(store.workers(PARENT), accounts, self.clock[0])
         self.assertEqual(found, {"w-9f8e7d6c-1": "s-w-9f8e7d6c-1"})
         self.assertEqual(store.session("s-w-9f8e7d6c-1").role, ROLE_WORKER)
+
+    def test_a_join_that_times_out_says_so(self):
+        self.trusted("a")
+        start = self.clock[0]
+        code, out, _ = self.worker("x", env={"FAKE_NO_JOIN": "1"})
+        self.assertEqual(code, 0)
+        self.assertIn("its session id is not known yet", out)
+        self.assertGreaterEqual(self.clock[0] - start, cli.JOIN_WAIT)   # waited, on the clock
+        self.assertLess(self.clock[0] - start, cli.JOIN_WAIT + 1)
+        self.assertIsNone(store.worker("w-9f8e7d6c-1").session)
+
+    def test_a_session_already_running_under_the_name_is_never_joined(self):
+        self.trusted("a")
+        (self.log / "live").write_text("w-9f8e7d6c-1\n")       # an earlier one, as s-w-…
+        start = self.clock[0]
+        code, out, _ = self.worker("x", env={"FAKE_NO_JOIN": "1"})
+        self.assertEqual(code, 0)
+        self.assertIn("its session id is not known yet", out)
+        self.assertIsNone(store.worker("w-9f8e7d6c-1").session)
+        self.assertGreaterEqual(self.clock[0] - start, cli.JOIN_WAIT)
 
     def test_a_retry_gives_up_on_an_old_worker(self):
         store.add_worker(Worker("old", PARENT, "a", str(self.here), self.clock[0]))

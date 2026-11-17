@@ -241,8 +241,10 @@ def seed(hub: Path, source: Path, account_id: str, prov,
                     notes.append(f"{name}: copied (the hub's held only what fairshare adds)")
                 elif ours.read_bytes() != data:
                     shown = diff(prov, name, ours.read_bytes(), data, f"{source}/{name}")
+                    keep = ", keeping fairshare's own entries" if name in prepare else ""
                     notes.append(f"{name}: differs from the hub's, which is kept (the first "
-                                 f"folder copied wins); not applied:\n{shown}".rstrip("\n"))
+                                 f"folder copied wins); not applied:\n{shown}".rstrip("\n")
+                                 + f"\nto adopt {source}/{name} instead, edit {ours}{keep}")
     return notes
 
 

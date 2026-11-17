@@ -1065,10 +1065,13 @@ def _pause(s: Survey, top: Verdict) -> Verdict | None:
     return eligible[int(key) - 1] if key and key.isdigit() else top
 
 
-def _pickup_prompt(rec: SessionRecord, now: float) -> str:
+def _pickup_prompt(rec: SessionRecord, now: float, handed: bool = False) -> str:
     """The first prompt of the session that continues `rec`. Provider-neutral. `first` is the
-    one place a step that comes before the rest goes."""
-    if rec.stranded_at is not None:
+    one place a step that comes before the rest goes. `handed`: `rec` handed over with nothing
+    to stop it (no launcher), so it may still run."""
+    if handed:
+        why = f"which handed over at {_clock(now, now)} and may still be running"
+    elif rec.stranded_at is not None:
         why = (f"which stopped at {_clock(rec.stranded_at, now)} because account {rec.account} "
                "hit its usage limit")
     else:
@@ -1078,7 +1081,8 @@ def _pickup_prompt(rec: SessionRecord, now: float) -> str:
              "it stood."] if note and note.is_file() else []
     return " ".join([
         f"This session continues session {rec.id}, {why}. Its folder: {rec.cwd}.", *first,
-        f"Run `fairshare transcript {rec.id} --tail 40` to see where it stopped; read the full "
+        f"Run `fairshare transcript {rec.id} --tail 40` to see where it "
+        f"{'left off' if handed else 'stopped'}; read the full "
         f"transcript at {rec.transcript} only if something is unclear. Then continue the work. "
         "First say in one line what you are picking up."])
 
@@ -1310,7 +1314,20 @@ def _run_account(account_id: str, args, model: str | None = None,
     return _launch(v, _with_model(args, model, effort), explicit=True, continues=continues)
 
 
+def _no_tool() -> bool:
+    """Whether the provider's command is missing from PATH (said): checked first by every
+    command that starts a session, before any sign-in check or probe, so the cause is the one
+    line shown."""
+    prov = _provider()
+    if prov.find_binary() is not None:
+        return False
+    _say(f"no {prov.tool} command found on PATH; install it, then try again")
+    return True
+
+
 def cmd_run(a) -> int:
+    if _no_tool():
+        return 1
     if a.account:
         return _run_account(a.account, a.args)
     return _route(a.args, pause=True)
@@ -1441,6 +1458,8 @@ def cmd_pickup(a) -> int:
     inside a session or with --bg, in the background. fairshare never stops a session it did
     not start."""
     prov = _provider()
+    if _no_tool():
+        return 1
     if _unknown_account(a.account):
         return 2
     here = prov.current_session()
@@ -1504,18 +1523,23 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
                 f"{rec.id}` from a terminal" if eligible else "none is eligible now"))
         return 1
     v = next((v for v in eligible if v.account.id == acct.id), None)
-    _say(f"picking up {rec.id} on {acct.id}" + (f" ({v.reason})" if v else "")
+    _say(f"handing off {rec.id[:8]} to a fresh session on {acct.id}, in the background" if fresh
+         else f"picking up {rec.id} on {acct.id}" + (f" ({v.reason})" if v else "")
          + ", in the background")
     prov, w = providers.get(acct.provider), _worker_of(rec.id)
     name = w.name if w else f"pickup-{rec.id[:8]}"
     extra = prov.model_args(model, effort)
     if fresh:
-        return _start_background(acct, name, _pickup_prompt(rec, s.now), rec.cwd, extra)
+        return _start_background(acct, name, _pickup_prompt(rec, s.now, handed=True), rec.cwd,
+                                 extra)
     fork = _may_run(rec)
+    before = _live_named(acct, name)
     if code := _start_background(acct, name, _moved_prompt(rec, acct.id), rec.cwd,
                                  [*prov.resume_args(rec.id, fork), *extra]):
         return code
-    new = _named_session(acct, name, rec.id)
+    new = _named_session(acct, name, before)
+    if new == rec.id:                       # it went on under its own id
+        new = None
     if new is None and not fork:
         store.move_session(rec.id, acct.id)
     elif new is None:
@@ -1527,17 +1551,26 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
     return 0
 
 
-def _named_session(acct: Account, name: str, old: str) -> str | None:
-    """The id of the session named `name` other than `old`, looked for in the provider's list
-    of running sessions for up to JOIN_WAIT seconds; None when only `old` (or nothing) is found:
-    the session went on under its own id, or the list cannot say."""
+def _live_named(acct: Account, name: str) -> set[str] | None:
+    """The ids of the sessions running under `name` now, taken before a background start that
+    is joined by that name (`_named_session`); None when the list cannot be had."""
+    live = providers.get(acct.provider).list_sessions(acct)
+    return None if live is None else {x.id for x in live if x.name == name}
+
+
+def _named_session(acct: Account, name: str, before: set[str] | None) -> str | None:
+    """The id of the session that a background start named `name` began: one listed under
+    that name that was not among `before` (`_live_named`, taken before the start), looked for
+    in the provider's list of running sessions for up to JOIN_WAIT seconds. None when nothing
+    new is found, or when `before` could not be had: an earlier session of that name (an
+    earlier pickup of the same session, a worker picked up twice) is never taken."""
+    if before is None:
+        return None
     end = _now() + JOIN_WAIT
     prov = providers.get(acct.provider)
     while True:
         live = prov.list_sessions(acct) or []
-        if any(x.id == old and x.name == name for x in live):
-            return None
-        if found := next((x.id for x in live if x.name == name and x.id != old), None):
+        if found := next((x.id for x in live if x.name == name and x.id not in before), None):
             return found
         if _now() >= end:
             return None
@@ -1581,6 +1614,8 @@ def cmd_handoff(a) -> int:
     (without a launcher, in the background). Without NOTE (the user's `!`): the launcher stops
     this session, has it write the note in one headless turn, then starts the fresh one."""
     prov = _provider()
+    if _no_tool():
+        return 1
     if (here := prov.current_session()) is None:
         _say("not inside a session: handoff is for the session it runs in; to move another "
              "one: fairshare pickup SESSION")
@@ -1596,7 +1631,10 @@ def cmd_handoff(a) -> int:
     if a.note:
         print(_write_checkpoint(rec.id, a.note))
         if launcher is None:
-            return _pickup_background(rec, req, fresh=True)
+            if code := _pickup_background(rec, req, fresh=True):
+                return code
+            print("this session keeps running: stop here and leave the work to the new session")
+            return 0
         _request(launcher, req)
         print("the launcher will stop this session and start a fresh one that reads the note first")
         return 0
@@ -1957,17 +1995,6 @@ def _join_pending(pending: list[Worker], accounts: list[Account], now: float) ->
     return found
 
 
-def _join_new(w: Worker, accounts: list[Account]) -> str | None:
-    """A new worker's session id, looked for by its name for up to JOIN_WAIT seconds."""
-    end = _now() + JOIN_WAIT
-    while True:
-        if sid := _join_pending([w], accounts, w.started).get(w.name):
-            return sid
-        if _now() >= end:
-            return None
-        _sleep(JOIN_POLL)
-
-
 def _new_worker(parent: str, acct: Account, cwd: str, name: str | None, model: str,
                 effort: str) -> Worker | None:
     """Record a new worker under `name`, or under the first free `w-<parent's first 8>-<n>`;
@@ -2028,11 +2055,13 @@ def cmd_worker(a) -> int:
         return 2
     _say(f"starting worker {w.name} on {acct.id}{why and why[acct.id]}")
     prompt = WORKER_LINE.format(parent=parent) + "\n\n" + a.prompt
+    before = _live_named(acct, w.name)
     if code := _start_background(acct, w.name, prompt, str(here),
                                  providers.get(acct.provider).model_args(a.model, a.effort)):
         store.drop_worker(w.name)
         return code
-    if sid := _join_new(w, accounts):
+    if sid := _named_session(acct, w.name, before):
+        _joined(w, sid, _now())
         print(f"worker {w.name} started on {acct.id} (session {sid[:8]})")
     else:
         print(f"worker {w.name} started on {acct.id}; its session id is not known yet "
@@ -2265,8 +2294,10 @@ def cmd_transcript(a) -> int:
     last N, each prefixed `user:` or `assistant:`. Never a raw record."""
     if (rec := _find_session(a.session)) is None:
         return 2
-    path = Path(rec.transcript) if rec.transcript else None
-    said = path and _provider().transcript_text(path)
+    if not rec.transcript:
+        _say(f"no transcript recorded for {rec.id[:8]}")
+        return 1
+    said = _provider().transcript_text(Path(rec.transcript))
     if not said:
         _say(f"{rec.transcript}: could not be read, or its layout was not understood; "
              "nothing shown")
@@ -2437,15 +2468,17 @@ def _skill_state(prov, hub: Path) -> tuple[Path, str, str | None, str]:
 
 
 def _install_skill(prov, hub: Path) -> str | None:
-    """Install or refresh fairshare's skill in the hub, its diff shown first; another skill of
-    that name is never touched. What happened, or None when it was current."""
+    """Install fairshare's skill in the hub (one line), or refresh it (its diff shown first);
+    another skill of that name is never touched. What happened ("installed in …", "updated …"),
+    or None when it was current."""
     dest, text, there, word = _skill_state(prov, hub)
     if word == "current":
         return None
     if word == "foreign":
         return f"{dest} is not fairshare's skill; left alone"
-    print(hub_mod.diff(prov, dest.name, (there or "").encode(), text.encode(),
-                       f"{dest.name} (fairshare's skill)").rstrip("\n"))
+    if there is not None:
+        print(hub_mod.diff(prov, dest.name, there.encode(), text.encode(),
+                           f"{dest.name} (fairshare's skill)").rstrip("\n"))
 
     def change(old: str | None) -> str | None:
         if old == text:
@@ -2453,7 +2486,8 @@ def _install_skill(prov, hub: Path) -> str | None:
         if old is not None and not prov.own_skill(old):
             raise ValueError("not fairshare's skill")
         return text
-    return hub_mod.edit_shared(hub, dest, change, "skill")
+    note = hub_mod.edit_shared(hub, dest, change, "skill")
+    return f"installed in {dest}" if there is None and note == f"updated {dest}" else note
 
 
 def _copy_state(prov, source: Path, account: Account, hub: Path) -> None:
@@ -2711,14 +2745,21 @@ def _setup() -> int:
     print("Your own folders (fairshare copies from them and never changes them):" if found else
           "Found none of your own folders. Add an account with `fairshare join`.")
     joined = {a.id for a in _load()[0]}
-    for i, (c, label) in enumerate(zip(found, _sign_in_labels(found, home)), 1):
+    labels = _sign_in_labels(found, home)
+    for i, (c, label) in enumerate(zip(found, labels), 1):
         print(f"  {i}  {c.id:<12} {_tilde(c.config_dir, home):<24} {c.found}"
               + (f"  ({label})" if label else "") + ("  (joined)" if c.id in joined else ""))
+    # `all`: the signed-in folders first (the provider's default one leads discover's order)
+    every = [c for c, label in sorted(zip(found, labels), key=lambda x: x[1] != "")]
+    if found:
+        seeded = dict.fromkeys(f for c in found for f in _seeded_files(providers.get(c.provider)))
+        print(f"The first folder joined decides the shared {', '.join(seeded)}; "
+              f"'all' joins in this order: {', '.join(c.id for c in every)}")
     answer = input("Join which? Numbers separated by spaces, 'all', or Enter for none: "
                    ) if found else ""
     words = answer.replace(",", " ").split()
     try:
-        picked = found if words == ["all"] else [found[int(w) - 1] for w in words]
+        picked = every if words == ["all"] else [found[int(w) - 1] for w in words]
     except (ValueError, IndexError):
         _say(f"not a choice: {answer.strip()!r}; nothing joined")
         return 2
@@ -2756,16 +2797,27 @@ def _offer_setup() -> int:
     return 2
 
 
+def _seeded_files(prov) -> list[str]:
+    """The provider's shared files that the first folder copied decides (a later one's are only
+    shown as a diff): neither folders nor append-only `.jsonl` logs."""
+    return [i for i in prov.shared if not i.endswith("/") and not i.endswith(".jsonl")]
+
+
 def _merge_back_prompt(prov, shared: Path, folders: list[str]) -> str:
-    dirs = [i.rstrip("/") + "/" for i in prov.shared if i.endswith("/")]
+    """What join copied in, as a prompt that copies it back: never what join never copies
+    (`not_copied`) nor fairshare's own skill."""
+    dirs = [i.rstrip("/") + "/" for i in prov.shared if i.endswith("/")
+            and i not in prov.not_copied]
     logs = [i for i in prov.shared if i.endswith(".jsonl")]
-    files = [i for i in prov.shared if not i.endswith("/") and not i.endswith(".jsonl")]
+    files = _seeded_files(prov)
+    skill = prov.skill(shared)[0].parent.relative_to(shared).as_posix() + "/"
     return "\n".join([
         f"fairshare kept my {prov.name} history and settings in one shared folder, {shared}.",
         "Merge it back into my own config folders ("
         + (", ".join(folders) if folders else "ask me which") + ") without losing anything:",
-        f"- folders ({', '.join(dirs)}): copy every file my folder lacks; when a file is in both",
-        "  with different content, keep both and give the incoming one a new name;",
+        f"- folders ({', '.join(dirs)}): copy every file my folder lacks, except {skill}",
+        "  (fairshare's own skill); when a file is in both with different content, keep both",
+        "  and give the incoming one a new name;",
         f"- {', '.join(logs)}: append the lines my file lacks, in their order;",
         f"- {', '.join(files)}: show me the differences and ask before changing anything.",
         f"Never delete or change anything in {shared}, never open or copy a login file, and show",
@@ -2784,7 +2836,9 @@ def cmd_uninstall(_a) -> int:
             print(f"{path}: {e}")
     print("fairshare never changed your own folders, so there is nothing to undo in them.")
     print(f"Config: {path}" + ("" if path.exists() else " (none)"))
-    print(f"State (usage snapshots): {store.state_dir()}")
+    if olds := sorted(p.name for p in path.parent.glob(path.name + ".bak-fairshare-*")):
+        print(f"  backups of it, beside it: {', '.join(olds)}")
+    print(f"State (usage snapshots, session records and checkpoint notes): {store.state_dir()}")
     if hub is not None:
         shared = hub_mod.shared_dir(hub)
         print(f"Hub: {hub}" + ("" if hub.exists() else " (not created)"))
@@ -2795,6 +2849,9 @@ def cmd_uninstall(_a) -> int:
             if (hub / "accounts").is_dir() else []
         print("  accounts: " + (", ".join(f"{i}{'' if i in configured else ' (left)'}"
                                           for i in folders) or "none"))
+        if folders:
+            print("  each stays signed in (on macOS, one keychain entry per folder) when the hub "
+                  "is deleted; `fairshare leave --logout <id>` signs one out first")
         backups = hub / "backups"
         print(f"  backups: {len(list(backups.iterdir())) if backups.is_dir() else 0} "
               "folder(s) of things fairshare moved aside")
@@ -2905,7 +2962,7 @@ def _fix(hub_arg: Path | None) -> bool:
                 report(False, f"usage hook: {settings} {e}; left as it is")
         if (_skill_state(prov, hub)[3]) != "current":
             note = _install_skill(prov, hub)
-            report(bool(note and note.startswith("updated")), f"skill: {note}")
+            report(bool(note and note.startswith(("updated", "installed"))), f"skill: {note}")
         if old is not None:
             text = _read(settings)
             try:

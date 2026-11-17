@@ -219,7 +219,8 @@ class UserFolders(Base):
         self.assertEqual(self.user_bytes(), self.before)
 
     def setup_all(self):
-        # shown in id order: claude, claude-old, play, work. Questions: the hub folder, which to
+        # shown as claude (the default folder), claude-old, play, work; `all` joins the signed-in
+        # ones first: claude, work, then claude-old, play. Questions: the hub folder, which to
         # join, then copying state from ~/.claude.json (claude) and ~/.claude-work (work).
         return self.go("setup", answers=["", "all", "y", "y"])
 
@@ -227,7 +228,10 @@ class UserFolders(Base):
 class Setup(UserFolders):
     def test_end_to_end_four_accounts_one_assistant(self):
         self.assertEqual(self.setup_all(), 0, self.err)
-        self.assertEqual(self.ids_in_config(), ["claude", "claude-old", "play", "work"])
+        self.assertEqual(self.ids_in_config(), ["claude", "work", "claude-old", "play"])
+        self.assertIn("The first folder joined decides the shared settings.json, CLAUDE.md, "
+                      "keybindings.json; 'all' joins in this order: claude, work, claude-old, "
+                      "play\n", self.out)
         self.assertEqual(load_accounts(self.cfg)[2], self.hub)
         self.assertIn("claude-old", [l for l in self.out.splitlines() if "(signed out)" in l][0])
         for i in self.ids_in_config():
@@ -236,28 +240,31 @@ class Setup(UserFolders):
         shared = hub.shared_dir(self.hub)
         # history: every folder's lines, once each, in order
         self.assertEqual(lines(shared / "history.jsonl"),
-                         ['{"display": "d1"}', '{"display": "h2"}', '{"display": "h3"}',
-                          '{"display": "h1"}'])
+                         ['{"display": "d1"}', '{"display": "h1"}', '{"display": "h2"}',
+                          '{"display": "h3"}'])
         # transcripts: a clash keeps both, the later one named after its account
-        self.assertEqual((shared / "projects/-p-one/s1.jsonl").read_text(), "B\n")
-        self.assertEqual((shared / "projects/-p-one/s1.from-work.jsonl").read_text(), "A\n")
+        self.assertEqual((shared / "projects/-p-one/s1.jsonl").read_text(), "A\n")
+        self.assertEqual((shared / "projects/-p-one/s1.from-play.jsonl").read_text(), "B\n")
         for f in ("-p-two/s2.jsonl", "-p-old/s0.jsonl", "-p-one/memory/MEMORY.md"):
             self.assertTrue((shared / "projects" / f).is_file(), f)
         self.assertTrue((shared / "skills/x/SKILL.md").is_file())
         # settings: the first seed wins and is wired; a later difference is shown, not applied,
-        # with the variable's value hidden
+        # with the variable's value hidden and the file to edit to adopt it named
         s = json.loads((shared / "settings.json").read_text())
-        self.assertEqual(s["theme"], "light")
-        self.assertEqual(s["statusLine"]["command"],
-                         f"{self.bin}/fairshare capture --then '~/bin/line.sh'")
+        self.assertEqual(s["theme"], "dark")
+        self.assertEqual(s["statusLine"]["command"], f"{self.bin}/fairshare capture")
         self.assertIn("settings.json: differs from the hub's", self.out)
         self.assertIn('"SECRET_TOKEN": "(hidden)"', self.out)
-        self.assertEqual((shared / "CLAUDE.md").read_text(), "play rules\n")
-        self.assertIn("+work rules", self.out)
+        self.assertIn(f"to adopt {self.home}/.claude-play/settings.json instead, edit "
+                      f"{shared}/settings.json, keeping fairshare's own entries\n", self.out)
+        self.assertEqual((shared / "CLAUDE.md").read_text(), "work rules\n")
+        self.assertIn("+play rules", self.out)
+        self.assertIn(f"to adopt {self.home}/.claude-play/CLAUDE.md instead, edit "
+                      f"{shared}/CLAUDE.md\n", self.out)
         # every account sees the same items through its links
         for i in self.ids_in_config():
             acct = hub.account_dir(self.hub, i)
-            self.assertEqual((acct / "projects/-p-one/s1.jsonl").read_text(), "B\n")
+            self.assertEqual((acct / "projects/-p-one/s1.jsonl").read_text(), "A\n")
             self.assertEqual((acct / "settings.json").read_text(),
                              (shared / "settings.json").read_text())
         # state: only trust, user MCP servers and onboarding came over; identity never
@@ -274,6 +281,16 @@ class Setup(UserFolders):
         for secret in SECRETS:
             self.assertNotIn(secret, self.out + self.err)
         self.assertFalse(list(self.hub.glob("accounts/*/.claude.json.lock")))
+        self.assert_untouched()
+
+    def test_numbers_join_in_the_order_typed(self):
+        self.assertEqual(self.go("setup", answers=["", "3 4", "y"]), 0, self.err)
+        self.assertEqual(self.ids_in_config(), ["play", "work"])
+        s = json.loads((hub.shared_dir(self.hub) / "settings.json").read_text())
+        self.assertEqual(s["theme"], "light")                       # play's: joined first
+        self.assertEqual(s["statusLine"]["command"],
+                         f"{self.bin}/fairshare capture --then '~/bin/line.sh'")
+        self.assertEqual((hub.shared_dir(self.hub) / "CLAUDE.md").read_text(), "play rules\n")
         self.assert_untouched()
 
     def test_picking_some_joins_those_only(self):
@@ -752,6 +769,17 @@ class BareAndUninstall(UserFolders):
         self.assertIn(f"one shared folder, {self.hub / 'shared'}", self.out)
         self.assertIn("history.jsonl: append the lines my file lacks", self.out)
         self.assertIn("~/.claude-work", self.out)
+        self.assertIn("State (usage snapshots, session records and checkpoint notes): ", self.out)
+        self.assertIn("  each stays signed in (on macOS, one keychain entry per folder) when the "
+                      "hub is deleted; `fairshare leave --logout <id>` signs one out first\n",
+                      self.out)
+        olds = sorted(p.name for p in self.cfg.parent.glob("accounts.toml.bak-fairshare-*"))
+        self.assertTrue(olds)                                   # each join wrote one
+        self.assertIn(f"  backups of it, beside it: {', '.join(olds)}\n", self.out)
+        prompt = self.out[self.out.index("fairshare kept my"):]
+        self.assertNotIn("sessions/", prompt)                   # join never copies it
+        self.assertIn("projects/", prompt)
+        self.assertIn("except skills/fairshare/\n  (fairshare's own skill)", prompt)
         self.assert_untouched()
 
     def test_uninstall_with_no_config(self):

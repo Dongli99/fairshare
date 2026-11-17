@@ -47,12 +47,12 @@ class InHub(Base):
         self.go("doctor")
         return next(l for l in self.out.splitlines() if "skill in the hub" in l)
 
-    def test_installed_with_its_diff_by_fix_and_doctor_passes(self):
+    def test_installed_in_one_line_by_fix_and_doctor_passes(self):
         self.assertEqual(self.doctor_line(), "FAIL  claude: skill in the hub is missing (run "
                                              "`fairshare doctor --fix`)")
         self.go("doctor", "--fix")
-        self.assertIn("+name: fairshare", self.out)
-        self.assertIn("fixed  skill: updated", self.out)
+        self.assertNotIn("+name: fairshare", self.out)                 # new: no diff
+        self.assertIn(f"fixed  skill: installed in {self.dest}\n", self.out)
         self.assertEqual(self.dest.read_text(), self.text)
         self.assertEqual(self.doctor_line(), "pass  claude: skill in the hub is current")
         self.assertEqual(self.mine.read_text(), "---\nname: mine\n---\nmine\n")   # untouched
@@ -61,8 +61,8 @@ class InHub(Base):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             cli._wire_hub(claude, self.hub, str(self.bin / "fairshare"))
-        self.assertIn("+name: fairshare", out.getvalue())
-        self.assertIn("skill: updated", out.getvalue())
+        self.assertEqual(out.getvalue().splitlines()[-1], f"skill: installed in {self.dest}")
+        self.assertNotIn("+name: fairshare", out.getvalue())
         self.assertEqual(self.dest.read_text(), self.text)
         self.assertIsNone(cli._install_skill(claude, self.hub))         # current: nothing to do
 

@@ -59,6 +59,11 @@ class Discover(Home):
         (self.home / claude.STATE_FILE).write_text("{}")
         self.assertIn("claude", {c.id for c in claude.discover(self.home)})
 
+    def test_the_default_dir_comes_first_then_by_id(self):
+        (self.home / claude.STATE_FILE).write_text("{}")
+        self.assertEqual([c.id for c in claude.discover(self.home)],
+                         ["claude", "alpha", "beta", "claude-extra", "w"])
+
     def test_shared_items_alone_do_not_make_an_account(self):
         shared = self.home / ".claude-sessions"           # e.g. a folder of shared sessions
         (shared / "sessions").mkdir(parents=True)

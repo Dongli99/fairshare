@@ -315,6 +315,17 @@ class CommandPickup(Handover):
                           copy.cwd), ("b", ROLE_WORKER, "p-1", "claude-opus-5-5", "high",
                                       str(self.work)))
 
+    def test_a_second_pickup_of_the_same_session_links_the_new_copy_never_the_earlier(self):
+        self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        (self.log / "live").write_text("s-earlier pickup-0a1b2c3d\n")   # an earlier pickup, live
+        code, out, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 0, err)
+        new = "s-pickup-0a1b2c3d"
+        self.assertIn(f"continued as session {new} on b", out)
+        self.assertEqual(store.session(new).continues, SID)
+        self.assertIsNone(store.session("s-earlier"))
+        self.assertFalse(store.checkpoint_path("s-earlier").is_file())
+
     def test_a_copy_the_tool_made_by_itself_gets_the_record_too(self):
         self.record(model="claude-opus-5-5", effort="high")
         with mock.patch.dict(os.environ, {"FAKE_COPY": "1"}):
@@ -390,6 +401,13 @@ class Handoff(Handover):
                                     "claude-opus-5-5", "--effort", "high"])
         self.assertNotIn("--resume", args)
         self.assertIn(f"Read its checkpoint note {store.checkpoint_path(SID)} first", args[7])
+        self.assertIn(f"continues session {SID}, which handed over at 08:00 and may still be "
+                      "running. Its folder:", args[7])
+        self.assertNotIn("stopped", args[7])
+        self.assertIn(f"handing off {SID[:8]} to a fresh session on b, in the background\n", err)
+        self.assertNotIn("picking up", err)
+        self.assertTrue(out.endswith("this session keeps running: stop here and leave the work "
+                                     "to the new session\n"), out)
 
     def test_without_a_note_it_needs_a_launcher(self):
         self.record()

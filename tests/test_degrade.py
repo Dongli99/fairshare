@@ -24,6 +24,20 @@ PAYLOAD = {"rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": NOW
                            "seven_day": {"used_percentage": 30, "resets_at": NOW + 90000}}}
 
 
+class NoTool(Fleet):
+    """F10 of review 3: without the provider's command, a launch says so first, and only that."""
+
+    def test_a_launch_says_the_command_is_missing_and_stops(self):
+        self.add("a", orgId=ORG + "a")
+        (self.bin / "claude").unlink()
+        line = "fairshare: no Claude Code command found on PATH; install it, then try again\n"
+        for argv in ((), ("run",), ("run", "-a", "a"), ("pickup", "0a1b2c3d"),
+                     ("handoff", "a note")):
+            with self.subTest(argv=argv):
+                self.assertEqual(self.go(*argv), (1, "", line))
+                self.launched.assert_not_called()
+
+
 class UnknownPlan(Fleet):
     """F3: a plan name with no plan file leaves that account out; nothing else breaks."""
 
@@ -113,6 +127,28 @@ class BadInput(Fleet):
         with self.assertRaises(SystemExit) as e:
             self.go("status")
         self.assertIn("grace_hours must be a number", str(e.exception.code))
+
+    def test_a_policy_number_must_be_finite(self):
+        for bad in ("launch_pause = nan", "refresh_minutes = inf", "grace_hours = -inf"):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit) as e:
+                self.write(f"[policy]\n{bad}\n")
+                self.go("status")
+            self.assertIn(f"[policy] {bad.split()[0]} must be a number (not nan or inf)",
+                          str(e.exception.code))
+
+    def test_command_overrides_take_a_string_or_a_list_of_strings(self):
+        base = '[[account]]\nid = "a"\nplan = "claude-pro"\n'
+        self.write(base + 'status_args = ["whoami", "--text"]\nusage_args = "-p /usage"\n')
+        acct = load_accounts(self.tmp / "accounts.toml")[0][0]
+        self.assertEqual((acct.status_args, acct.usage_args), (("whoami", "--text"),
+                                                               ("-p", "/usage")))
+        for key, bad in (("status_args", "5"), ("usage_args", "5"), ("status_args", "[1]"),
+                         ("usage_args", '{x = "y"}')):
+            with self.subTest(key=key, bad=bad), self.assertRaises(SystemExit) as e:
+                self.write(base + f"{key} = {bad}\n")
+                self.go("status")
+            self.assertIn(f"account 1: {key} of a must be a string or a list of strings",
+                          str(e.exception.code))
 
     def test_a_broken_file_names_the_file_and_the_line(self):
         self.write('[[account]]\nid = "a"\nplan = \n')

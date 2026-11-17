@@ -683,7 +683,7 @@ def discover(home: Path) -> list[Candidate]:
     """Folders set up under `home`: aliases of the form `alias X="CONFIG_DIR_ENV=P ..."` in
     shell rc files (best effort), and ACCOUNT_DIR_GLOB dirs the tool has run in: holding their
     own STATE_FILE, or DEFAULT_DIR with HOME's beside it. Shared items alone (a folder of shared
-    sessions, say) do not make an account. Reads no login."""
+    sessions, say) do not make an account. DEFAULT_DIR first, then by id. Reads no login."""
     found: dict[Path, Candidate] = {}
     for rc in RC_FILES:
         try:
@@ -700,7 +700,7 @@ def discover(home: Path) -> list[Candidate]:
         if (d / STATE_FILE).is_file() or (d == home / DEFAULT_DIR
                                           and (home / STATE_FILE).is_file()):
             found[d] = Candidate(d.name.lstrip("."), name, d, f"folder ~/{d.name}")
-    return sorted(found.values(), key=lambda c: c.id)
+    return sorted(found.values(), key=lambda c: (c.config_dir != home / DEFAULT_DIR, c.id))
 
 
 def _expand(p: str, home: Path) -> Path:

@@ -252,7 +252,7 @@ class Probe(Usage):
         self.add("a", extra="usage_args = [1]\n")
         with self.assertRaises(SystemExit) as e:
             self.go("status")
-        self.assertIn("usage_args must be a string or a list of strings", str(e.exception))
+        self.assertIn("usage_args of a must be a string or a list of strings", str(e.exception))
 
 
 class Route(Usage):
