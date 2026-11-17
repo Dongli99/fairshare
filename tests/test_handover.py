@@ -265,6 +265,29 @@ class CommandPickup(Handover):
         self.assertEqual(cmd[1:6], ["--model", "claude-opus-5-5", "--effort", "max", "--resume"])
         self.assertEqual(store.session(SID).account, "a")     # until its first capture
 
+    def test_foreground_of_a_running_session_continues_a_copy(self):
+        self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        code, _, err = self.go("pickup", SID[:8], tty=True)
+        self.assertEqual(code, 0, err)
+        cmd, env = self.launched.call_args.args[:2]
+        self.assertEqual(cmd[5:8], ["--resume", SID, "--fork-session"])
+        self.assertIn(f"{SID[:8]} was not stopped by its limit and may still be running; "
+                      "continuing a copy under a new id (the original is left as it is)", err)
+        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}:copy")
+        rec = store.session(SID)                                 # left as it is
+        self.assertEqual((rec.account, rec.stranded_at, rec.moved_to), ("a", None, None))
+
+    def test_foreground_of_a_stranded_session_resumes_in_place(self):
+        self.record(model="claude-opus-5-5", effort="high")
+        code, _, err = self.go("pickup", SID[:8], tty=True)
+        self.assertEqual(code, 0, err)
+        cmd, env = self.launched.call_args.args[:2]
+        self.assertEqual(cmd[5:7], ["--resume", SID])
+        self.assertNotIn("--fork-session", cmd)
+        self.assertNotIn("may still be running", err)
+        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}")
+        self.assertIsNone(store.session(SID).stranded_at)       # cleared at the start
+
     def test_background_of_a_stranded_session_resumes_in_place(self):
         self.record(model="claude-opus-5-5", effort="high")
         code, out, err = self.inside("pickup")

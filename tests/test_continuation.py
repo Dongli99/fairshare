@@ -227,25 +227,58 @@ class Readers(Continuation):
         self.assertEqual(store.latest("c-0"), f"c-{store.CHAIN_STEPS}")
 
 
-class BackgroundCopy(Continuation):
-    """A background pickup of a running session forks under a new id: the same link."""
+class Copy(Continuation):
+    """A copy of a session that may still run (the foreground pickup through FAIRSHARE_CONTINUES
+    with `:copy`, the background pickup's fork) links to the original without taking its place:
+    the original keeps its account, workers and line in status."""
 
-    def test_the_copy_is_linked_re_parents_and_copies_the_note(self):
+    def setUp(self):
+        super().setUp()
         store.update_session(SID, lambda old: SessionRecord(**{**vars(old), "stranded_at": None}))
-        with mock.patch.object(store, "link_session", wraps=store.link_session) as linked:
-            code, out, err = self.go("pickup", SID, "--bg")
-        self.assertEqual(code, 0, err)
-        copy = "s-pickup-0a1b2c3d"
-        linked.assert_called_once()
-        self.assertIn(f"continued as session {copy} on b", out)
+
+    def original_whole(self, copy):
         new, old = store.session(copy), store.session(SID)
         self.assertEqual((new.account, new.role, new.parent, new.model, new.effort,
                           new.continues), ("b", ROLE_WORKER, "p-1", "claude-opus-5-5", "high",
                                            SID))
-        self.assertEqual((old.account, old.moved_to), ("a", copy))
+        self.assertEqual((old.account, old.moved_to, old.parent), ("a", None, "p-1"))
+        self.assertEqual([w.name for w in store.workers(SID)], ["w-1"])
+        self.assertEqual(store.workers(copy), [])
+        self.assertEqual(store.session("s-w").parent, SID)
+        self.assertEqual(store.total_cost(old.costs), 2.5)
+        self.assertEqual(self.note(copy), "## old\nparser done\n")
+        self.assertEqual(store.latest(SID), SID)
+        code, out, err = self.go("status")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"session {SID[:8]}", out)
+
+    def test_the_foreground_copy_is_linked_as_a_copy(self):
+        self.capture(value=f"{LAUNCHER}:{SID}:copy", cost={"total_cost_usd": 0.5})
+        self.original_whole(NEW)
+        self.assertEqual(store.total_cost(store.session(NEW).costs), 0.5)   # its own series
+
+    def test_the_background_fork_is_linked_as_a_copy(self):
+        code, out, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 0, err)
+        copy = "s-pickup-0a1b2c3d"
+        self.assertIn(f"continued as session {copy} on b", out)
+        self.assertIn(f"{SID[:8]} was not stopped by its limit and may still be running", err)
+        self.original_whole(copy)
+
+
+class StoppedCopy(Continuation):
+    """A stranded session the tool continued under a new id by itself really stopped: the copy
+    takes its place, as a resume on another account does."""
+
+    def test_a_background_resume_that_became_a_copy_moves(self):
+        with mock.patch.dict(os.environ, {"FAKE_COPY": "1"}):
+            code, out, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 0, err)
+        copy = "s-pickup-0a1b2c3d"
+        self.assertNotIn("may still be running", err)
+        self.assertEqual(store.session(SID).moved_to, copy)
         self.assertEqual(store.session("s-w").parent, copy)
         self.assertEqual([w.name for w in store.workers(copy)], ["w-1"])
-        self.assertEqual(self.note(copy), "## old\nparser done\n")
 
 
 if __name__ == "__main__":

@@ -370,17 +370,19 @@ def latest(session_id: str) -> str:
     return chain[-1]
 
 
-def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float
-                 ) -> SessionRecord | None:
+def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
+                 copy: bool = False) -> SessionRecord | None:
     """`seen` continues the session `old_id` under a new id on `account_id` (a resume on another
-    account, or a background copy). Its record takes the old one's role, parent, model, display
-    name and effort where it lacks them (a model `seen` names wins, as in `note_session`), the
-    account, `seen`'s folder and transcript, `continues=old_id`, and keeps a cost series of its
-    own. The old record keeps its account and costs, gets `moved_to`, and is no longer stranded
-    or waiting. Workers (their records and their sessions' records) whose parent is the old id
-    now name the new one; the old checkpoint note is copied when the new id has none. None, with
-    nothing changed, when either id is bad, they are the same, the old record is missing or has
-    moved already, or the new one already continues a session."""
+    account, or a copy). Its record takes the old one's role, parent, model, display name and
+    effort where it lacks them (a model `seen` names wins, as in `note_session`), the account,
+    `seen`'s folder and transcript, `continues=old_id`, and keeps a cost series of its own; the
+    old checkpoint note is copied when the new id has none. When the old session has stopped
+    (not `copy`), the new one takes its place: the old record keeps its account and costs, gets
+    `moved_to`, and is no longer stranded or waiting, and workers (their records and their
+    sessions' records) whose parent is the old id now name the new one. A `copy` of a session
+    that may still run leaves the old record and its workers as they are. None, with nothing
+    changed, when either id is bad, they are the same, the old record is missing or has moved
+    already, or the new one already continues a session."""
     if old_id == seen.id or not _SESSION_ID.fullmatch(old_id) \
             or not _SESSION_ID.fullmatch(seen.id):
         return None
@@ -400,14 +402,15 @@ def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float
                       role=new.role or old.role, parent=new.parent or old.parent,
                       model=model[0], model_name=model[1], effort=model[2], continues=old_id)
         _write_session(dest, new)
-        _write_session(dest, replace(old, moved_to=seen.id, stranded_at=None,
-                                     waiting_until=None))
-        for p in dest.glob("*.json"):
-            if (r := _read_session(p)) and r.parent == old_id and r.id != seen.id:
-                _write_session(dest, replace(r, parent=seen.id))
-        with locked(_workers() / ".lock"):
-            for w in workers(old_id):
-                _save_worker(replace(w, parent=seen.id))
+        if not copy:
+            _write_session(dest, replace(old, moved_to=seen.id, stranded_at=None,
+                                         waiting_until=None))
+            for p in dest.glob("*.json"):
+                if (r := _read_session(p)) and r.parent == old_id and r.id != seen.id:
+                    _write_session(dest, replace(r, parent=seen.id))
+            with locked(_workers() / ".lock"):
+                for w in workers(old_id):
+                    _save_worker(replace(w, parent=seen.id))
     src, dst = checkpoint_path(old_id), checkpoint_path(seen.id)
     with locked(_checkpoints() / ".lock"):
         if src.is_file() and not dst.exists():

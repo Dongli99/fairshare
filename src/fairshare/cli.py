@@ -600,20 +600,22 @@ def _launcher() -> int | None:
 
 
 CONTINUES_ENV = "FAIRSHARE_CONTINUES"   # set by the launcher for a resume: "<its pid>:<old id>"
+COPY = ":copy"     # after the old id in CONTINUES_ENV: the resume is a copy (`_may_run`)
 
 
 def _continuation(seen: SessionSeen, acct: Account, now: float) -> None:
     """Called before a session is recorded from inside it: when the launcher resumed a session
-    and it goes on under a new id (another account: decision 23), link the two
-    (`store.link_session`). Only when CONTINUES_ENV names one of this process's ancestors (a
-    value leaked into a nested session never links a stranger), its old id is not `seen`'s, and
-    `seen` has no record or one not yet linked. Never raises."""
+    and it goes on under a new id (another account: decision 23, or a copy: `_may_run`), link the
+    two (`store.link_session`; a copy as a copy). Only when CONTINUES_ENV names one of this
+    process's ancestors (a value leaked into a nested session never links a stranger), its old
+    id is not `seen`'s, and `seen` has no record or one not yet linked. Never raises."""
     try:
         pid, _, old = os.environ.get(CONTINUES_ENV, "").partition(":")
+        old, copy = old.removesuffix(COPY), old.endswith(COPY)
         if not old or old == seen.id or ((rec := store.session(seen.id)) and rec.continues):
             return
         if int(pid) > 1 and int(pid) in _ancestors():
-            store.link_session(old, seen, acct.id, now)
+            store.link_session(old, seen, acct.id, now, copy)
     except (Exception, SystemExit):
         pass
 
@@ -1096,17 +1098,31 @@ def _moved_prompt(rec: SessionRecord, new: str) -> str:
     return text.format(old=rec.account, new=new, why=why)
 
 
-def _resumed(rec: SessionRecord):
+def _resumed(rec: SessionRecord, copy: bool = False):
     """The arguments that resume `rec` on the chosen account, with the moved prompt (`_start`
     passes `continues` with them). Building them, just before the start, clears its stranded
     mark and wait; the account stays: the first capture writes it under the same id, and a new
-    id (another account) is linked to this one (`_continuation`)."""
+    id (another account) is linked to this one (`_continuation`). `copy`: a copy under a new id
+    instead (the provider's fork argument), and the record is left as it is."""
     def build(acct: Account) -> list[str]:
         prompt = _moved_prompt(rec, acct.id)
-        store.update_session(rec.id, lambda old: old and replace(
-            old, stranded_at=None, waiting_until=None))
-        return [*providers.get(acct.provider).resume_args(rec.id), prompt]
+        if not copy:
+            store.update_session(rec.id, lambda old: old and replace(
+                old, stranded_at=None, waiting_until=None))
+        return [*providers.get(acct.provider).resume_args(rec.id, copy), prompt]
     return build
+
+
+def _may_run(rec: SessionRecord) -> bool:
+    """Whether a pickup of `rec` continues a copy under a new id rather than the session in
+    place: when it was not stopped by its limit it may still run, fairshare stops no session it
+    did not start, and two processes on one session would interleave its transcript. Said in
+    one line when true."""
+    if rec.stranded_at is not None:
+        return False
+    _say(f"{rec.id[:8]} was not stopped by its limit and may still be running; continuing a copy "
+         "under a new id (the original is left as it is)")
+    return True
 
 
 def _worker_of(session_id: str) -> Worker | None:
@@ -1450,7 +1466,9 @@ def cmd_pickup(a) -> int:
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
         return 1
     os.chdir(rec.cwd)
-    return _start(rec, req, _resumed(rec), moving=rec.account, continues=rec.id)
+    copy = _may_run(rec)
+    return _start(rec, req, _resumed(rec, copy), moving=rec.account,
+                  continues=rec.id + (COPY if copy else ""))
 
 
 def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) -> int:
@@ -1493,7 +1511,7 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
     extra = prov.model_args(model, effort)
     if fresh:
         return _start_background(acct, name, _pickup_prompt(rec, s.now), rec.cwd, extra)
-    fork = rec.stranded_at is None
+    fork = _may_run(rec)
     if code := _start_background(acct, name, _moved_prompt(rec, acct.id), rec.cwd,
                                  [*prov.resume_args(rec.id, fork), *extra]):
         return code
@@ -1504,7 +1522,7 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
         print(f"the copy's session id is not known yet ({name}); fairshare finds it by name later"
               if w else f"the copy runs as {name}; its session id is not known yet")
     else:
-        _copied(rec, new, acct, model, effort, w)
+        _copied(rec, new, acct, model, effort, w, fork)
         print(f"continued as session {new} on {acct.id}")
     return 0
 
@@ -1527,13 +1545,14 @@ def _named_session(acct: Account, name: str, old: str) -> str | None:
 
 
 def _copied(rec: SessionRecord, new: str, acct: Account, model: str | None,
-            effort: str | None, w: Worker | None) -> None:
+            effort: str | None, w: Worker | None, fork: bool) -> None:
     """A copy of `rec` runs as `new` on `acct`: link the two (`store.link_session`: role,
-    parent, model and effort as carried, workers re-parented, the checkpoint note copied), and a
-    worker's name now joins it."""
+    parent, model and effort as carried, the checkpoint note copied; workers re-parented only
+    when `rec` stopped, not for a `fork` of a session that may still run), and a worker's name
+    now joins it."""
     store.link_session(rec.id, SessionSeen(
         new, rec.cwd, None, model, rec.model_name if model and model == rec.model else None,
-        effort), acct.id, _now())
+        effort), acct.id, _now(), copy=fork)
     if w:
         store.join_worker(w.name, new)
 

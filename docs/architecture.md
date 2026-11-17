@@ -522,7 +522,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       launcher when it has one, else in the background. SESSION is a full id or a unique prefix
       of a recorded one (unknown or ambiguous: exit 2, listing the matches). From a terminal
       outside a session it runs in the foreground in the recorded folder (a gone folder is
-      refused); inside a session or with `--bg`, in the background: `claude --bg --name
+      refused), with `--fork-session` under the same rule as below (`_may_run`, one line says
+      so; the link comes through `FAIRSHARE_CONTINUES` with `:copy`); inside a session or with
+      `--bg`, in the background: `claude --bg --name
       <name> --resume <id> [--fork-session] --model M --effort E <moved prompt>` (a worker keeps
       its own name, any other session is `pickup-<first 8>`) in the recorded folder, on the top
       eligible account that has the model and trusts that folder or can get its trust by copy
@@ -531,9 +533,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       through (it names the attach command). `--fork-session` only when the session is not
       marked stranded: it may still run, and fairshare stops no session it did not start. Then
       the running sessions are looked up by that name (up to 10 s): another id under it is a
-      copy (the fork, or the tool's own copy with a `note:` line), linked to the old one as a
-      resume under a new id is (`store.link_session`, decision 23), and a worker's name joins
-      it; otherwise the old record is moved.
+      copy (the fork, or the tool's own copy with a `note:` line), linked to the old one
+      (`store.link_session`, decision 23), and a worker's name joins it; otherwise the old record
+      is moved. A fork is linked as a copy: it carries `continues`, model, effort and its own
+      cost series, and the original keeps its account, its workers and its line in `status`
+      (no `moved_to`); the tool's own copy of a stranded session takes its place as a resume
+      under a new id does.
       None eligible and able: exit 1, naming which were eligible and why trust could not be had. A session whose
       account can still work is picked up anyway, with one note line: moving is a valid wish.
     - **Never stopping others' sessions.** Only the launcher stops a session, and only its own
@@ -750,7 +755,11 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
         old id (worker records and their sessions' records) name the new one; the old
         checkpoint note is copied (never moved) when the new id has none. An old record already
         moved, or missing, is not linked (a nested session under the same launcher never takes
-        the place). Never raises. The background copy (`_copied`) uses the same function.
+        the place). Never raises. The background copy (`_copied`) uses the same function. A
+        copy of a session that may still run (`_may_run`: the background fork, or a foreground
+        pickup, whose value ends in `:copy`) is linked with `copy=True`: the new record is
+        written the same way, and the old one, its workers and its line in `status` are left as
+        they are (no `moved_to`).
       - **Readers.** `status` does not list a record with `moved_to` (its spend still counts for
         its own account). `watch`, worker targeting (`checkpoint --request`), `pickup <prefix>`
         and `transcript` take a session at the end of its chain (`store.latest`: `moved_to`
@@ -830,9 +839,6 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   runs the statusLine (if not, a worker has no cost data and its pickup uses the worker
   record's model); the sessions block on the real hub; a real wait-then-resume under the
   launcher.
-- A foreground `fairshare pickup <id>` of a session still running elsewhere resumes it in place
-  (no fork: the brief scoped forking to background pickups); the docs say two processes on one
-  session interleave their transcript.
 - A session moved by pickup keeps its cost series, so up to two hours of the old account's
   spend show under the new one. Spend counts at the later point's time, at most 5 minutes late.
 - The model-week match (`uses_week`) has seen only `Fable` as a week name.

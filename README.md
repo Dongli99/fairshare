@@ -113,10 +113,11 @@ fairshare wires in the hub's settings), the session is marked as stopped, and:
   that trusts the folder or can get that trust copied from another account; Claude Code prints
   how to attach to it; background sessions open links in the system browser);
 - from a terminal, `fairshare pickup <id>` (the session id or its first characters) resumes a
-  recorded session in the foreground, in its folder; `--bg` does it in the background. A
-  background pickup of a session that was not stopped by its limit (it may still be running,
-  and fairshare never stops a session it did not start) continues a copy of it under a new id
-  (`--fork-session`).
+  recorded session in the foreground, in its folder; `--bg` does it in the background. Either
+  way, a session that was not stopped by its limit (it may still be running, and fairshare never
+  stops a session it did not start) is continued as a copy under a new id (`--fork-session`),
+  so two processes never write one transcript; the original stays as it was, with its account,
+  its workers and its line in `fairshare status`.
 
 Moving a session to another account reads its whole context once on that account, uncached:
 that is the price of keeping its reasoning. For a lean start use a handoff (below). Each
