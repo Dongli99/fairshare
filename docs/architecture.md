@@ -981,3 +981,13 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 
 OpenAI/Codex adapter · packaging for Homebrew · sizes, a "still needed" ledger and burn rate
 (banked; decision 24 records the data they need).
+
+Before a second provider lands, these Claude-only spots must move behind the provider seam
+(none affects a Claude-only user today):
+- `run` ranks every account together and launches the winner's provider; it must rank within
+  the provider being launched.
+- Setup and joining are Claude-specific in `cli.py` (settings files, the sign-in folder
+  variable, the hooks it wires); the adapter should name its binary, account variable, files to
+  wire and shareable paths.
+- Per-model weekly limits come only from Claude Code's `/usage`; how other providers express
+  them is an open modelling question.

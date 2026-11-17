@@ -1,6 +1,6 @@
 # fairshare
 
-Routes AI-assistant sessions across several subscriptions by real usage. Open-source (MIT), currently private. **Nothing in this repo may reference any other project, private host, path, account or person's credentials.**
+Routes AI-assistant sessions across several subscriptions by real usage. Open-source (MIT), currently private. **Nothing in this repo may reference any other project, private host, path, account or person's credentials.** One exception: the README's "Prior art" credit.
 
 ## Layout
 `src/fairshare/policy.py` the rule (pure) · `model.py` data + config loading · `providers/` one adapter per provider · `plans/` data files · `store.py` snapshots · `hub.py` the hub: links, start check, seeding · `browser.py` per-account sign-in browser · `session.py` runs the child session (signals, exit code) · `cli.py`. Seams and decisions: `docs/architecture.md`. Stance on terms: `docs/terms-and-limits.md`.
