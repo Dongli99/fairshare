@@ -99,7 +99,8 @@ class ExitCode(Supervised):
                 self.assertEqual(self.code(), n)
 
     def test_death_by_signal_is_128_plus_the_number(self):
-        for name, n in (("TERM", 15), ("KILL", 9), ("SEGV", 11)):
+        # USR2, not SEGV: a self-inflicted SEGV makes macOS show a "Python quit unexpectedly" alert.
+        for name, n in (("TERM", 15), ("KILL", 9), ("USR2", int(signal.SIGUSR2))):
             with self.subTest(signal=name):
                 self.start("die", name)
                 self.assertEqual(self.code(), 128 + n)
