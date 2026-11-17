@@ -10,7 +10,7 @@ its weekly reset. It is a heuristic, not a guarantee.
 > Runs on macOS and Linux; Windows is not supported.
 
 **Terms.** Whether spreading work across several subscriptions fits a provider's terms is for
-you to check. [docs/terms-and-limits.md](docs/terms-and-limits.md) says what fairshare
+you to check. [docs/terms-and-limits.md](https://github.com/Dongli99/fairshare/blob/main/docs/terms-and-limits.md) says what fairshare
 deliberately never does and what is left for you to decide.
 
 ```
@@ -66,7 +66,7 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
   main session near a limit and it decides what its workers do. A skill in the hub teaches it.
 - `fairshare doctor` checks the setup; `fairshare doctor --fix` repairs what it can.
 
-Every command, message and setting is in [docs/usage.md](docs/usage.md).
+Every command, message and setting is in [docs/usage.md](https://github.com/Dongli99/fairshare/blob/main/docs/usage.md).
 
 ## How it decides
 
@@ -86,7 +86,7 @@ used. Capacity is the plan's size (Pro = 1).
 
 Usage comes from Claude Code's own local `/usage` command, asked for every account at each
 launch (no model call, nothing spent), and from its status line during a session. The rule is
-one pure function in [`src/fairshare/policy.py`](src/fairshare/policy.py).
+one pure function in [`src/fairshare/policy.py`](https://github.com/Dongli99/fairshare/blob/main/src/fairshare/policy.py).
 
 ## Removal
 
@@ -107,9 +107,9 @@ into your own folders. They all stay until you delete them. The hub's accounts s
 
 ## More
 
-- [docs/usage.md](docs/usage.md): every command, message, setting and exit code.
-- [docs/terms-and-limits.md](docs/terms-and-limits.md): what fairshare never does.
-- [docs/architecture.md](docs/architecture.md): the design decisions, seams and known limits.
+- [docs/usage.md](https://github.com/Dongli99/fairshare/blob/main/docs/usage.md): every command, message, setting and exit code.
+- [docs/terms-and-limits.md](https://github.com/Dongli99/fairshare/blob/main/docs/terms-and-limits.md): what fairshare never does.
+- [docs/architecture.md](https://github.com/Dongli99/fairshare/blob/main/docs/architecture.md): the design decisions, seams and known limits.
 
 ## Prior art
 
@@ -120,7 +120,7 @@ merging a stray folder into the shared one with the clashing file renamed.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). New providers and plans are welcome; the policy never
+See [CONTRIBUTING.md](https://github.com/Dongli99/fairshare/blob/main/CONTRIBUTING.md). New providers and plans are welcome; the policy never
 changes for them.
 
 ## License

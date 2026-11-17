@@ -1,18 +1,41 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "fairshare"
-version = "0.0.1"
-description = "Route AI-assistant sessions across several subscriptions by real usage, aiming to use each fully and avoid hitting limits."
+dynamic = ["version"]
+description = "One assistant across several AI-assistant subscriptions: shared history and settings, each session started on the account whose budget is best used now."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Dongli Liu" }]
 requires-python = ">=3.11"
 dependencies = []
+keywords = ["claude-code", "cli", "subscriptions", "usage", "routing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/Dongli99/fairshare"
+Issues = "https://github.com/Dongli99/fairshare/issues"
+Documentation = "https://github.com/Dongli99/fairshare/blob/main/docs/usage.md"
 
 [project.scripts]
 fairshare = "fairshare.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fairshare"]
+
+[tool.hatch.version]
+path = "src/fairshare/__init__.py"

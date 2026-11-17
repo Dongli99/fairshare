@@ -1,0 +1,37 @@
+name: publish
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: tests
+        run: python -m unittest discover -s tests
+        env:
+          PYTHONPATH: src
+      - name: the tag names the package version
+        run: test "${GITHUB_REF_NAME#v}" = "$(PYTHONPATH=src python -c 'import fairshare; print(fairshare.__version__)')"
+      - run: python -m pip install build==1.2.2.post1 && python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # trusted publishing: no token is stored anywhere
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
