@@ -196,6 +196,7 @@ class LauncherPickup(Handover):
     """D0 and D2 under the launcher: the same session, resumed with its model and effort."""
 
     def test_automatic_and_manual_resume_the_same_id_with_model_and_effort(self):
+        self.policy("resume_wait_minutes = 30")                     # opted in; a is out for 3h
         for manual, why in ((False, LIMIT), (True, ASKED)):
             with self.subTest(manual=manual):
                 self.record(model="claude-opus-5-5", effort="high", stranded=not manual)
@@ -212,6 +213,7 @@ class LauncherPickup(Handover):
                 store.move_session(SID, "a")
 
     def test_a_record_with_neither_starts_as_today(self):
+        self.policy("resume_wait_minutes = 30")
         self.record()
         self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
         self.assertEqual(self.started_args()[0][:2], ["--resume", SID])
@@ -226,22 +228,31 @@ class LauncherPickup(Handover):
         self.assertEqual(args[4:6], ["--resume", SID])
 
     def test_an_account_with_that_models_week_spent_is_skipped(self):
+        self.policy("resume_wait_minutes = 30")
         self.record(model="claude-opus-5-5", effort="high")
         self.opus_spent("b")
         self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
         self.assertEqual(self.started_args()[1], "c")
 
+    def test_when_no_account_has_it_an_automatic_move_waits_instead(self):
+        self.policy("resume_wait_minutes = 30")
+        self.record(model="claude-opus-5-5", effort="high")
+        self.opus_spent("b", "c")
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
+        self.assertEqual((code, len(self.calls)), (0, 1))            # the child runs on
+        self.assertEqual(store.session(SID).waiting_until, NOW + 3 * H)
+
     def test_when_no_account_has_it_a_terminal_asks(self):
         self.record(model="claude-opus-5-5", effort="high")
         self.opus_spent("b", "c")
-        code, err = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)],
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321)],
                                   tty=True, answers=["d"])
         self.assertEqual(code, 0, err)
         self.assertIn("no account that can take work has claude-opus-5-5 left this week", err)
         args, acct = self.started_args()
         self.assertEqual((args[:2], acct), (["--resume", SID], "b"))    # its default model
         self.record(model="claude-opus-5-5", effort="high")             # stranded again on a
-        code, err = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)],
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321)],
                                   tty=True, answers=["q"])
         self.assertEqual((code, len(self.calls)), (0, 1))
         self.assertIn("not started", err)
@@ -249,7 +260,7 @@ class LauncherPickup(Handover):
     def test_when_no_account_has_it_without_a_terminal_it_refuses_naming_model(self):
         self.record(model="claude-opus-5-5", effort="high")
         self.opus_spent("b", "c")
-        code, err = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321)])
         self.assertEqual((code, len(self.calls)), (1, 1))
         self.assertIn("left this week; name another with --model", err)
 

@@ -1,5 +1,5 @@
-"""Stage 5c, part B: a session stopped by a limit that resets soon is left for Claude Code's own
-resume. Same fleets as test_handover and test_watch (temp HOME, config, state and hub; fakes
+"""Stage 5c, part B, and the limit-wait stage: a session stopped by its limit is left for Claude
+Code's own resume, by default; `resume_wait_minutes` opts in to a move. Same fleets as test_handover and test_watch (temp HOME, config, state and hub; fakes
 first on PATH, proved in Fleet.setUp; inherited CLAUDE*, FAIRSHARE_* and BROWSER cleared)."""
 import io
 import json
@@ -23,8 +23,8 @@ class Setting(unittest.TestCase):
         with mock.patch("pathlib.Path.read_text", return_value=f'hub = "/h"\n[policy]\n{policy}'):
             return load_accounts(Path("/nowhere/accounts.toml"))[1]
 
-    def test_default_zero_and_refusal(self):
-        self.assertEqual(self.tuning("").resume_wait_minutes, 30)
+    def test_default_off_zero_and_refusal(self):
+        self.assertIsNone(self.tuning("").resume_wait_minutes)      # no automatic move
         self.assertEqual(self.tuning("resume_wait_minutes = 0").resume_wait_minutes, 0)
         self.assertEqual(self.tuning("resume_wait_minutes = 45").resume_wait_minutes, 45)
         for bad in ("-1", "'x'"):
@@ -36,22 +36,22 @@ class Setting(unittest.TestCase):
 class LauncherWaits(Handover):
     """a's 5h window is spent; when it resets is set per test (Stranded: in three hours)."""
 
-    def policy(self, text):
-        cfg = self.tmp / "accounts.toml"
-        cfg.write_text(cfg.read_text().replace("\n\n[[account]]", f"\n[policy]\n{text}\n\n"
-                                                                    "[[account]]", 1))
-
     def out_until(self, hours):
         self.snap("a", five=(100, hours), seven=(50, 90))
 
-    def test_a_reset_within_the_wait_leaves_the_child_and_prints_nothing(self):
+    def test_a_reset_within_the_wait_leaves_the_child_and_says_so_once(self):
+        self.policy("resume_wait_minutes = 30")
         self.record()
         self.out_until(0.4)                                          # 24 minutes
         self.launches("run", "-a", "a")                              # links made: said once
         _, before = self.launches("run", "-a", "a")
         self.record()
         code, err = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
-        self.assertEqual((code, len(self.calls), err), (0, 1, before))   # no pickup, no line
+        self.assertEqual((code, len(self.calls)), (0, 1))            # no pickup
+        self.assertEqual(err, before + WAIT_LINE.format(clock="08:24"))
+        self.record()                                                # the same limit again
+        _, again = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
+        self.assertEqual(again, before)                              # not said twice
         rec = store.session(SID)
         self.assertEqual((rec.account, rec.waiting_until), ("a", NOW + 0.4 * H))
         self.assertIsNotNone(rec.stranded_at)
@@ -65,6 +65,7 @@ class LauncherWaits(Handover):
         self.assertEqual(store.session(SID).waiting_until, NOW + 0.4 * H)
 
     def test_beyond_the_wait_it_picks_up_as_today(self):
+        self.policy("resume_wait_minutes = 30")
         self.record()
         self.out_until(0.6)                                          # 36 minutes
         code, err = self.launches("run", "-a", "a", requests=[Request(SID, False, 4321)])
@@ -109,6 +110,10 @@ class LauncherWaits(Handover):
         self.assertEqual(store.session(SID).account, "b")
 
 
+WAIT_LINE = ("fairshare: a is out (5h limit) · Claude Code resumes this session at {clock} · "
+             "! fairshare pickup moves it to b now\n")
+
+
 class Bar(Handover):
     def capture(self):
         raw = json.dumps({"session_id": SID, "cwd": str(self.work)})
@@ -125,7 +130,12 @@ class Bar(Handover):
         self.assertTrue(self.capture().endswith(" · \033[31mout · ! fairshare pickup\033[0m\n"))
         self.wait_until(NOW + 0.4 * H)
         self.assertTrue(self.capture().endswith(
-            " · \033[31mout · resumes 08:24 · ! fairshare pickup to move now\033[0m\n"))
+            " · \033[31mout · 5h limit · resumes 08:24 · ! fairshare pickup moves it to b "
+            "now\033[0m\n"))
+        for x in "bc":
+            self.snap(x, five=(100, 2), seven=(30, 90))
+        self.assertTrue(self.capture().endswith(
+            " · \033[31mout · 5h limit · resumes 08:24 · no account can take work now\033[0m\n"))
         self.clock[0] += 0.5 * H                                     # past it: today's mark
         self.snap("a", five=(100, 3), seven=(50, 90), at=NOW - 60)
         self.assertIn("out · ! fairshare pickup\033[0m", self.capture())

@@ -397,6 +397,12 @@ class Stranded(Fleet):
         p.start()
         self.addCleanup(p.stop)
 
+    def policy(self, text):
+        """A `[policy]` table in the config (after the last `add`)."""
+        cfg = self.tmp / "accounts.toml"
+        cfg.write_text(cfg.read_text().replace("\n\n[[account]]", f"\n[policy]\n{text}\n\n"
+                                                                    "[[account]]", 1))
+
     def trust(self, account, folder=None):
         write(self.tmp / "hub/accounts" / account / ".claude.json", json.dumps(
             {"projects": {str((folder or self.work).resolve()): {"hasTrustDialogAccepted": True}}}))
@@ -489,8 +495,8 @@ class BarMark(Stranded):
         self.assertTrue(out.endswith(" · \033[31mout · ! fairshare pickup\033[0m\n"), out)
 
     def test_set_inside_the_grace_hour_too(self):
-        """The policy calls a full 5h window resetting within the grace hour usable; the
-        provider is refusing now, so the stopped session is still out (and is picked up)."""
+        """A spent 5h window is out until it resets, however soon (the grace hour is for a nearly
+        full one only)."""
         self.record()
         self.snap("a", five=(100, 0.5), seven=(50, 90), at=NOW)
         self.assertIn("out · ! fairshare pickup", self.capture()[1])
@@ -667,6 +673,7 @@ class PickupLaunch(Stranded):
         return [Path(env["CLAUDE_CONFIG_DIR"]).name for _, env, _ in self.calls]
 
     def test_a_confirmed_request_resumes_the_same_session_on_the_best_account(self):
+        self.policy("resume_wait_minutes = 30")                     # opted in; a is out for 3h
         self.record()
         code, err = self.launches("run", "-a", "a", requests=[(lambda: None, (SID, False))])
         self.assertEqual(code, 0, err)
@@ -714,6 +721,7 @@ class PickupLaunch(Stranded):
     def test_a_second_pickup_works_in_the_same_launcher(self):
         self.add("c", orgId="org-c")
         self.snap("c", five=(10, 2), seven=(60, 90))
+        self.policy("resume_wait_minutes = 30")
         self.record()
         self.record(sid="second", account="b")
 
@@ -725,15 +733,15 @@ class PickupLaunch(Stranded):
         self.assertEqual(self.calls[2][0][1:3], ["--resume", "second"])
         self.assertIn("from account b to account c because b hit", self.calls[2][0][3])
 
-    def test_with_none_eligible_the_refusal_flow_carries_the_prompt(self):
+    def test_with_none_eligible_a_manual_request_takes_the_refusal_flow(self):
         self.record()
         for x in "ab":
             self.trust(x)                                            # on a terminal: not asked
         self.snap("b", five=(100, 2), seven=(30, 90))
-        code, err = self.launches("run", "-a", "a", requests=[(lambda: None, (SID, False))],
+        code, err = self.launches("run", "-a", "a", requests=[(lambda: None, (SID, True))],
                                   tty=True, answers=["s"])
         self.assertIn("no account is eligible", err)
-        self.assertEqual(self.accounts_of(), ["a", "a"])            # started anyway, on the top
+        self.assertEqual(self.accounts_of(), ["a", "b"])            # started anyway, on the top
         self.assertEqual(self.calls[1][0][1:3], ["--resume", SID])
 
     def test_the_countdown_names_the_limit_and_cancel_says_how_to_resume(self):
@@ -836,7 +844,8 @@ class PickupCommand(Stranded):
         self.assertEqual(code, 1)
         self.assertIn("eligible: b, none of which trusts", err)
         self.snap("b", five=(100, 2), seven=(30, 90))
-        self.assertIn("none is eligible now", self.pickup(SID, "--bg")[2])
+        self.assertIn("no account can take work now; the soonest is b, usable at 10:00; nothing "
+                      "done", self.pickup(SID, "--bg")[2])
 
     def test_session_by_prefix(self):
         self.record()

@@ -86,7 +86,8 @@ AGENTS_ARGS = ("agents", "--json")
 # but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`)
 # and the session carries on. Observed, not documented: 2.1.322, 2026-11-11 (planner; a
 # background and an interactive session). fairshare reads none of these texts; it relies only on
-# the resume, to leave a session whose limit resets soon waiting (`resume_wait_minutes`).
+# the resume, to leave a session its limit stopped waiting for the reset (the default;
+# `resume_wait_minutes` opts in to a move).
 RESUMES_AT_RESET = True
 resumes_at_reset = RESUMES_AT_RESET
 AGENT_ID, AGENT_NAME, AGENT_STATUS, AGENT_BUSY, AGENT_IDLE = (

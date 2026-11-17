@@ -11,11 +11,12 @@ HOUR = 3600.0
 @dataclass(frozen=True)
 class Verdict:
     account: Account
-    eligible: bool                  # False = near a limit; the CLI reports it, ranking ignores it
+    eligible: bool                  # False = near or at a limit; the CLI reports it, ranking
+                                    # ignores it
     score: float                    # budget units to burn per hour to use the long window fully,
-                                    # scaled down while the short window is nearly full; an
-                                    # exhausted week is -(hours until it resets), below any usable
-                                    # account
+                                    # scaled down while the short window is nearly full; a spent
+                                    # window (week or short) is -(hours until the later of them
+                                    # resets), below any usable account
     reason: str
     usable_in: float                # hours until it is eligible again; 0 when eligible now
 
@@ -41,23 +42,27 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Ver
     long_in = (long_.resets_at - now) / HOUR if long_ else p.long_hours  # unknown = a fresh window
     score = p.capacity * (100.0 - long_used) / max(long_in, t.min_hours)
 
-    # Near the short limit and not about to reset: only the unused part of that window is usable.
-    hot = short_used >= t.short_hot_pct and (short_in or 0) >= t.grace_hours
+    # A spent window is a fact, not a preference: nothing usable until it resets. The line is
+    # the week's for both: a short window that full takes no work, however soon it resets.
+    exhausted = long_used >= t.long_exhausted_pct
+    spent = short_used >= t.long_exhausted_pct
+    # Nearly full, not spent and not about to reset: only the unused part of that window is usable.
+    hot = not spent and short_used >= t.short_hot_pct and (short_in or 0) >= t.grace_hours
     if hot:
         score *= (100.0 - short_used) / 100.0
-    # A spent week is a fact, not a preference: nothing usable until it resets.
-    exhausted = long_used >= t.long_exhausted_pct
-    if exhausted:
-        score = -long_in
-    if long_ is None:
+    if exhausted or spent:
+        score = -max(long_in if exhausted else 0.0, short_in if spent else 0.0)
+    if long_ is None and not spent:
         why = f"no active {p.long_name} window, assumed fresh"
-    elif hot and not exhausted:
+    elif (hot or spent) and not exhausted:
         why = f"{p.short_name} {short_used:.0f}% used, resets in {_dur(short_in, 1)}"
     else:
         why = f"{p.long_name} {long_used:.0f}% used, resets in {_dur(long_in)}"
-    # A hot short window stops counting once its reset is within the grace period.
-    usable_in = max(short_in - t.grace_hours if hot else 0.0, long_in if exhausted else 0.0)
-    return Verdict(acct, not (hot or exhausted), score, why, usable_in)
+    # A hot short window stops counting once its reset is within the grace period; a spent one
+    # counts until it resets.
+    usable_in = max(short_in - t.grace_hours if hot else 0.0, short_in if spent else 0.0,
+                    long_in if exhausted else 0.0)
+    return Verdict(acct, not (hot or spent or exhausted), score, why, usable_in)
 
 
 def rank(accounts: list[Account], snaps: dict[str, Snapshot], now: float,

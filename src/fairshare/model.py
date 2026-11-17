@@ -135,6 +135,9 @@ class SessionRecord:
     moved_to: str | None = None       # the session that continues this one (store.link_session)
     drawn: dict = field(default_factory=dict)   # the windows its usage hook last drew:
                                                 # {account: {key: [used_pct, resets_at]}}
+    limits: dict = field(default_factory=dict)  # the limits that stopped it, as the launcher
+                                                # confirmed them: {account: its reset}; no resume
+                                                # there before that reset (`cli._held`)
 
 
 ROLE_WORKER = "worker"
@@ -203,7 +206,8 @@ class Tuning:
     min_hours: float = 1.0            # floor on time-to-reset, so a near reset stays finite
     refresh_minutes: float = 5.0      # usage this old is asked for again (the usage probe)
     launch_pause: float = 3.0         # seconds a launch with a close choice waits; 0: never
-    resume_wait_minutes: float = 30.0  # a limit resetting this soon is waited for, not picked up
+    resume_wait_minutes: float | None = None  # None: a session stopped by its limit waits for
+                                              # the reset; N: moved when that is over N min away
 
 
 def _plan_data(name: str) -> dict:
@@ -323,7 +327,7 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
     if policy.get("launch_pause", 0) < 0:
         raise ConfigError("[policy] launch_pause must be 0 (off) or more")
     if policy.get("resume_wait_minutes", 0) < 0:
-        raise ConfigError("[policy] resume_wait_minutes must be 0 (always pick up) or more")
+        raise ConfigError("[policy] resume_wait_minutes must be 0 (always move) or more")
     return accounts, Tuning(**policy), hub
 
 

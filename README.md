@@ -56,9 +56,11 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 - `fairshare` starts a session on the best account. `fairshare run <args>` passes the arguments
   to Claude Code unchanged; `fairshare run -a ID` starts that account instead.
 - `fairshare status` lists the accounts, best first, with their usage and live sessions.
-- When an account hits its limit mid-session, fairshare checks it really is out. If the limit
-  resets soon (30 minutes by default), Claude Code resumes the session by itself. Otherwise the
-  same session continues on the best other account, with its whole context.
+- When an account hits its limit mid-session, fairshare checks it really is out, then leaves
+  the session for Claude Code to resume by itself at the reset, with its whole context. A line
+  and the status bar say which limit, when it resets, and the best account that can take work;
+  `! fairshare pickup` moves the session there now. `resume_wait_minutes` makes that move
+  automatic. A session is never resumed on an account that is out.
 - Inside a session, `! fairshare pickup` moves it now, `! fairshare handoff` starts a fresh
   session from a written note, and `! fairshare` starts a fresh session with nothing carried
   over (a *switch*).
@@ -82,7 +84,8 @@ used. Capacity is the plan's size (Pro = 1).
 
 - If the short (5-hour) window is nearly full and not resetting within the hour, the score is
   scaled by what is left of that window.
-- An account whose week is spent ranks below every usable account.
+- An account whose week or short window is spent ranks below every usable account, however soon
+  it resets: it cannot take work until then.
 
 Usage comes from Claude Code's own local `/usage` command, asked for every account at each
 launch (no model call, nothing spent), and from its status line during a session. The rule is

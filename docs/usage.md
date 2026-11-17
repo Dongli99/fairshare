@@ -162,18 +162,34 @@ the account hit its limit (its `StopFailure` hook, which fairshare wires in the 
 the session is marked as stopped, and:
 
 - **In a session started by `fairshare`**, the launcher checks that the account really is out (it
-  asks every account's usage again; a passing rate-limit error changes nothing). If the limit
-  resets within `resume_wait_minutes` (default 30, `0` = always move), it leaves the session
-  alone: Claude Code resumes it by itself at the reset, with its whole context, and the status
-  bar reads `out · resumes 15:40 · ! fairshare pickup to move now`. Otherwise it stops the session
-  and shows `work hit its limit (5h resets 15:40). Continuing on play in 10 s · Enter = now · c =
-  cancel`. The same session is then resumed on the best account, in the same folder, with its
-  model and effort, and is told in one line that it was moved. `c` stops there and prints how to
-  resume it later (`fairshare run -a work -- --resume <id>`). Without a terminal it continues at
-  once. The launcher stays in charge, so the next limit is handled the same way.
+  asks every account's usage again; a passing rate-limit error changes nothing). Then, by default,
+  it leaves the session alone: Claude Code resumes it by itself at the reset, with its whole
+  context and no re-read. One line says so once, `fairshare: work is out (5h limit) · Claude Code
+  resumes this session at 15:40 · ! fairshare pickup moves it to play now` (or `no account can
+  take work now (the soonest: play, usable at 16:10)`), and the status bar reads `out · 5h limit ·
+  resumes 15:40 · ! fairshare pickup moves it to play now` until the reset.
+- **To move automatically instead**, set `resume_wait_minutes` under `[policy]` in
+  `accounts.toml`: the launcher then moves the session when the reset is more than that many
+  minutes away (`0` = always), and only when another account can take work; otherwise it waits as
+  above. A move stops the session and shows `work hit its limit (5h resets 15:40). Continuing on
+  play in 10 s · Enter = now · c = cancel`. The same session is then resumed on the best account,
+  in the same folder, with its model and effort, and is told in one line that it was moved. `c`
+  stops there and prints how to resume it later (`fairshare run -a work -- --resume <id>`).
+  Without a terminal it continues at once. The launcher stays in charge, so the next limit is
+  handled the same way.
+- **Never back onto an account that is out.** An account whose week or short window is spent
+  is never chosen for a launch, pickup, switch or handoff until it resets. Independently of the
+  ranking, the launcher remembers which account's limit stopped a session and when it resets,
+  and never resumes the session there before then (`fairshare: work's limit stopped this session
+  and lifts at 15:40; not resuming it there before then. To resume it later: …`). If the same
+  limit stops a session again after a move, the launcher stops instead of trying again, with
+  `fairshare: work stopped this session again before its limit lifted (5h resets 15:40); not
+  trying again. To resume it later: fairshare run -a work -- --resume <id>`.
 - **The status bar** ends in a red `out · ! fairshare pickup` while that account cannot take work.
   Typing `! fairshare pickup` in the session asks its launcher to move it now (no check that the
-  account is out, no wait for the reset: you asked). In a session not started by `fairshare`, it
+  account is out, no wait for the reset: you asked), to the best account that can take work. When
+  none can, it says `fairshare: no account can take work now; the soonest is play, usable at
+  16:10; nothing done` and leaves the session as it is. In a session not started by `fairshare`, it
   resumes the session in the background instead (`claude --bg --resume`, on the best account that
   trusts the folder or can get that trust copied from another account; Claude Code prints how to
   attach to it; background sessions open links in the system browser).
@@ -403,11 +419,13 @@ and `leave` edit it as text, keeping your comments, with a backup each time. Key
   there is one), `capacity` (overrides the plan's;
   kept when the detected plan differs), `browser` (see [Browser per account](#browser-per-account)),
   `status_args` and `usage_args`;
-- `[policy]`: `launch_pause` (seconds, default 3, `0` = off), `resume_wait_minutes` (default 30,
-  `0` = always move at a limit), `refresh_minutes` (default 5, at least 1), and the ranking's
-  thresholds `short_hot_pct` (85: a short window this full is "nearly full"),
-  `long_exhausted_pct` (98: a week this full cannot take work) and `grace_hours` (1: a nearly
-  full short window resetting this soon still takes work). Every number must be finite; `nan` and `inf` are a config error.
+- `[policy]`: `launch_pause` (seconds, default 3, `0` = off), `resume_wait_minutes` (unset by
+  default: a session stopped by its limit waits for Claude Code's own resume; a number N moves
+  it automatically when the reset is more than N minutes away, `0` = always), `refresh_minutes`
+  (default 5, at least 1), and the ranking's thresholds `short_hot_pct` (85: a short window this
+  full is "nearly full"), `long_exhausted_pct` (98: a week or a short window this full is spent
+  and cannot take work until it resets) and `grace_hours` (1: a nearly full, not spent, short
+  window resetting this soon still takes work). Every number must be finite; `nan` and `inf` are a config error.
 
 `status_args` replaces the sign-in check's arguments and `usage_args` the usage probe's (default
 `auth status --json` and `-p --no-session-persistence --output-format json --settings

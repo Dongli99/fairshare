@@ -19,7 +19,8 @@ providers/<p>.account_status (once per command, in parallel) ──────�
 statusLine ──► capture ──► store.note_session (sessions/<id>.json: + model, effort, cost series), bar
                       └──► stale? ──► detached `fairshare probe <id>` ──► read_usage ──► store
 StopFailure (rate_limit) ──► hook stop-failure ──► stranded record, probe, SIGUSR1 ──► launcher
-launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► reset soon? leave it (waiting_until)
+launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► hold the limit (limits) ──► wait for the
+                                    reset (default; waiting_until, one line) or, opted in, move:
                                     └──► stop child ──► countdown ──► resume the same id (pickup)
                                     └──► stop child ──► [headless note turn] ──► fresh (handoff)
                                     └──► stop child ──► fresh, no prompt (switch)
@@ -73,8 +74,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 7. **One ordering, not tiers.** The first version split accounts into eligible and blocked and
    sorted the blocked by their short reset. Review showed that threw the score away
    across the boundary and mis-ranked spent weeks. Now a nearly-full short window scales the
-   score (a soft preference) and a spent week sets it to `-hours until reset` (a hard fact,
-   below any usable account). `Verdict.eligible` survives only so the CLI can report it.
+   score (a soft preference) and a spent window, the week or the short one (both at
+   `long_exhausted_pct`), sets it to `-hours until the later of them resets` (a hard fact,
+   below any usable account; decision 25). `Verdict.eligible` survives only so the CLI can
+   report it.
 
 8. **Volatile facts live in one place.** A provider renames commands, flags, environment
    variables, files, JSON fields, window names and plans, and adds or drops subscriptions. Each
@@ -492,18 +495,17 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     session reading the transcript; now it is **the same session, resumed under its own id**
     on the best account, with its model and effort (decision 23). A session that has time may
     write a checkpoint first (decision 22), or hand off to a fresh session (decision 23).
-    - **Reset-aware.** Claude Code resumes a session its limit stopped by itself,
-      once the limit resets (observed 2.1.322, 2026-11-11; `RESUMES_AT_RESET` in the adapter):
-      waiting keeps the whole context and costs no re-read, which beats a pickup when the reset
-      is near. So the launcher, after confirming an automatic request, finds when the limiting
-      window resets (`_limit_reset`: the latest reset among the plan windows at their limit, a
-      week at `long_exhausted_pct`, a short window at `short_hot_pct`). Within
-      `resume_wait_minutes` (under `[policy]`, default 30, 0 = always pick up, refused below 0)
-      it does not stop the child: it writes `waiting_until` on the session record, prints
-      nothing (the session owns the terminal) and goes back to waiting. Beyond it, the pickup
-      goes on as below. A manual pickup always moves. Background sessions have no launcher:
-      watch's stranded-worker line adds `resets <clock> (Claude Code resumes it then)` and the
-      main session decides.
+    - **Reset-aware** (amended by decision 25: waiting is now the default). Claude Code
+      resumes a session its limit stopped by itself, once the limit resets (observed 2.1.322,
+      2026-11-11; `RESUMES_AT_RESET` in the adapter): waiting keeps the whole context and costs
+      no re-read. So the launcher, after confirming an automatic request, finds which limit
+      holds the account and when it lifts (`_limit`: of the plan windows at their limit, a week
+      at `long_exhausted_pct`, a short window at `short_hot_pct`, the one that resets last).
+      Unless a move is opted in (`resume_wait_minutes`, decision 25) it does not stop the
+      child: it writes `waiting_until` on the session record, says one line (decision 25) and
+      goes back to waiting. A manual pickup always moves, to an account that can take work.
+      Background sessions have no launcher: watch's stranded-worker line adds `resets <clock>
+      (Claude Code resumes it then)` and the main session decides.
     - **The session map.** capture keeps one small record per session in the state folder
       (`sessions/<id>.json`, atomic, under a lock): account, folder, transcript path, last seen,
       and when its limit stopped it. Written only when new or changed or last seen a minute ago;
@@ -520,8 +522,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       pid must never be signalled.
     - **The bar.** While the session's record is stranded and the policy says its account cannot
       take work, capture appends a red `out · ! fairshare pickup` (on its own line after the
-      user's `--then` line); while it waits for the tool's own resume, `out · resumes <clock> ·
-      ! fairshare pickup to move now`. Numbers newer than the stop that say the account can work
+      user's `--then` line); while it waits for the tool's own resume, `out · <span> limit ·
+      resumes <clock> · ! fairshare pickup moves it to <best> now` (`no account can take work
+      now` when none can, by the local snapshots). Numbers newer than the stop that say the account can work
       clear it, and the wait with it; so does a new stop.
     - **The launcher** exports `FAIRSHARE_LAUNCHER=<its pid>` to its child. On SIGUSR1 it reads
       the request (ignored unless it is for its own child's process). An automatic request is
@@ -539,8 +542,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       account B because <A hit its usage limit | a move was asked for>. Continue where you left
       off.`) and `FAIRSHARE_CONTINUES=<its pid>:<id>`; building those arguments clears the
       record's stranded mark and wait and leaves its account: the first capture under the same
-      id writes B, and a new id (another account, decision 23) is linked to it. None eligible is decision 11's flow, carrying them. The launcher
-      stays the parent, so a second limit picks up again.
+      id writes B, and a new id (another account, decision 23) is linked to it. None eligible
+      is decision 11's flow, carrying them (reached by a manual request only: an automatic one
+      waits instead, decision 25). The launcher stays the parent, so a second limit picks up
+      again.
     - **The manual command.** `fairshare pickup [SESSION] [--bg] [--model M] [--effort E] [-a
       ID]` (the flags override the record; `-a` skips the ranking, keeps the trust check, and is
       checked before anything is asked of a launcher). Inside a session with no
@@ -567,8 +572,11 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       cost series, and the original keeps its account, its workers and its line in `status`
       (no `moved_to`); the tool's own copy of a stranded session takes its place as a resume
       under a new id does.
-      None eligible and able: exit 1, naming which were eligible and why trust could not be had. A session whose
-      account can still work is picked up anyway, with one note line: moving is a valid wish.
+      None eligible and able: exit 1, naming which were eligible and why trust could not be
+      had. None eligible at all (without `-a`), in every form of the command: `no account can
+      take work now; the soonest is <id>, usable at <clock>; nothing done`, exit 1, before any
+      launcher is asked (decision 25). A session whose account can still work is picked up
+      anyway, with one note line: moving is a valid wish.
     - **Never stopping others' sessions.** Only the launcher stops a session, and only its own
       child. Outside it, the old session is left as it is.
     - **The pickup prompt** (cli text, provider-neutral; only a handoff's fresh session uses
@@ -774,7 +782,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       from the first organization). On the same account the id stays. Model and effort carried
       over both ways. So a move costs one uncached read of the context plus the thinking
       regenerated on the new account; a resume on the same account loses nothing. This weighs
-      for `resume_wait_minutes` (decision 19): waiting for the reset keeps both.
+      for waiting (decisions 19 and 25): waiting for the reset keeps both.
       - **The link.** The launcher passes `FAIRSHARE_CONTINUES=<its pid>:<old id>` to a resume
         only (not a switch, not a handoff's fresh session; an inherited value is dropped).
         Capture, the prompt and post-tool hooks and the stop-failure hook call `_continuation`
@@ -827,6 +835,45 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     - **Not built:** sizes of reserved token blocks, a "still needed" ledger, and burn rate.
       They would come from this data.
 
+25. **At a limit, wait; never resume on an account that is out** (amends decisions 7 and 19).
+    Seen live on 2026-11-17: an account's 5-hour window was spent with the reset 40 minutes
+    away; 40 was over `resume_wait_minutes` (then 30), so the launcher stopped the session to
+    move it, but the policy ignored a short window resetting within `grace_hours` (1), the
+    account still ranked best on its week, and the session was restarted on it: limit, and round
+    again. Two thresholds disagreed, and a spent short window was treated like a nearly full one.
+    - **Usable now is a rule, not a score.** A short window at `long_exhausted_pct` (the line
+      the week uses for "spent") makes the account ineligible until that window resets, and
+      ranks it with the unusable ones (`score = -hours until the later spent window resets`,
+      `usable_in` the same, no grace). The grace hour applies only to a nearly full window. It
+      lives in `policy.py`, pure, so every launch, pickup, switch and handoff follows it; the
+      CLI's own spent-now check (`_spent_now`) went with it.
+    - **Waiting is the default.** When a launcher's session is stopped by its account's limit
+      and a fresh survey confirms it, the launcher leaves the child for the tool's own resume
+      whenever the tool resumes by itself and the reset is known; it writes `waiting_until` and
+      says one line, once per limit (`<id> is out (<span> limit) · <tool> resumes this session
+      at <clock> · ! fairshare pickup moves it to <best> now`, or `no account can take work now
+      (the soonest: <id>, usable at <clock>)`). The line goes to the terminal the session owns,
+      at a moment the session is idle at its limit; the bar repeats it until the reset.
+      `resume_wait_minutes` (under `[policy]`, refused below 0) is now an opt-in, unset by
+      default: N moves the session when the reset is more than N minutes away (0: always), and
+      only when an account can take work with the session's model; otherwise it waits. A tool
+      that does not resume by itself, or a limit with no known reset, is moved as before.
+    - **The guard, independent of the policy.** On every confirmed automatic stop the launcher
+      writes the limit on the session record (`limits`: `{account: reset}`, lifted ones
+      dropped; `link_session` carries them to a new id). `_launch` refuses any resume
+      (`continues`, a copy included, `-a` included) on an account held there before its reset:
+      `<id>'s limit stopped this session and lifts at <clock>; not resuming it there before
+      then. To resume it later: fairshare run -a <id> -- --resume <session>`, exit 75. And when
+      a move is about to be made for a limit the record already holds (the same account stopped
+      the session again before its reset), the launcher stops the child and ends instead (a
+      STOP request): `<id> stopped this session again before its limit lifted (<span> resets
+      <clock>); not trying again. To resume it later: …`, exit 75. A repeated stop while
+      waiting is not a second try: it keeps waiting and says nothing new. `fairshare run -a
+      <id> -- --resume <session>`, typed by the user, is not a resume fairshare makes and is
+      never refused.
+    - **Workers** are unchanged: they have no launcher; `watch` tells the main session, which
+      decides.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -846,10 +893,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   from a capture is still treated as stale and the stored one kept; only the probe can lower
   it (usage can fall within a window when the provider credits some back). An idle redraw of
   unchanged values leaves the snapshot's time (decision 20).
-- An account at 100% of its short window that resets within `grace_hours` is eligible by the
-  policy (for new launches). For a session the provider already stopped, pickup does not wait
-  for that reset: a plan window spent right now confirms the pickup and shows the bar mark
-  (`_spent_now`), and the countdown lets the user cancel and resume after the reset.
+- The launcher's one line when it waits (decision 25) is printed while the tool owns the
+  terminal; the tool may redraw over it. Not checked live; the bar carries the same facts.
+- The guard (decision 25) keys a limit by the account folder that stopped the session: a twin
+  folder sharing that login is not held by it (the policy still ranks the twin as spent).
+- A limit with no known reset (the account left out of the survey, signed out say) is not held
+  and not waited for; what keeps a resume off that account is that the survey does not rank it.
 - Not yet checked live: `!` commands inheriting
   `CLAUDE_CODE_SESSION_ID`; StopFailure firing on a real limit; whether `refreshInterval` re-runs
   carry fresh `rate_limits` (fairshare assumes the last payload); `CLAUDE_PID` in a hook naming

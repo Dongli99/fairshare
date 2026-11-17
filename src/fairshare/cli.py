@@ -443,7 +443,7 @@ def cmd_capture(a) -> int:
         snap = store.record(acct.id, fresh, now) if fresh else acct and store.load(acct.id)
         if seen:
             with contextlib.suppress(OSError):
-                out = _stranded(acct, seen, snap, tuning, now)
+                out = _stranded(acct, seen, snap, accounts, tuning, now)
         if acct and _stale(snap, tuning, now):
             _start_probe(acct, seen and seen.cwd, now)
         if acct and not a.then:
@@ -462,37 +462,36 @@ def cmd_capture(a) -> int:
 PICKUP_MARK = f"{SPENT}out · ! fairshare pickup{PLAIN}"
 
 
-def _pickup_mark(rec: SessionRecord, now: float) -> str:
+def _pickup_mark(rec: SessionRecord, acct: Account, snap: Snapshot | None,
+                 accounts: list[Account], t: Tuning, now: float) -> str:
     """The bar's mark for a stranded session: when it waits for the provider's own resume,
-    when that is and how to move now instead."""
-    if rec.waiting_until is not None and rec.waiting_until > now:
-        return (f"{SPENT}out · resumes {_clock(rec.waiting_until, now)} · ! fairshare pickup to "
-                f"move now{PLAIN}")
-    return PICKUP_MARK
+    which limit, when that is and where a pickup would move it now."""
+    if rec.waiting_until is None or rec.waiting_until <= now:
+        return PICKUP_MARK
+    lim = _limit(acct, snap, t, now)
+    best = _best_usable(acct, accounts, t, now)[0]
+    return (f"{SPENT}out · {f'{lim[0]} limit · ' if lim else ''}resumes "
+            f"{_clock(rec.waiting_until, now)} · "
+            + (f"! fairshare pickup moves it to {best.account.id} now" if best
+               else "no account can take work now") + PLAIN)
 
 
-def _limit_reset(acct: Account, snap: Snapshot | None, t: Tuning, now: float) -> float | None:
-    """When the account's limit lifts: the latest reset among its plan windows at their limit (a
-    week at `long_exhausted_pct`, a short window at `short_hot_pct`) still running; None when no
-    window says."""
+def _limit(acct: Account, snap: Snapshot | None, t: Tuning, now: float
+           ) -> tuple[str, float] | None:
+    """Which limit holds the account and when it lifts: of its plan windows at their limit (a
+    week at `long_exhausted_pct`, a short window at `short_hot_pct`) still running, the one that
+    resets last, as (its span for people, `5h`, or its name; its reset); None when no window
+    says."""
     p = acct.plan
-    return max((w.resets_at for name, full in ((p.long_name, t.long_exhausted_pct),
-                                               (p.short_name, t.short_hot_pct))
+    return max(((_span(hours) if hours else name, w.resets_at)
+                for name, hours, full in ((p.long_name, p.long_hours, t.long_exhausted_pct),
+                                          (p.short_name, p.short_hours, t.short_hot_pct))
                 if name and snap and (w := snap.windows.get(name)) and w.used_pct >= full
-                and w.resets_at > now), default=None) if p else None
+                and w.resets_at > now), key=lambda x: x[1], default=None) if p else None
 
 
-def _spent_now(acct: Account, snap: Snapshot | None, t: Tuning, now: float) -> bool:
-    """Whether one of the account's plan windows is spent and not yet reset. The policy calls a
-    full short window usable inside its grace hour; for a session the provider already stopped,
-    that is still out: it should be picked up, not wait for the reset."""
-    p = acct.plan
-    return bool(p and snap) and any(
-        w.used_pct >= t.long_exhausted_pct and w.resets_at > now
-        for k, w in snap.windows.items() if k in (p.short_name, p.long_name))
-
-
-def _stranded(acct: Account, seen, snap: Snapshot | None, t: Tuning, now: float) -> str | None:
+def _stranded(acct: Account, seen, snap: Snapshot | None, accounts: list[Account], t: Tuning,
+              now: float) -> str | None:
     """Record the session; the pickup hint when its limit stopped it and its account still
     cannot take work by the policy. Numbers newer than the stop that say it can work again (a
     window reset) clear the mark, and any wait for the provider's own resume with it."""
@@ -500,9 +499,8 @@ def _stranded(acct: Account, seen, snap: Snapshot | None, t: Tuning, now: float)
     rec = store.note_session(seen, acct.id, now)
     if rec is None or rec.stranded_at is None or acct.plan is None:
         return None
-    if (_spent_now(acct, snap, t, now)
-            or not rank([acct], {acct.id: snap} if snap else {}, now, t)[0].eligible):
-        return _pickup_mark(rec, now)
+    if not rank([acct], {acct.id: snap} if snap else {}, now, t)[0].eligible:
+        return _pickup_mark(rec, acct, snap, accounts, t, now)
     if snap and snap.captured_at > rec.stranded_at:
         store.note_session(seen, acct.id, now, stranded=False)
     return None
@@ -627,6 +625,8 @@ def _continuation(seen: SessionSeen, acct: Account, now: float) -> None:
 # the best account; start a fresh one that reads the checkpoint (written, or to be written by
 # the launcher first); start a fresh one with nothing (a switch).
 PICKUP, HANDOFF, HANDOFF_NOTE, SWITCH = "pickup", "handoff", "handoff-note", "switch"
+STOP = "stop"   # the launcher's own: the same limit stopped the session again; end, saying how
+                # to resume it later (`_pickup_request`)
 
 
 def _request(launcher: int, req: Request) -> None:
@@ -715,11 +715,18 @@ def _short_state(acct: Account, snap: Snapshot | None, now: float) -> str:
     return " · ".join(parts)
 
 
-def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
-    """The best other account by the local snapshots alone (no sign-in check, no probe)."""
+def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float
+                 ) -> tuple[Verdict | None, dict[str, Snapshot]]:
+    """The best other account that can take work, by the local snapshots alone (no sign-in
+    check, no probe), or None; and those snapshots."""
     others = [a for a in accounts if a.plan is not None and a.id != acct.id]
     snaps = {a.id: s for a in others if (s := store.load(a.id))}
-    v = next((v for v in rank(others, snaps, now, t) if v.eligible), None)
+    return next((v for v in rank(others, snaps, now, t) if v.eligible), None), snaps
+
+
+def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
+    """The best other account by the local snapshots alone, with its windows in a few words."""
+    v, snaps = _best_usable(acct, accounts, t, now)
     return (f"{v.account.id} ({_short_state(v.account, snaps.get(v.account.id), now)})" if v
             else "none can take work now")
 
@@ -894,11 +901,17 @@ def _launch(v: Verdict, args, explicit: bool = False, continues: str | None = No
     browser and LAUNCHER_ENV naming this process), and return its exit code. `args`: a list, or
     a function of the account that builds them now. `continues`: the id of the session this
     start resumes, passed as CONTINUES_ENV (with this process's id) so a new id links to it;
-    any inherited value is dropped otherwise. A request (SIGUSR1, `_pickup_request`) stops
-    the child and acts on its session (`_continue`), with this process still the parent, so a
-    later limit picks up again."""
+    any inherited value is dropped otherwise; a resume on an account whose limit stopped that
+    session is refused until the limit lifts (`_held`), whatever chose it. A request (SIGUSR1,
+    `_pickup_request`) stops the child and acts on its session (`_continue`), with this process
+    still the parent, so a later limit picks up again."""
     prov, acct = providers.get(v.account.provider), v.account
     hub = acct.config_dir.parent.parent
+    rec = continues and store.session(continues.removesuffix(COPY))
+    if until := _held(rec, acct.id, now := _now()):
+        _say(f"{acct.id}'s limit stopped this session and lifts at {_clock(until, now)}; not "
+             f"resuming it there before then. To resume it later: {_resume_line(rec)}")
+        return 75
     if not hub_mod.present(hub, acct.id):
         _say(_no_hub(hub))
         return 1
@@ -935,23 +948,47 @@ def _launch(v: Verdict, args, explicit: bool = False, continues: str | None = No
 COUNTDOWN_S = 10       # seconds the launcher shows before an automatic pickup starts
 
 
-def _can_work(s: Survey, acct_id: str) -> bool:
-    """Whether the account (or the twin ranked for its login) can take work in the survey. A plan
-    window spent right now says no even inside the policy's grace hour: the provider is already
-    refusing, so a session stopped by it should not wait for the reset."""
+def _verdict(s: Survey, acct_id: str) -> Verdict | None:
+    """The account's verdict in the survey (the twin ranked for its login's), or None."""
     rep = next((r for a, r in s.twins if a.id == acct_id), acct_id)
-    v = next((v for v in s.verdicts if v.account.id == rep and v.eligible), None)
-    return v is not None and not _spent_now(v.account, s.snaps.get(rep), s.tuning, s.now)
+    return next((v for v in s.verdicts if v.account.id == rep), None)
+
+
+def _can_work(s: Survey, acct_id: str) -> bool:
+    """Whether the account (or the twin ranked for its login) can take work in the survey."""
+    v = _verdict(s, acct_id)
+    return v is not None and v.eligible
+
+
+def _survey_limit(s: Survey, acct_id: str) -> tuple[str, float] | None:
+    """`_limit` for the account in the survey."""
+    v = _verdict(s, acct_id)
+    return v and _limit(v.account, s.snaps.get(v.account.id), s.tuning, s.now)
+
+
+def _held(rec: SessionRecord | None, acct_id: str, now: float) -> float | None:
+    """When the limit that stopped `rec` on the account lifts, while it has not yet: no resume
+    there before then. None otherwise."""
+    until = rec.limits.get(acct_id) if rec else None
+    return until if until is not None and until > now else None
+
+
+def _hold(session_id: str, acct_id: str, until: float, now: float) -> None:
+    """Write the limit that stopped the session on its record (`limits`); lifted ones go."""
+    store.update_session(session_id, lambda old: old and replace(old, limits={
+        **{k: x for k, x in old.limits.items() if x > now}, acct_id: until}))
 
 
 def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None, Request] | None:
     """Called in the launcher's wait on SIGUSR1. The request for this launcher, when it is for
     its own child's session and stands: a manual one (`fairshare pickup`, `handoff`, a switch)
-    as it is; an automatic one only when the session is marked stranded, a fresh survey (probes
-    included) confirms its account cannot take work, and the limit does not reset within
-    `resume_wait_minutes` (then the session is left for the provider's own resume, the wait
-    written on its record as `waiting_until`). Otherwise None: back to waiting, nothing printed
-    (the session owns the terminal)."""
+    as it is; an automatic one only when the session is marked stranded and a fresh survey
+    (probes included) confirms its account cannot take work. That limit is then written on the
+    record (`_hold`). By default the session is left for the provider's own resume at the reset
+    (`_waits`): the wait is written as `waiting_until`, said once per limit (`_wait_text`), and
+    the child runs on. A move (opted in with `resume_wait_minutes`) when the same limit stopped
+    the session before and has not lifted: a STOP request, so the launcher ends with the resume
+    line instead of trying again. Otherwise None: back to waiting, nothing printed."""
     try:
         got = store.take_request(os.getpid())
         if got is None or (got.pid is not None and got.pid != child):
@@ -964,38 +1001,57 @@ def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None, Request] 
         s = _survey()
         if _can_work(s, rec.account):
             return None
-        if (until := _resume_soon(s, rec.account)) is not None:
+        lim, before = _survey_limit(s, rec.account), _held(rec, rec.account, s.now)
+        if lim:
+            _hold(rec.id, rec.account, lim[1], s.now)
+        if (until := _waits(s, rec, got, lim)) is not None:
             store.update_session(rec.id, lambda old: old and replace(old, waiting_until=until))
+            if before is None or abs(before - until) > store.SAME_WINDOW_S:
+                _say(_wait_text(s, rec.account, lim))
             return None
-        return rec, s, got
+        return rec, s, replace(got, kind=STOP) if before is not None else got
     except (Exception, SystemExit):
         return None
 
 
-def _resume_soon(s: Survey, acct_id: str) -> float | None:
-    """The reset to leave a stopped session waiting for, when it is within `resume_wait_minutes`
-    (0: never): the provider resumes the session itself then, with its whole context and no
-    re-read. None: pick it up."""
-    rep = next((r for a, r in s.twins if a.id == acct_id), acct_id)
-    v = next((v for v in s.verdicts if v.account.id == rep), None)
-    if v is None or not providers.get(v.account.provider).resumes_at_reset:
+def _waits(s: Survey, rec: SessionRecord, req: Request, lim: tuple[str, float] | None
+           ) -> float | None:
+    """The reset to leave a stopped session waiting for, or None to move it. Waiting is the
+    default whenever the provider resumes such a session by itself and the reset is known: it
+    keeps its whole context and costs no re-read. `resume_wait_minutes` N opts in to a move when
+    the reset is more than N minutes away (0: always), and only to an account that can take work
+    with the session's model; with none, it waits."""
+    v = _verdict(s, rec.account)
+    if v is None or lim is None or not providers.get(v.account.provider).resumes_at_reset:
         return None
-    reset = _limit_reset(v.account, s.snaps.get(rep), s.tuning, s.now)
-    wait = s.tuning.resume_wait_minutes * 60
-    return reset if reset and wait > 0 and reset - s.now <= wait else None
+    wait = s.tuning.resume_wait_minutes
+    if wait is None or lim[1] - s.now <= wait * 60 or not _having_model(s, _carry(rec, req)[0]):
+        return lim[1]
+    return None
+
+
+def _wait_text(s: Survey, acct_id: str, lim: tuple[str, float]) -> str:
+    """The launcher's one line when it leaves a stopped session for the provider's own resume:
+    which limit, when, and where a pickup would move it now (or the soonest account)."""
+    v = _verdict(s, acct_id)
+    tool = providers.get(v.account.provider).tool
+    best = next((x for x in s.verdicts if x.eligible), None)
+    soon = min((x for x in s.verdicts if x is not v), key=lambda x: (x.usable_in, x.account.id),
+               default=None)
+    where = (f"! fairshare pickup moves it to {best.account.id} now" if best
+             else "no account can take work now"
+             + (f" (the soonest: {soon.account.id}, {_usable(soon, s.now)})" if soon else ""))
+    return (f"{acct_id} is out ({lim[0]} limit) · {tool} resumes this session at "
+            f"{_clock(lim[1], s.now)} · {where}")
 
 
 def _limit_text(s: Survey, acct_id: str) -> str:
     """Which window stopped the account and when it resets, for the countdown line."""
-    v = next((v for v in s.verdicts if v.account.id == acct_id), None)
+    v = _verdict(s, acct_id)
     if v is None:
         return next((why for a, why in s.out if a.id == acct_id), "no usage known")
-    p, snap = v.account.plan, s.snaps.get(acct_id)
-    for name, hours, full in ((p.long_name, p.long_hours, s.tuning.long_exhausted_pct),
-                              (p.short_name, p.short_hours, s.tuning.short_hot_pct)):
-        w = name and snap and snap.windows.get(name)
-        if w and w.resets_at > s.now and w.used_pct >= full:
-            return f"{_span(hours) if hours else name} resets {_clock(w.resets_at, s.now)}"
+    if lim := _survey_limit(s, acct_id):
+        return f"{lim[0]} resets {_clock(lim[1], s.now)}"
     return _usable(v, s.now)
 
 
@@ -1211,7 +1267,13 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
       wrong there is a pickup instead (one line why);
     - a pickup: for an automatic one on a terminal, a countdown (cancel says how to resume
       later); then the same session resumed on the best account (`_resumed`).
+    - a STOP: one line saying the same limit stopped it again, and how to resume it later.
     First one line says what is happening (`_notice`), so the terminal is never blank."""
+    if req.kind == STOP:
+        _say(f"{rec.account} stopped this session again before its limit lifted "
+             f"({_limit_text(s, rec.account)}); not trying again. To resume it later: "
+             f"{_resume_line(rec)}")
+        return 75
     _notice(rec, req)
     if req.kind == SWITCH:
         _say(f"to resume the old session: {_resume_line(rec)}")
@@ -1452,14 +1514,26 @@ def _unknown_account(account_id: str | None) -> bool:
     return True
 
 
+def _none_can_work(s: Survey) -> bool:
+    """Whether no account can take work now; said, with the soonest one, when so."""
+    if any(v.eligible for v in s.verdicts):
+        return False
+    soon = min(s.verdicts, key=lambda v: (v.usable_in, v.account.id), default=None)
+    _say("no account can take work now"
+         + (f"; the soonest is {soon.account.id}, {_usable(soon, s.now)}" if soon else "")
+         + "; nothing done")
+    return True
+
+
 def cmd_pickup(a) -> int:
     """Continue a session on the best account (or `-a`), resumed under its own id with its
     model and effort (`--model`, `--effort` override them). Inside a session with no SESSION:
     this one; its launcher, when it has one, stops it and resumes it (a manual request: no check
     that the account is out), otherwise it resumes in the background. A SESSION (full id or
     unique prefix) from a terminal outside a session resumes in the foreground in its folder;
-    inside a session or with --bg, in the background. fairshare never stops a session it did
-    not start."""
+    inside a session or with --bg, in the background. Without `-a`, when no account can take
+    work now, it says so (with the soonest) and does nothing, before any launcher is asked.
+    fairshare never stops a session it did not start."""
     prov = _provider()
     if _no_tool():
         return 1
@@ -1475,6 +1549,8 @@ def cmd_pickup(a) -> int:
             return 1
         req = Request(rec.id, True, prov.session_pid(), PICKUP, a.model, a.effort, a.account)
         if launcher := _launcher():
+            if not a.account and _none_can_work(_survey()):
+                return 1
             _request(launcher, req)
             print("the launcher will stop this session and continue on the best account")
             return 0
@@ -1486,6 +1562,8 @@ def cmd_pickup(a) -> int:
         return _pickup_background(rec, req)
     if not (rec.cwd and os.path.isdir(rec.cwd)):
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
+        return 1
+    if not a.account and _none_can_work(_survey()):
         return 1
     os.chdir(rec.cwd)
     copy = _may_run(rec)
@@ -1504,6 +1582,8 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
         return 1
     s = _survey()
+    if not req.account and _none_can_work(s):
+        return 1
     if not fresh and _can_work(s, rec.account):
         _say(f"note: {rec.account} can still take work; the session is picked up as asked")
     here = Path(rec.cwd).resolve()
@@ -2197,9 +2277,9 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
     for x in {f[4] for f in found if f[3]}:
         a = next((a for a in accounts if a.id == x), None)
         if a and providers.get(a.provider).resumes_at_reset and (
-                r := _limit_reset(a, store.load(x), t, now)):
-            resets[x] = (f"resets {_clock(r, now)} ({providers.get(a.provider).tool} resumes it "
-                         "then); ")
+                lim := _limit(a, store.load(x), t, now)):
+            resets[x] = (f"resets {_clock(lim[1], now)} ({providers.get(a.provider).tool} "
+                         "resumes it then); ")
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:

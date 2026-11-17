@@ -236,6 +236,13 @@ def _drawn(v: object) -> dict:
     return v
 
 
+def _limits(v: object) -> dict:
+    """Limits as stored ({account: reset}); {} for anything that is not them."""
+    if not isinstance(v, dict) or not all(_num(x) is not None for x in v.values()):
+        return {}
+    return {k: float(x) for k, x in v.items()}
+
+
 def _read_session(path: Path) -> SessionRecord | None:
     try:
         d = json.loads(path.read_text())
@@ -249,7 +256,8 @@ def _read_session(path: Path) -> SessionRecord | None:
                              _text(d.get("model")), _text(d.get("model_name")),
                              _text(d.get("effort")), _num(d.get("waiting_until")),
                              _costs(d.get("costs")), _text(d.get("continues")),
-                             _text(d.get("moved_to")), _drawn(d.get("drawn")))
+                             _text(d.get("moved_to")), _drawn(d.get("drawn")),
+                             _limits(d.get("limits")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -380,10 +388,10 @@ def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
                  copy: bool = False) -> SessionRecord | None:
     """`seen` continues the session `old_id` under a new id on `account_id` (a resume on another
     account, or a copy). Its record takes the old one's role, parent, model, display name and
-    effort where it lacks them (a model `seen` names wins, as in `note_session`), the account,
-    `seen`'s folder and transcript, `continues=old_id`, and keeps a cost series of its own; the
-    old checkpoint note is copied when the new id has none. When the old session has stopped
-    (not `copy`), the new one takes its place: the old record keeps its account and costs, gets
+    effort where it lacks them (a model `seen` names wins, as in `note_session`), the limits
+    that stopped it, the account, `seen`'s folder and transcript, `continues=old_id`, and keeps
+    a cost series of its own; the old checkpoint note is copied when the new id has none. When
+    the old session has stopped (not `copy`), the new one takes its place: the old record keeps its account and costs, gets
     `moved_to`, and is no longer stranded or waiting, and workers (their records and their
     sessions' records) whose parent is the old id now name the new one. A `copy` of a session
     that may still run leaves the old record and its workers as they are. None, with nothing
@@ -406,7 +414,8 @@ def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
         new = replace(new, account=account_id, cwd=seen.cwd or new.cwd or old.cwd,
                       transcript=seen.transcript or new.transcript, seen=now,
                       role=new.role or old.role, parent=new.parent or old.parent,
-                      model=model[0], model_name=model[1], effort=model[2], continues=old_id)
+                      model=model[0], model_name=model[1], effort=model[2], continues=old_id,
+                      limits={**old.limits, **new.limits})
         _write_session(dest, new)
         if not copy:
             _write_session(dest, replace(old, moved_to=seen.id, stranded_at=None,
