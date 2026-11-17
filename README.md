@@ -67,6 +67,7 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 - A *worker* is a background session the main session starts for big work; fairshare warns the
   main session near a limit and it decides what its workers do. A skill in the hub teaches it.
 - `fairshare doctor` checks the setup; `fairshare doctor --fix` repairs what it can.
+  `fairshare -v` prints the installed version.
 
 Every command, message and setting is in [docs/usage.md](https://github.com/Dongli99/fairshare/blob/main/docs/usage.md).
 

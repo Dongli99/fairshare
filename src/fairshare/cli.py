@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import browser
 from . import hub as hub_mod
-from . import providers, session, store
+from . import __version__, providers, session, store
 from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, NOTE_THINKING, NOTE_WRITING,
                     ROLE_WORKER, USAGE_MODEL_TURN, Account,
                     AccountStatus, ConfigError, Request, SessionRecord, SessionSeen, Snapshot,
@@ -3245,6 +3245,7 @@ def _run_args(parser: argparse.ArgumentParser, rest: list[str]) -> argparse.Name
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fairshare", description=__doc__)
+    p.add_argument("-v", "--version", action="version", version=f"fairshare {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status").set_defaults(f=cmd_status)
     cp = sub.add_parser("capture", help="the usage hook; the account is the session's own folder")
@@ -3326,6 +3327,9 @@ def main(argv: list[str] | None = None) -> int:
     dp.add_argument("--hub", metavar="PATH", help="with --fix: where the hub is now")
     dp.set_defaults(f=cmd_doctor)
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] in (["-v"], ["--version"]):
+        print(f"fairshare {__version__}")
+        return 0
     if not argv and not store.config_path().exists():
         return _offer_setup()
     if (not argv or argv[0] in SWITCH_FLAGS) and _provider().current_session():

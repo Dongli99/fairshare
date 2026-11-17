@@ -380,6 +380,9 @@ at it for that account's sign-in and sessions. Whether `/login` inside a session
 
 ## doctor
 
+`fairshare -v` (or `--version`) prints the installed version and nothing else; it needs no
+config.
+
 `fairshare doctor` checks the setup and changes nothing in your folders or settings, nor in
 fairshare's own config and state. It runs Claude Code's sign-in check and `/usage` in each
 account's hub folder, which are Claude Code's own commands. It checks

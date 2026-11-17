@@ -887,6 +887,14 @@ class BareAndUninstall(UserFolders):
         self.assertTrue(self.cfg.exists())                                 # join none
         self.assert_untouched()
 
+    def test_the_version_needs_no_config_and_changes_nothing(self):
+        import fairshare
+        for flag in ("-v", "--version"):
+            self.assertEqual(self.go(flag), 0)
+            self.assertEqual(self.out.strip(), f"fairshare {fairshare.__version__}")
+        self.assertFalse(self.cfg.exists())
+        self.assert_untouched()
+
     def test_uninstall_changes_nothing_and_says_how(self):
         self.setup_all()
         everything = {p: (p.read_bytes() if p.is_file() and not p.is_symlink() else None)
