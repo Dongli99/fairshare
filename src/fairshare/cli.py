@@ -13,6 +13,10 @@ import shutil
 import signal
 import subprocess
 import sys
+
+if sys.platform == "win32":   # termios, tty and POSIX job control below: macOS and Linux only
+    sys.exit("fairshare runs on macOS and Linux; Windows is not supported")
+
 import termios
 import time
 import tomllib

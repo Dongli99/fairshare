@@ -1,11 +1,14 @@
 # fairshare
 
-Use several AI-assistant subscriptions as if they were one. `fairshare` reads each account's
-real usage, then starts your next session on the account that makes the best use of what is
-left. It aims to use every account fully before its weekly reset and to avoid hitting a short
-limit unless that limit is about to reset anyway. It is a heuristic, not a guarantee.
+One assistant across the AI-assistant subscriptions you already have. Every account shares the
+same history, memory, settings and skills, and each new session starts on the account whose
+budget is best used right now, judged by its real usage. When an account runs out mid-task, the
+session continues on another one with its context. fairshare aims to use every account fully
+before its weekly reset and to avoid hitting a short limit unless that limit is about to reset
+anyway. It is a heuristic, not a guarantee.
 
-> Status: early. Claude Code on Pro, Max and Ultra plans is the first supported provider.
+> Status: early (0.x). Claude Code on Pro, Max and Ultra plans is the first supported provider.
+> Runs on macOS and Linux; Windows is not supported.
 
 ```
 $ fairshare status
@@ -338,6 +341,17 @@ weekly limit once it is nearly used up (`Fable 96% (Thu 03:00)`).
 
 [`docs/terms-and-limits.md`](docs/terms-and-limits.md): what fairshare deliberately does not do,
 and what is left for you to decide.
+
+## Prior art
+
+[ccm](https://github.com/revfactory/ccm) shares state between Claude Code accounts in a similar
+way. fairshare borrowed several of its ideas, reimplemented in its own code: ignoring stale
+statusLine redraws, reading `claude auth status`, warning about login-override variables, and
+merging a stray folder into the shared one with the clashing file renamed.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
