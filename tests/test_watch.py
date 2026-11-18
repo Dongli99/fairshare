@@ -127,6 +127,21 @@ class Watch(Work):
             self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 went idle\n")
             self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
 
+    def test_each_worker_in_its_own_accounts_listing(self):
+        """A background session is listed only through the account it runs on: a worker on
+        another account than the first one's is neither ended at once nor missed at its end."""
+        self.worker("w-1")
+        store.add_worker(Worker("w-2", PARENT, "a", str(self.here), NOW + 1))
+        cli._joined(store.worker("w-2"), "s-w-2", NOW + 1)
+        by = {"b": [claude.LiveSession("s-w-1", "w-1", True)],
+              "a": [claude.LiveSession("s-w-2", "w-2", True)]}
+        with mock.patch.object(claude, "list_sessions", lambda acct: by[acct.id]):
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+            by["a"] = []
+            self.assertEqual(self.watch("--timeout", "5")[1], "worker w-2 ended\n")
+            by["b"] = None                      # b's listing failed: w-1 is not judged
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+
     def test_several_events_one_line_each(self):
         sid = self.worker()
         self.worker("w-2", live=False)

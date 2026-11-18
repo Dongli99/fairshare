@@ -379,8 +379,9 @@ def note_text(out: str) -> str | None:
 
 
 def list_sessions(account: Account) -> list[LiveSession] | None:
-    """The sessions running now, as the tool lists them (any account's folder sees them all:
-    the hub shares where the tool keeps them); None when the list could not be had."""
+    """The sessions running now, as the tool lists them through `account`'s folder: a
+    background session only through the account it runs on (2.1.327, 2026-11-18); None when
+    the list could not be had."""
     try:
         r = subprocess.run([real_binary(), *AGENTS_ARGS], env=clean_env(account.config_dir),
                            stdin=subprocess.DEVNULL, capture_output=True, text=True,

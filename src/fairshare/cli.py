@@ -2100,15 +2100,22 @@ def _joined(w: Worker, session_id: str, now: float) -> None:
         role=ROLE_WORKER, parent=w.parent))
 
 
+def _listings(account_ids: set[str], accounts: list[Account]) -> dict[str, list | None]:
+    """{account id: the sessions running now as listed through that account (None when the
+    list could not be had)}, one listing per account: a background session is listed only
+    through the account it runs on."""
+    return {a.id: providers.get(a.provider).list_sessions(a)
+            for a in accounts if a.id in account_ids}
+
+
 def _join_pending(pending: list[Worker], accounts: list[Account], now: float) -> dict[str, str]:
-    """Look the unjoined workers among `pending` up by name, with one listing of the running
-    sessions; join each one found. {name: session id} of those joined."""
+    """Look the unjoined workers among `pending` up by name, each in the listing of its own
+    account; join each one found. {name: session id} of those joined."""
     todo = [w for w in pending if w.session is None and now - w.started < JOIN_RETRY_S]
-    acct = next((a for w in todo for a in accounts if a.id == w.account), None)
-    live = acct and providers.get(acct.provider).list_sessions(acct)
+    live = _listings({w.account for w in todo}, accounts)
     found = {}
     for w in todo:
-        if sid := next((x.id for x in live or [] if x.name == w.name), None):
+        if sid := next((x.id for x in live.get(w.account) or [] if x.name == w.name), None):
             _joined(w, sid, now)
             found[w.name] = sid
     return found
@@ -2337,24 +2344,25 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
 
 def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
     """From the running sessions: each worker of `here` that ended (no longer listed) or went
-    idle after it was seen busy, once each; pending joins are retried first."""
+    idle after it was seen busy, once each; pending joins are retried first. A worker is looked
+    for in the listing of the account its session runs on, and only when that listing came."""
     mine = store.workers(here)
     if not mine:
         return []
     joined = _join_pending(mine, accounts, now)
-    mine = [replace(w, session=w.session or joined.get(w.name)) for w in mine]
-    acct = next((a for w in mine for a in accounts if a.id == w.account), None)
-    live = acct and providers.get(acct.provider).list_sessions(acct)
-    if live is None:
-        return []
-    state = {x.id: x.busy for x in live}
+    mine = [(w, (r.account if (r := store.session(w.session)) else w.account))
+            for w in (replace(w, session=w.session or joined.get(w.name)) for w in mine)
+            if w.session]
+    live = _listings({x for _, x in mine}, accounts)
+    state = {x: {s.id: s.busy for s in ls} for x, ls in live.items() if ls is not None}
+    mine = [(w, state[x]) for w, x in mine if x in state]
     events, ended_now = [], []
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:
             return None
         seen, said = dict(old.reported), []
-        for w in (w for w in mine if w.session):
+        for w, state in mine:
             ended, busy = f"ended:{w.session}", f"busy:{w.session}"
             if w.session not in state:
                 ended_now.append(w)
