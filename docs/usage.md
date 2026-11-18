@@ -302,11 +302,17 @@ session; a new window starts over), fairshare adds one line to the session's con
 step (Claude Code's `PostToolUse` and `UserPromptSubmit` hooks, which fairshare wires in the
 hub). A main session reads, for example: `fairshare: account a is at 91% of its 5h window
 (resets 11:00). Best other account: b (5h 10% · 7d 40%). If what is left of your work is small,
-carry on. Otherwise, at the next stopping point: write a checkpoint ... and run fairshare pickup
-to continue on the best account. Workers you started: ...`. A worker reads that it should finish
-its current step and checkpoint, and that its main session decides what happens next. Subagents
-hear nothing. Numbers older than twice `refresh_minutes` warn nothing (fairshare asks for fresh
-ones instead). When one other session of the same account drew at least half of that account's
+carry on. Otherwise, at the next stopping point: run fairshare handoff "<what was done, what is
+next, ...>" to continue in a fresh session on the best account, which reads your note first.
+Workers you started: ...`. That is the default move, `warning_move = "handoff"`: the fresh
+session starts lean instead of reading the whole context again on another account, and it can read
+the old session's transcript for anything the note missed. Set `warning_move = "pickup"` under
+`[policy]` for the other: the line then says to write a checkpoint and run fairshare pickup, and
+the same session continues on the best account with its whole context. (`! fairshare pickup`
+works at any time, whichever is set; a session stopped by its limit is unchanged, see above.) A
+worker reads that it should finish its current step and checkpoint, and that its main session
+decides what happens next. Subagents hear nothing. Numbers older than twice `refresh_minutes`
+warn nothing (fairshare asks for fresh ones instead). When one other session of the same account drew at least half of that account's
 spend in the last hour, the main warning adds `Heaviest in the last hour: session 1f2e3d4c
 (Opus, api, 70%).` The hook reads only local files; with nothing to say it prints nothing and
 takes well under a tenth of a second.
@@ -433,7 +439,9 @@ and `leave` edit it as text, keeping your comments, with a backup each time. Key
   `status_args` and `usage_args`;
 - `[policy]`: `launch_pause` (seconds, default 3, `0` = off), `resume_wait_minutes` (unset by
   default: a session stopped by its limit waits for Claude Code's own resume; a number N moves
-  it automatically when the reset is more than N minutes away, `0` = always), `refresh_minutes`
+  it automatically when the reset is more than N minutes away, `0` = always), `warning_move`
+  (`"handoff"` by default, or `"pickup"`: the move a 90% / 95% warning tells the agent to make, see
+  [Warnings](#warnings)), `refresh_minutes`
   (default 5, at least 1), and the ranking's thresholds `short_hot_pct` (85: a short window this
   full is "nearly full"), `long_exhausted_pct` (98: a week or a short window this full is spent
   and cannot take work until it resets) and `grace_hours` (1: a nearly full, not spent, short

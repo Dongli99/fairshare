@@ -73,9 +73,11 @@ class Speaking(Work):
         self.assertEqual(self.said(), (
             "fairshare: account a is at 91% of its 5h window (resets 11:00). Best other account: "
             "b (5h 10% · 7d 40%). If what is left of your work is small, carry on. Otherwise, at "
-            'the next stopping point: write a checkpoint (fairshare checkpoint "<where you '
-            'stand>") and run fairshare pickup to continue on the best account. Workers you '
-            "started: none; to have them checkpoint: fairshare checkpoint --request all."))
+            'the next stopping point: run fairshare handoff "<what was done, what is next, open '
+            'decisions, constraints the user set, what was tried and failed, files touched>" to '
+            "continue in a fresh session on the best account, which reads your note first. "
+            "Workers you started: none; to have them checkpoint: fairshare checkpoint "
+            "--request all."))
         self.assertIsNone(self.said())
         self.assertIsNone(self.said("prompt"))                   # the other event shares it
         self.snap("a", five=(94, 3), seven=(10, 50))
@@ -85,6 +87,18 @@ class Speaking(Work):
         self.snap("a", five=(99, 3), seven=(10, 50))
         self.assertIsNone(self.said())
         self.assertEqual(store.session(SID).warned, {"five_hour": [NOW + 3 * H, 95]})
+
+    def test_warning_move_pickup_keeps_the_pickup_text(self):
+        cfg = self.tmp / "accounts.toml"
+        cfg.write_text(cfg.read_text().replace(
+            "\n\n[[account]]", '\n[policy]\nwarning_move = "pickup"\n\n[[account]]', 1))
+        self.snap("a", five=(91, 3), seven=(10, 50))
+        self.assertEqual(self.said(), (
+            "fairshare: account a is at 91% of its 5h window (resets 11:00). Best other account: "
+            "b (5h 10% · 7d 40%). If what is left of your work is small, carry on. Otherwise, at "
+            'the next stopping point: write a checkpoint (fairshare checkpoint "<where you '
+            'stand>") and run fairshare pickup to continue on the best account. Workers you '
+            "started: none; to have them checkpoint: fairshare checkpoint --request all."))
 
     def test_a_new_reset_warns_again(self):
         self.snap("a", five=(96, 3), seven=(10, 50))

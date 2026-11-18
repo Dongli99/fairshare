@@ -33,6 +33,21 @@ class Setting(unittest.TestCase):
             self.assertIn("resume_wait_minutes", str(e.exception))
 
 
+class WarningMove(unittest.TestCase):
+    def tuning(self, policy):
+        with mock.patch("pathlib.Path.read_text", return_value=f'hub = "/h"\n[policy]\n{policy}'):
+            return load_accounts(Path("/nowhere/accounts.toml"))[1]
+
+    def test_default_handoff_both_values_and_refusal(self):
+        self.assertEqual(self.tuning("").warning_move, "handoff")
+        self.assertEqual(self.tuning('warning_move = "handoff"').warning_move, "handoff")
+        self.assertEqual(self.tuning('warning_move = "pickup"').warning_move, "pickup")
+        for bad in ('"switch"', '""', "1", "true"):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError) as e:
+                self.tuning(f"warning_move = {bad}")
+            self.assertIn("warning_move must be 'handoff' or 'pickup'", str(e.exception))
+
+
 class LauncherWaits(Handover):
     """a's 5h window is spent; when it resets is set per test (Stranded: in three hours)."""
 

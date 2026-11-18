@@ -35,11 +35,16 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 ## When fairshare warns you
 A warning names the account, its percent, when that window resets and the best other account.
 - Little work left: carry on.
-- Otherwise, at the next stopping point: `fairshare checkpoint --request all` (your workers
-  checkpoint), `fairshare checkpoint "<where you stand>"`, then `fairshare pickup`: this same
-  session continues on the best account, with its whole context.
-- For a lean start instead, `fairshare handoff "<what was done, what is next, open decisions,
-  files touched>"`: a fresh session starts on the best account and reads that note first.
+- Otherwise, at the next stopping point, `fairshare checkpoint --request all` (your workers
+  checkpoint), then do the move the warning names; the setting `warning_move` picks it
+  (default handoff):
+  - **handoff**: `fairshare handoff "<what was done, what is next, open decisions, constraints
+    the user set, what was tried and failed, files touched>"`. A fresh session starts on the
+    best account and reads that note first; it can read this session's transcript for anything
+    the note missed.
+  - **pickup**: `fairshare checkpoint "<where you stand>"`, then `fairshare pickup`. This same
+    session continues on the best account with its whole context (on another account that
+    context is read again once, uncached).
 
 ## Checkpoints
 - `fairshare checkpoint "<what is done, what is next>"` appends to this session's note.

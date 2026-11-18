@@ -923,6 +923,21 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     both; fairshare reads neither), so on such an account Enter may write a value the policy
     then overrides.
 
+28. **A warning moves by handoff, by default** (amends decisions 19 and 23; `warning_move`).
+    Decision 19 chose pickup because a note cannot be relied on under load, and a pickup keeps
+    the whole context. At a *warning* (90% / 95%) there is time to write a note, and a pickup to
+    another account reads the whole context again, uncached; a long context is then paid for on
+    every later turn. A handoff starts lean: its fresh session reads the note first and is given
+    the old session's id and how to read its transcript (`_pickup_prompt`), so what the note
+    missed can be looked up. So the main-session warning now tells the agent to run
+    `fairshare handoff "<note>"`; `[policy] warning_move = "pickup"` restores the earlier text
+    (a checkpoint, then `fairshare pickup`). Any other value is a config error. `Tuning` holds
+    it; the policy is unchanged. Unchanged: a session *stopped* by its limit waits by default
+    (decision 25), `resume_wait_minutes` still moves it by pickup and `! fairshare pickup`
+    always works, since no note can be written at a hard stop (decision 19's reason); a worker's
+    warning (finish the step and checkpoint; its main session decides). The skill's section
+    "When fairshare warns you" describes both moves.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.

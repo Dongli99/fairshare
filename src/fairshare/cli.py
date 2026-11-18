@@ -763,12 +763,16 @@ def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window
                 'done, what is next>". Do not start a big new step; your main session decides '
                 "what happens next.")
     workers = ", ".join(x.name for x in store.workers(rec.id)) or "none"
+    move = ('write a checkpoint (fairshare checkpoint "<where you stand>") and run fairshare '
+            "pickup to continue on the best account." if t.warning_move == "pickup" else
+            'run fairshare handoff "<what was done, what is next, open decisions, constraints '
+            "the user set, what was tried and failed, files touched>\" to continue in a fresh "
+            "session on the best account, which reads your note first.")
     return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window (resets "
             f"{_clock(w.resets_at, now)}).{_heaviest(rec, acct.id, now)} Best other account: "
             f"{_best_other(acct, accounts, t, now)}"
             ". If what is left of your work is small, carry on. Otherwise, at the next stopping "
-            'point: write a checkpoint (fairshare checkpoint "<where you stand>") and run '
-            "fairshare pickup to continue on the best account. Workers you started: "
+            f"point: {move} Workers you started: "
             f"{workers}; to have them checkpoint: fairshare checkpoint --request all.")
 
 

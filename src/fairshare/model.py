@@ -198,6 +198,9 @@ class Snapshot:
     windows: dict[str, Window] = field(default_factory=dict)
 
 
+WARNING_MOVES = ("handoff", "pickup")   # `[policy] warning_move`
+
+
 @dataclass(frozen=True)
 class Tuning:
     short_hot_pct: float = 85.0       # a short window this full counts as "hot"
@@ -208,6 +211,8 @@ class Tuning:
     launch_pause: float = 3.0         # seconds a launch with a close choice waits; 0: never
     resume_wait_minutes: float | None = None  # None: a session stopped by its limit waits for
                                               # the reset; N: moved when that is over N min away
+    warning_move: str = "handoff"     # what a 90% / 95% warning tells the agent to run:
+                                      # "handoff" (a fresh session) or "pickup" (the same one)
 
 
 def _plan_data(name: str) -> dict:
@@ -320,7 +325,11 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
     for k, v in policy.items():
         if k not in Tuning.__dataclass_fields__:
             raise ConfigError(f"[policy] unknown key {k!r}; valid keys: {valid}")
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        if k == "warning_move":
+            if v not in WARNING_MOVES:
+                raise ConfigError(f"[policy] warning_move must be "
+                                  f"{' or '.join(repr(m) for m in WARNING_MOVES)}")
+        elif isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
             raise ConfigError(f"[policy] {k} must be a number (not nan or inf)")
     if policy.get("refresh_minutes", 1) < 1:
         raise ConfigError("[policy] refresh_minutes must be at least 1")
