@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fairshare-cli"
 dynamic = ["version"]
-description = "One assistant across several AI-assistant subscriptions: shared history and settings, each session started on the account whose budget is best used now."
+description = "Use multiple AI subscriptions like one: Claude Code across your accounts, with shared history, memory and skills, each session on the account with the most to spare."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

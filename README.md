@@ -1,10 +1,12 @@
 # fairshare
 
-One assistant across the AI-assistant subscriptions you already have. Every account shares the
-same history, memory, settings and skills, and each new session starts on the account whose
-budget is best used right now, judged by its real usage. When an account runs out mid-task, the
-session continues on another one with its context. The aim is to use every account fully before
-its weekly reset. It is a heuristic, not a guarantee.
+**Use multiple AI subscriptions like one.**
+
+fairshare runs Claude Code as one assistant across the subscriptions you already have. Every
+account shares the same history, memory, settings and skills, and each new session starts on the
+account whose budget is best used right now, judged by its real usage. When an account runs out
+mid-task, the session continues on another one with its context. The aim is to use every account
+fully before its weekly reset. It is a heuristic, not a guarantee.
 
 ![A 30-second demo with three made-up accounts: fairshare status ranks them by real usage; fairshare starts a session on the best one; when that account reaches 95% of its 5-hour window, fairshare tells the agent, which writes a checkpoint and runs fairshare pickup, and the same session continues on another account](https://raw.githubusercontent.com/Dongli99/fairshare/main/docs/demo.svg)
 
