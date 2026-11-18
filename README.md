@@ -6,7 +6,7 @@ budget is best used right now, judged by its real usage. When an account runs ou
 session continues on another one with its context. The aim is to use every account fully before
 its weekly reset. It is a heuristic, not a guarantee.
 
-![A 30-second demo with three made-up accounts: fairshare status ranks them by real usage; fairshare starts a session on the best one; when that account hits its 5-hour limit mid-task, the status bar says when it resets, and ! fairshare pickup continues the same session on another account](https://raw.githubusercontent.com/Dongli99/fairshare/main/docs/demo.svg)
+![A 30-second demo with three made-up accounts: fairshare status ranks them by real usage; fairshare starts a session on the best one; when that account reaches 95% of its 5-hour window, fairshare tells the agent, which writes a checkpoint and runs fairshare pickup, and the same session continues on another account](https://raw.githubusercontent.com/Dongli99/fairshare/main/docs/demo.svg)
 
 > Status: early (0.x). Claude Code on Pro, Max and Ultra plans is the first supported provider.
 > Runs on macOS and Linux; Windows is not supported.
@@ -52,6 +52,10 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 - `fairshare` starts a session on the best account. `fairshare run <args>` passes the arguments
   to Claude Code unchanged; `fairshare run -a ID` starts that account instead.
 - `fairshare status` lists the accounts, best first, with their usage and live sessions.
+- Near a limit (90% and 95% of a window), fairshare tells the agent in the session, naming the
+  best account now. A skill fairshare installs in the hub teaches it to write a checkpoint and run
+  `fairshare pickup` at its next stopping point, unless little work is left: the session moves on
+  before the limit, with its context. It is the agent's call, so it usually happens, not always.
 - When an account hits its limit mid-session, fairshare checks it really is out, then leaves
   the session for Claude Code to resume by itself at the reset, with its whole context. A line
   and the status bar say which limit, when it resets, and the best account that can take work;
@@ -60,8 +64,8 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 - Inside a session, `! fairshare pickup` moves it now, `! fairshare handoff` starts a fresh
   session from a written note, and `! fairshare` starts a fresh session with nothing carried
   over (a *switch*).
-- A *worker* is a background session the main session starts for big work; fairshare warns the
-  main session near a limit and it decides what its workers do. A skill in the hub teaches it.
+- A *worker* is a background session the main session starts for big work; near a limit, the
+  main session decides what its workers do.
 - `fairshare doctor` checks the setup; `fairshare doctor --fix` repairs what it can.
   `fairshare -v` prints the installed version.
 

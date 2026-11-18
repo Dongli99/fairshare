@@ -1,181 +1,156 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="854" height="377" viewBox="0 0 854 377" xml:space="preserve" role="img" aria-labelledby="t d">
 <title id="t">fairshare demo</title>
-<desc id="d">fairshare status ranks three made-up accounts by real usage; fairshare starts a session on the best one, two; two hits its 5-hour limit mid-task and the status bar says when it resets and that a pickup moves the session to one; ! fairshare pickup continues the same session on one.</desc>
+<desc id="d">fairshare: use multiple AI subscriptions like one. fairshare status ranks three made-up accounts by real usage; fairshare starts a session on the best one, two; when two reaches 95% of its 5-hour window, fairshare tells the agent, which writes a checkpoint and runs fairshare pickup, and the same session continues on one. Install: pipx install fairshare-cli.</desc>
 <style>
 text{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;font-size:13px;white-space:pre;fill:#c9d1d9}
 .f{fill:#c9d1d9}.d{fill:#7d8590}.g{fill:#7ee787}.y{fill:#e3b341}.r{fill:#ff7b72}.b{fill:#79c0ff}.w{fill:#f0f6fc;font-weight:600}.c{fill:#c9d1d9;opacity:.75}.t{fill:#9da7b3;font-size:12.5px}
-.a{opacity:0;animation-duration:28.21s;animation-iteration-count:infinite;animation-timing-function:steps(1,end)}
-@keyframes k0{0%{opacity:1}23.321%{opacity:0}}.k0{animation-name:k0}
-@keyframes k1{0%{opacity:1}2.835%{opacity:0}}.k1{animation-name:k1}
-@keyframes k2{0%{opacity:0}2.835%{opacity:1}3.03%{opacity:0}}.k2{animation-name:k2}
-@keyframes k3{0%{opacity:0}3.03%{opacity:1}3.225%{opacity:0}}.k3{animation-name:k3}
-@keyframes k4{0%{opacity:0}3.225%{opacity:1}3.42%{opacity:0}}.k4{animation-name:k4}
-@keyframes k5{0%{opacity:0}3.42%{opacity:1}3.615%{opacity:0}}.k5{animation-name:k5}
-@keyframes k6{0%{opacity:0}3.615%{opacity:1}3.81%{opacity:0}}.k6{animation-name:k6}
-@keyframes k7{0%{opacity:0}3.81%{opacity:1}4.005%{opacity:0}}.k7{animation-name:k7}
-@keyframes k8{0%{opacity:0}4.005%{opacity:1}4.2%{opacity:0}}.k8{animation-name:k8}
-@keyframes k9{0%{opacity:0}4.2%{opacity:1}4.395%{opacity:0}}.k9{animation-name:k9}
-@keyframes k10{0%{opacity:0}4.395%{opacity:1}4.59%{opacity:0}}.k10{animation-name:k10}
-@keyframes k11{0%{opacity:0}4.59%{opacity:1}4.785%{opacity:0}}.k11{animation-name:k11}
-@keyframes k12{0%{opacity:0}4.785%{opacity:1}4.98%{opacity:0}}.k12{animation-name:k12}
-@keyframes k13{0%{opacity:0}4.98%{opacity:1}5.175%{opacity:0}}.k13{animation-name:k13}
-@keyframes k14{0%{opacity:0}5.175%{opacity:1}5.369%{opacity:0}}.k14{animation-name:k14}
-@keyframes k15{0%{opacity:0}5.369%{opacity:1}5.564%{opacity:0}}.k15{animation-name:k15}
-@keyframes k16{0%{opacity:0}5.564%{opacity:1}5.759%{opacity:0}}.k16{animation-name:k16}
-@keyframes k17{0%{opacity:0}5.759%{opacity:1}5.954%{opacity:0}}.k17{animation-name:k17}
-@keyframes k18{0%{opacity:0}5.954%{opacity:1}7.018%{opacity:0}}.k18{animation-name:k18}
-@keyframes k19{0%{opacity:0}7.018%{opacity:1}33.759%{opacity:0}}.k19{animation-name:k19}
-@keyframes k20{0%{opacity:0}7.018%{opacity:1}33.759%{opacity:0}}.k20{animation-name:k20}
-@keyframes k21{0%{opacity:0}7.018%{opacity:1}33.759%{opacity:0}}.k21{animation-name:k21}
-@keyframes k22{0%{opacity:0}7.018%{opacity:1}33.759%{opacity:0}}.k22{animation-name:k22}
-@keyframes k23{0%{opacity:0}7.018%{opacity:1}23.321%{opacity:0}}.k23{animation-name:k23}
-@keyframes k24{0%{opacity:0}23.321%{opacity:1}33.759%{opacity:0}}.k24{animation-name:k24}
-@keyframes k25{0%{opacity:0}23.321%{opacity:1}23.516%{opacity:0}}.k25{animation-name:k25}
-@keyframes k26{0%{opacity:0}23.516%{opacity:1}23.711%{opacity:0}}.k26{animation-name:k26}
-@keyframes k27{0%{opacity:0}23.711%{opacity:1}23.906%{opacity:0}}.k27{animation-name:k27}
-@keyframes k28{0%{opacity:0}23.906%{opacity:1}24.101%{opacity:0}}.k28{animation-name:k28}
-@keyframes k29{0%{opacity:0}24.101%{opacity:1}24.296%{opacity:0}}.k29{animation-name:k29}
-@keyframes k30{0%{opacity:0}24.296%{opacity:1}24.491%{opacity:0}}.k30{animation-name:k30}
-@keyframes k31{0%{opacity:0}24.491%{opacity:1}24.685%{opacity:0}}.k31{animation-name:k31}
-@keyframes k32{0%{opacity:0}24.685%{opacity:1}24.88%{opacity:0}}.k32{animation-name:k32}
-@keyframes k33{0%{opacity:0}24.88%{opacity:1}25.075%{opacity:0}}.k33{animation-name:k33}
-@keyframes k34{0%{opacity:0}25.075%{opacity:1}25.784%{opacity:0}}.k34{animation-name:k34}
-@keyframes k35{0%{opacity:0}25.784%{opacity:1}33.759%{opacity:0}}.k35{animation-name:k35}
-@keyframes k36{0%{opacity:0}25.784%{opacity:1}33.759%{opacity:0}}.k36{animation-name:k36}
-@keyframes k37{0%{opacity:0}25.784%{opacity:1}33.759%{opacity:0}}.k37{animation-name:k37}
-@keyframes k38{0%{opacity:0}25.784%{opacity:1}28.442%{opacity:0}}.k38{animation-name:k38}
-@keyframes k39{0%{opacity:0}28.442%{opacity:1}31.1%{opacity:0}}.k39{animation-name:k39}
-@keyframes k40{0%{opacity:0}31.1%{opacity:1}33.759%{opacity:0}}.k40{animation-name:k40}
-@keyframes k41{0%{opacity:0}33.759%{opacity:1}66.72%{opacity:0}}.k41{animation-name:k41}
-@keyframes k42{0%{opacity:0}33.759%{opacity:1}71.292%{opacity:0}76.608%{opacity:1}}.k42{animation-name:k42}
-@keyframes k43{0%{opacity:0}33.759%{opacity:1}71.292%{opacity:0}76.608%{opacity:1}}.k43{animation-name:k43}
-@keyframes k44{0%{opacity:0}33.759%{opacity:1}66.72%{opacity:0}76.608%{opacity:1}}.k44{animation-name:k44}
-@keyframes k45{0%{opacity:0}33.759%{opacity:1}71.292%{opacity:0}76.608%{opacity:1}}.k45{animation-name:k45}
-@keyframes k46{0%{opacity:0}33.759%{opacity:1}43.328%{opacity:0}}.k46{animation-name:k46}
-@keyframes k47{0%{opacity:0}36.948%{opacity:1}71.292%{opacity:0}76.608%{opacity:1}}.k47{animation-name:k47}
-@keyframes k48{0%{opacity:0}39.075%{opacity:1}71.292%{opacity:0}76.608%{opacity:1}}.k48{animation-name:k48}
-@keyframes k49{0%{opacity:0}41.201%{opacity:1}71.292%{opacity:0}76.608%{opacity:1}}.k49{animation-name:k49}
-@keyframes k50{0%{opacity:0}43.328%{opacity:1}48.999%{opacity:0}}.k50{animation-name:k50}
-@keyframes k51{0%{opacity:0}43.328%{opacity:1}51.834%{opacity:0}}.k51{animation-name:k51}
-@keyframes k52{0%{opacity:0}48.999%{opacity:1}71.292%{opacity:0}}.k52{animation-name:k52}
-@keyframes k53{0%{opacity:0}48.999%{opacity:1}71.292%{opacity:0}}.k53{animation-name:k53}
-@keyframes k54{0%{opacity:0}51.834%{opacity:1}71.292%{opacity:0}}.k54{animation-name:k54}
-@keyframes k55{0%{opacity:0}51.834%{opacity:1}71.292%{opacity:0}}.k55{animation-name:k55}
-@keyframes k56{0%{opacity:0}66.72%{opacity:1}}.k56{animation-name:k56}
-@keyframes k57{0%{opacity:0}66.72%{opacity:1}66.915%{opacity:0}}.k57{animation-name:k57}
-@keyframes k58{0%{opacity:0}66.915%{opacity:1}67.11%{opacity:0}}.k58{animation-name:k58}
-@keyframes k59{0%{opacity:0}67.11%{opacity:1}67.305%{opacity:0}}.k59{animation-name:k59}
-@keyframes k60{0%{opacity:0}67.305%{opacity:1}67.5%{opacity:0}}.k60{animation-name:k60}
-@keyframes k61{0%{opacity:0}67.5%{opacity:1}67.694%{opacity:0}}.k61{animation-name:k61}
-@keyframes k62{0%{opacity:0}67.694%{opacity:1}67.889%{opacity:0}}.k62{animation-name:k62}
-@keyframes k63{0%{opacity:0}67.889%{opacity:1}68.084%{opacity:0}}.k63{animation-name:k63}
-@keyframes k64{0%{opacity:0}68.084%{opacity:1}68.279%{opacity:0}}.k64{animation-name:k64}
-@keyframes k65{0%{opacity:0}68.279%{opacity:1}68.474%{opacity:0}}.k65{animation-name:k65}
-@keyframes k66{0%{opacity:0}68.474%{opacity:1}68.669%{opacity:0}}.k66{animation-name:k66}
-@keyframes k67{0%{opacity:0}68.669%{opacity:1}68.864%{opacity:0}}.k67{animation-name:k67}
-@keyframes k68{0%{opacity:0}68.864%{opacity:1}69.059%{opacity:0}}.k68{animation-name:k68}
-@keyframes k69{0%{opacity:0}69.059%{opacity:1}69.254%{opacity:0}}.k69{animation-name:k69}
-@keyframes k70{0%{opacity:0}69.254%{opacity:1}69.449%{opacity:0}}.k70{animation-name:k70}
-@keyframes k71{0%{opacity:0}69.449%{opacity:1}69.644%{opacity:0}}.k71{animation-name:k71}
-@keyframes k72{0%{opacity:0}69.644%{opacity:1}69.839%{opacity:0}}.k72{animation-name:k72}
-@keyframes k73{0%{opacity:0}69.839%{opacity:1}70.034%{opacity:0}}.k73{animation-name:k73}
-@keyframes k74{0%{opacity:0}70.034%{opacity:1}70.229%{opacity:0}}.k74{animation-name:k74}
-@keyframes k75{0%{opacity:0}70.229%{opacity:1}71.292%{opacity:0}}.k75{animation-name:k75}
-@keyframes k76{0%{opacity:0}71.292%{opacity:1}76.608%{opacity:0}}.k76{animation-name:k76}
-@keyframes k77{0%{opacity:0}76.608%{opacity:1}}.k77{animation-name:k77}
-@keyframes k78{0%{opacity:0}76.608%{opacity:1}}.k78{animation-name:k78}
-@keyframes k79{0%{opacity:0}76.608%{opacity:1}}.k79{animation-name:k79}
-@keyframes k80{0%{opacity:0}76.608%{opacity:1}}.k80{animation-name:k80}
-@keyframes k81{0%{opacity:0}76.608%{opacity:1}}.k81{animation-name:k81}
-@keyframes k82{0%{opacity:0}81.216%{opacity:1}}.k82{animation-name:k82}
-@keyframes k83{0%{opacity:0}84.051%{opacity:1}}.k83{animation-name:k83}
+.h1{fill:#f0f6fc;font-size:34px;font-weight:700}.h2{fill:#c9d1d9;font-size:17px}.h3{fill:#f0f6fc;font-size:20px;font-weight:600}.g3{fill:#7ee787;font-size:20px}
+.a{opacity:0;animation-duration:28.77s;animation-iteration-count:infinite;animation-timing-function:steps(1,end)}
+@keyframes k0{0%{opacity:1}10.426%{opacity:0}}.k0{animation-name:k0}
+@keyframes k1{0%{opacity:1}10.426%{opacity:0}}.k1{animation-name:k1}
+@keyframes k2{0%{opacity:0}10.426%{opacity:1}30.513%{opacity:0}}.k2{animation-name:k2}
+@keyframes k3{0%{opacity:0}10.426%{opacity:1}12.511%{opacity:0}}.k3{animation-name:k3}
+@keyframes k4{0%{opacity:0}12.511%{opacity:1}12.702%{opacity:0}}.k4{animation-name:k4}
+@keyframes k5{0%{opacity:0}12.702%{opacity:1}12.893%{opacity:0}}.k5{animation-name:k5}
+@keyframes k6{0%{opacity:0}12.893%{opacity:1}13.084%{opacity:0}}.k6{animation-name:k6}
+@keyframes k7{0%{opacity:0}13.084%{opacity:1}13.275%{opacity:0}}.k7{animation-name:k7}
+@keyframes k8{0%{opacity:0}13.275%{opacity:1}13.467%{opacity:0}}.k8{animation-name:k8}
+@keyframes k9{0%{opacity:0}13.467%{opacity:1}13.658%{opacity:0}}.k9{animation-name:k9}
+@keyframes k10{0%{opacity:0}13.658%{opacity:1}13.849%{opacity:0}}.k10{animation-name:k10}
+@keyframes k11{0%{opacity:0}13.849%{opacity:1}14.04%{opacity:0}}.k11{animation-name:k11}
+@keyframes k12{0%{opacity:0}14.04%{opacity:1}14.231%{opacity:0}}.k12{animation-name:k12}
+@keyframes k13{0%{opacity:0}14.231%{opacity:1}14.422%{opacity:0}}.k13{animation-name:k13}
+@keyframes k14{0%{opacity:0}14.422%{opacity:1}14.613%{opacity:0}}.k14{animation-name:k14}
+@keyframes k15{0%{opacity:0}14.613%{opacity:1}14.805%{opacity:0}}.k15{animation-name:k15}
+@keyframes k16{0%{opacity:0}14.805%{opacity:1}14.996%{opacity:0}}.k16{animation-name:k16}
+@keyframes k17{0%{opacity:0}14.996%{opacity:1}15.187%{opacity:0}}.k17{animation-name:k17}
+@keyframes k18{0%{opacity:0}15.187%{opacity:1}15.378%{opacity:0}}.k18{animation-name:k18}
+@keyframes k19{0%{opacity:0}15.378%{opacity:1}15.569%{opacity:0}}.k19{animation-name:k19}
+@keyframes k20{0%{opacity:0}15.569%{opacity:1}16.612%{opacity:0}}.k20{animation-name:k20}
+@keyframes k21{0%{opacity:0}16.612%{opacity:1}40.226%{opacity:0}}.k21{animation-name:k21}
+@keyframes k22{0%{opacity:0}16.612%{opacity:1}40.226%{opacity:0}}.k22{animation-name:k22}
+@keyframes k23{0%{opacity:0}16.612%{opacity:1}40.226%{opacity:0}}.k23{animation-name:k23}
+@keyframes k24{0%{opacity:0}16.612%{opacity:1}40.226%{opacity:0}}.k24{animation-name:k24}
+@keyframes k25{0%{opacity:0}16.612%{opacity:1}30.513%{opacity:0}}.k25{animation-name:k25}
+@keyframes k26{0%{opacity:0}30.513%{opacity:1}40.226%{opacity:0}}.k26{animation-name:k26}
+@keyframes k27{0%{opacity:0}30.513%{opacity:1}30.704%{opacity:0}}.k27{animation-name:k27}
+@keyframes k28{0%{opacity:0}30.704%{opacity:1}30.895%{opacity:0}}.k28{animation-name:k28}
+@keyframes k29{0%{opacity:0}30.895%{opacity:1}31.086%{opacity:0}}.k29{animation-name:k29}
+@keyframes k30{0%{opacity:0}31.086%{opacity:1}31.277%{opacity:0}}.k30{animation-name:k30}
+@keyframes k31{0%{opacity:0}31.277%{opacity:1}31.468%{opacity:0}}.k31{animation-name:k31}
+@keyframes k32{0%{opacity:0}31.468%{opacity:1}31.659%{opacity:0}}.k32{animation-name:k32}
+@keyframes k33{0%{opacity:0}31.659%{opacity:1}31.851%{opacity:0}}.k33{animation-name:k33}
+@keyframes k34{0%{opacity:0}31.851%{opacity:1}32.042%{opacity:0}}.k34{animation-name:k34}
+@keyframes k35{0%{opacity:0}32.042%{opacity:1}32.233%{opacity:0}}.k35{animation-name:k35}
+@keyframes k36{0%{opacity:0}32.233%{opacity:1}32.928%{opacity:0}}.k36{animation-name:k36}
+@keyframes k37{0%{opacity:0}32.928%{opacity:1}40.226%{opacity:0}}.k37{animation-name:k37}
+@keyframes k38{0%{opacity:0}32.928%{opacity:1}40.226%{opacity:0}}.k38{animation-name:k38}
+@keyframes k39{0%{opacity:0}32.928%{opacity:1}40.226%{opacity:0}}.k39{animation-name:k39}
+@keyframes k40{0%{opacity:0}32.928%{opacity:1}35.361%{opacity:0}}.k40{animation-name:k40}
+@keyframes k41{0%{opacity:0}35.361%{opacity:1}37.793%{opacity:0}}.k41{animation-name:k41}
+@keyframes k42{0%{opacity:0}37.793%{opacity:1}40.226%{opacity:0}}.k42{animation-name:k42}
+@keyframes k43{0%{opacity:0}40.226%{opacity:1}91.312%{opacity:0}}.k43{animation-name:k43}
+@keyframes k44{0%{opacity:0}40.226%{opacity:1}69.765%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k44{animation-name:k44}
+@keyframes k45{0%{opacity:0}40.226%{opacity:1}69.765%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k45{animation-name:k45}
+@keyframes k46{0%{opacity:0}40.226%{opacity:1}69.765%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k46{animation-name:k46}
+@keyframes k47{0%{opacity:0}40.226%{opacity:1}69.765%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k47{animation-name:k47}
+@keyframes k48{0%{opacity:0}40.226%{opacity:1}48.219%{opacity:0}}.k48{animation-name:k48}
+@keyframes k49{0%{opacity:0}43.006%{opacity:1}69.765%{opacity:0}}.k49{animation-name:k49}
+@keyframes k50{0%{opacity:0}44.744%{opacity:1}69.765%{opacity:0}}.k50{animation-name:k50}
+@keyframes k51{0%{opacity:0}46.481%{opacity:1}69.765%{opacity:0}}.k51{animation-name:k51}
+@keyframes k52{0%{opacity:0}48.219%{opacity:1}69.765%{opacity:0}}.k52{animation-name:k52}
+@keyframes k53{0%{opacity:0}48.219%{opacity:1}69.765%{opacity:0}}.k53{animation-name:k53}
+@keyframes k54{0%{opacity:0}48.219%{opacity:1}69.765%{opacity:0}}.k54{animation-name:k54}
+@keyframes k55{0%{opacity:0}51.694%{opacity:1}69.765%{opacity:0}}.k55{animation-name:k55}
+@keyframes k56{0%{opacity:0}58.645%{opacity:1}69.765%{opacity:0}}.k56{animation-name:k56}
+@keyframes k57{0%{opacity:0}63.162%{opacity:1}69.765%{opacity:0}}.k57{animation-name:k57}
+@keyframes k58{0%{opacity:0}66.29%{opacity:1}69.765%{opacity:0}}.k58{animation-name:k58}
+@keyframes k59{0%{opacity:0}69.765%{opacity:1}74.283%{opacity:0}}.k59{animation-name:k59}
+@keyframes k60{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k60{animation-name:k60}
+@keyframes k61{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k61{animation-name:k61}
+@keyframes k62{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k62{animation-name:k62}
+@keyframes k63{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k63{animation-name:k63}
+@keyframes k64{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k64{animation-name:k64}
+@keyframes k65{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k65{animation-name:k65}
+@keyframes k66{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k66{animation-name:k66}
+@keyframes k67{0%{opacity:0}74.283%{opacity:1}91.312%{opacity:0}}.k67{animation-name:k67}
+@keyframes k68{0%{opacity:0}78.454%{opacity:1}91.312%{opacity:0}}.k68{animation-name:k68}
+@keyframes k69{0%{opacity:0}80.886%{opacity:1}91.312%{opacity:0}}.k69{animation-name:k69}
+@keyframes k70{0%{opacity:0}91.312%{opacity:1}}.k70{animation-name:k70}
 @media (prefers-reduced-motion:reduce){.a{animation:none}.s{opacity:1}}
 </style>
 <rect x=".5" y=".5" width="853" height="376" rx="10" fill="#0d1117" stroke="#30363d"/>
 <path d="M.5 34.5h853" stroke="#21262d"/>
 <circle cx="20" cy="17" r="5.5" fill="#ff5f57"/><circle cx="38" cy="17" r="5.5" fill="#febc2e"/><circle cx="56" cy="17" r="5.5" fill="#28c840"/>
-<text class="a k0" x="427" y="25" text-anchor="middle"><tspan class="t">1/4  fairshare status: every account, ranked by its real usage</tspan></text>
-<text class="a k1" x="18" y="57"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
-<text class="a k2" x="18" y="57"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
-<text class="a k3" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">f</tspan><tspan class="c">█</tspan></text>
-<text class="a k4" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fa</tspan><tspan class="c">█</tspan></text>
-<text class="a k5" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fai</tspan><tspan class="c">█</tspan></text>
-<text class="a k6" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fair</tspan><tspan class="c">█</tspan></text>
-<text class="a k7" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairs</tspan><tspan class="c">█</tspan></text>
-<text class="a k8" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairsh</tspan><tspan class="c">█</tspan></text>
-<text class="a k9" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairsha</tspan><tspan class="c">█</tspan></text>
-<text class="a k10" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshar</tspan><tspan class="c">█</tspan></text>
-<text class="a k11" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare</tspan><tspan class="c">█</tspan></text>
-<text class="a k12" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare </tspan><tspan class="c">█</tspan></text>
-<text class="a k13" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare s</tspan><tspan class="c">█</tspan></text>
-<text class="a k14" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare st</tspan><tspan class="c">█</tspan></text>
-<text class="a k15" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare sta</tspan><tspan class="c">█</tspan></text>
-<text class="a k16" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare stat</tspan><tspan class="c">█</tspan></text>
-<text class="a k17" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare statu</tspan><tspan class="c">█</tspan></text>
-<text class="a k18" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare status</tspan><tspan class="c">█</tspan></text>
-<text class="a k19" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare status</tspan></text>
-<text class="a k20" x="18" y="76"><tspan class="g">&gt;</tspan><tspan class="f"> two          claude-pro     score   1.67  seven_day 55% used, resets in 27h</tspan></text>
-<text class="a k21" x="18" y="95"><tspan class="f"> </tspan><tspan class="f"> one          claude-pro     score   1.56  seven_day 25% used, resets in 48h</tspan></text>
-<text class="a k22" x="18" y="114"><tspan class="f"> </tspan><tspan class="f"> three        claude-pro     score  -2.00  five_hour 100% used, resets in 2.0h</tspan><tspan class="y">  [avoid] usable at 16:12</tspan></text>
-<text class="a k23" x="18" y="152"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
-<text class="a k24" x="427" y="25" text-anchor="middle"><tspan class="t">2/4  fairshare: the session starts on the best account (on a close call it shows the choice)</tspan></text>
+<text class="a k0" x="427" y="196" text-anchor="middle"><tspan class="h1">fairshare</tspan></text>
+<text class="a k1" x="427" y="232" text-anchor="middle"><tspan class="h2">Use multiple AI subscriptions like one.</tspan></text>
+<text class="a k2" x="427" y="25" text-anchor="middle"><tspan class="t">1/3  every account, ranked by real usage</tspan></text>
+<text class="a k3" x="18" y="57"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
+<text class="a k4" x="18" y="57"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
+<text class="a k5" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">f</tspan><tspan class="c">█</tspan></text>
+<text class="a k6" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fa</tspan><tspan class="c">█</tspan></text>
+<text class="a k7" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fai</tspan><tspan class="c">█</tspan></text>
+<text class="a k8" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fair</tspan><tspan class="c">█</tspan></text>
+<text class="a k9" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairs</tspan><tspan class="c">█</tspan></text>
+<text class="a k10" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairsh</tspan><tspan class="c">█</tspan></text>
+<text class="a k11" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairsha</tspan><tspan class="c">█</tspan></text>
+<text class="a k12" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshar</tspan><tspan class="c">█</tspan></text>
+<text class="a k13" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare</tspan><tspan class="c">█</tspan></text>
+<text class="a k14" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare </tspan><tspan class="c">█</tspan></text>
+<text class="a k15" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare s</tspan><tspan class="c">█</tspan></text>
+<text class="a k16" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare st</tspan><tspan class="c">█</tspan></text>
+<text class="a k17" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare sta</tspan><tspan class="c">█</tspan></text>
+<text class="a k18" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare stat</tspan><tspan class="c">█</tspan></text>
+<text class="a k19" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare statu</tspan><tspan class="c">█</tspan></text>
+<text class="a k20" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare status</tspan><tspan class="c">█</tspan></text>
+<text class="a k21" x="18" y="57"><tspan class="g">$ </tspan><tspan class="w">fairshare status</tspan></text>
+<text class="a k22" x="18" y="76"><tspan class="g">&gt;</tspan><tspan class="f"> two          claude-pro     score   1.67  seven_day 55% used, resets in 27h</tspan></text>
+<text class="a k23" x="18" y="95"><tspan class="f"> </tspan><tspan class="f"> one          claude-pro     score   1.56  seven_day 25% used, resets in 48h</tspan></text>
+<text class="a k24" x="18" y="114"><tspan class="f"> </tspan><tspan class="f"> three        claude-pro     score  -2.00  five_hour 100% used, resets in 2.0h</tspan><tspan class="y">  [avoid] usable at 16:12</tspan></text>
 <text class="a k25" x="18" y="152"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
-<text class="a k26" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">f</tspan><tspan class="c">█</tspan></text>
-<text class="a k27" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fa</tspan><tspan class="c">█</tspan></text>
-<text class="a k28" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fai</tspan><tspan class="c">█</tspan></text>
-<text class="a k29" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fair</tspan><tspan class="c">█</tspan></text>
-<text class="a k30" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairs</tspan><tspan class="c">█</tspan></text>
-<text class="a k31" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairsh</tspan><tspan class="c">█</tspan></text>
-<text class="a k32" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairsha</tspan><tspan class="c">█</tspan></text>
-<text class="a k33" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairshar</tspan><tspan class="c">█</tspan></text>
-<text class="a k34" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairshare</tspan><tspan class="c">█</tspan></text>
-<text class="a k35" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairshare</tspan></text>
-<text class="a k36" x="18" y="171"><tspan class="f">  1 </tspan><tspan class="g">&gt;</tspan><tspan class="f"> two          seven_day 55% used, resets in 27h</tspan></text>
-<text class="a k37" x="18" y="190"><tspan class="f">  2 </tspan><tspan class="g"> </tspan><tspan class="f"> one          seven_day 25% used, resets in 48h</tspan></text>
-<text class="a k38" x="18" y="209"><tspan class="b">starting two in 3 s · Enter = now · 1-2 = that account · q = quit</tspan></text>
-<text class="a k39" x="18" y="209"><tspan class="b">starting two in 2 s · Enter = now · 1-2 = that account · q = quit</tspan></text>
-<text class="a k40" x="18" y="209"><tspan class="b">starting two in 1 s · Enter = now · 1-2 = that account · q = quit</tspan></text>
-<text class="a k41 s" x="427" y="25" text-anchor="middle"><tspan class="t">3/4  two runs out mid-task: wait for its reset, or move the session now</tspan></text>
-<text class="a k42 s" x="18" y="57"><tspan class="d">&gt; </tspan><tspan class="w">add retries to the upload client</tspan></text>
-<text class="a k43 s" x="18" y="304"><tspan class="d">──────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
-<text class="a k44 s" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="c">█</tspan></text>
-<text class="a k45 s" x="18" y="342"><tspan class="d">──────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
-<text class="a k46" x="18" y="361"><tspan class="d">two · 5h 20% · 7d 55%</tspan></text>
-<text class="a k47 s" x="18" y="95"><tspan class="g">● </tspan><tspan class="f">Read src/upload.py</tspan></text>
-<text class="a k48 s" x="18" y="114"><tspan class="g">● </tspan><tspan class="f">Update src/upload.py (+24 −6)</tspan></text>
-<text class="a k49 s" x="18" y="133"><tspan class="g">● </tspan><tspan class="f">Bash pytest -q · 41 passed</tspan></text>
-<text class="a k50" x="18" y="152"><tspan class="d">              · · ·  40 minutes later  · · ·</tspan></text>
-<text class="a k51" x="18" y="361"><tspan class="d">two · </tspan><tspan class="y">5h 92% (16:00)</tspan><tspan class="d"> · 7d 62%</tspan></text>
-<text class="a k52 s" x="18" y="152"><tspan class="d">              · · ·  48 minutes later  · · ·</tspan></text>
+<text class="a k26" x="427" y="25" text-anchor="middle"><tspan class="t">2/3  a session starts on the best account</tspan></text>
+<text class="a k27" x="18" y="152"><tspan class="g">$ </tspan><tspan class="c">█</tspan></text>
+<text class="a k28" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">f</tspan><tspan class="c">█</tspan></text>
+<text class="a k29" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fa</tspan><tspan class="c">█</tspan></text>
+<text class="a k30" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fai</tspan><tspan class="c">█</tspan></text>
+<text class="a k31" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fair</tspan><tspan class="c">█</tspan></text>
+<text class="a k32" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairs</tspan><tspan class="c">█</tspan></text>
+<text class="a k33" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairsh</tspan><tspan class="c">█</tspan></text>
+<text class="a k34" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairsha</tspan><tspan class="c">█</tspan></text>
+<text class="a k35" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairshar</tspan><tspan class="c">█</tspan></text>
+<text class="a k36" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairshare</tspan><tspan class="c">█</tspan></text>
+<text class="a k37" x="18" y="152"><tspan class="g">$ </tspan><tspan class="w">fairshare</tspan></text>
+<text class="a k38" x="18" y="171"><tspan class="f">  1 </tspan><tspan class="g">&gt;</tspan><tspan class="f"> two          seven_day 55% used, resets in 27h</tspan></text>
+<text class="a k39" x="18" y="190"><tspan class="f">  2 </tspan><tspan class="g"> </tspan><tspan class="f"> one          seven_day 25% used, resets in 48h</tspan></text>
+<text class="a k40" x="18" y="209"><tspan class="b">starting two in 3 s · Enter = now · 1-2 = that account · q = quit</tspan></text>
+<text class="a k41" x="18" y="209"><tspan class="b">starting two in 2 s · Enter = now · 1-2 = that account · q = quit</tspan></text>
+<text class="a k42" x="18" y="209"><tspan class="b">starting two in 1 s · Enter = now · 1-2 = that account · q = quit</tspan></text>
+<text class="a k43 s" x="427" y="25" text-anchor="middle"><tspan class="t">3/3  near a limit, the session moves itself</tspan></text>
+<text class="a k44 s" x="18" y="57"><tspan class="d">&gt; </tspan><tspan class="w">add retries to the upload client</tspan></text>
+<text class="a k45 s" x="18" y="304"><tspan class="d">──────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text class="a k46 s" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="c">█</tspan></text>
+<text class="a k47 s" x="18" y="342"><tspan class="d">──────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text class="a k48" x="18" y="361"><tspan class="d">two · 5h 20% · 7d 55%</tspan></text>
+<text class="a k49 s" x="18" y="95"><tspan class="g">● </tspan><tspan class="f">Read src/upload.py</tspan></text>
+<text class="a k50 s" x="18" y="114"><tspan class="g">● </tspan><tspan class="f">Update src/upload.py (+24 −6)</tspan></text>
+<text class="a k51 s" x="18" y="133"><tspan class="g">● </tspan><tspan class="f">Bash pytest -q · 41 passed</tspan></text>
+<text class="a k52 s" x="18" y="152"><tspan class="d">              · · ·  40 minutes later  · · ·</tspan></text>
 <text class="a k53 s" x="18" y="171"><tspan class="g">● </tspan><tspan class="f">Update src/retry.py</tspan></text>
-<text class="a k54 s" x="18" y="190"><tspan class="d">  ⎿  </tspan><tspan class="r">You've hit your 5-hour limit · resets 4pm</tspan></text>
-<text class="a k55 s" x="18" y="361"><tspan class="d">two · </tspan><tspan class="r">5h 100% (16:00)</tspan><tspan class="d"> · 7d 63% · </tspan><tspan class="r">out · 5h limit · resumes 16:00 · ! fairshare pickup moves it to one now</tspan></text>
-<text class="a k56" x="427" y="25" text-anchor="middle"><tspan class="t">4/4  ! fairshare pickup: the same session, with its context, continues on one</tspan></text>
-<text class="a k57" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="c">█</tspan></text>
-<text class="a k58" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">!</tspan><tspan class="c">█</tspan></text>
-<text class="a k59" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! </tspan><tspan class="c">█</tspan></text>
-<text class="a k60" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! f</tspan><tspan class="c">█</tspan></text>
-<text class="a k61" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fa</tspan><tspan class="c">█</tspan></text>
-<text class="a k62" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fai</tspan><tspan class="c">█</tspan></text>
-<text class="a k63" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fair</tspan><tspan class="c">█</tspan></text>
-<text class="a k64" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairs</tspan><tspan class="c">█</tspan></text>
-<text class="a k65" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairsh</tspan><tspan class="c">█</tspan></text>
-<text class="a k66" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairsha</tspan><tspan class="c">█</tspan></text>
-<text class="a k67" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshar</tspan><tspan class="c">█</tspan></text>
-<text class="a k68" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare</tspan><tspan class="c">█</tspan></text>
-<text class="a k69" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare </tspan><tspan class="c">█</tspan></text>
-<text class="a k70" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare p</tspan><tspan class="c">█</tspan></text>
-<text class="a k71" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare pi</tspan><tspan class="c">█</tspan></text>
-<text class="a k72" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare pic</tspan><tspan class="c">█</tspan></text>
-<text class="a k73" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare pick</tspan><tspan class="c">█</tspan></text>
-<text class="a k74" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare picku</tspan><tspan class="c">█</tspan></text>
-<text class="a k75" x="18" y="323"><tspan class="d">&gt; </tspan><tspan class="w">! fairshare pickup</tspan><tspan class="c">█</tspan></text>
-<text class="a k76" x="18" y="57"><tspan class="b">fairshare · picking up 7c1e04b2 (Opus 5.5 · high)…</tspan></text>
-<text class="a k77" x="18" y="152"><tspan class="g">● </tspan><tspan class="f">Update src/retry.py</tspan></text>
-<text class="a k78" x="18" y="171"><tspan class="d">  ⎿  </tspan><tspan class="r">You've hit your 5-hour limit · resets 4pm</tspan></text>
-<text class="a k79" x="18" y="209"><tspan class="d">&gt; </tspan><tspan class="w">fairshare moved this session from account two to account one because two hit its usage</tspan></text>
-<text class="a k80" x="18" y="228"><tspan class="d">  </tspan><tspan class="w">limit. Continue where you left off.</tspan></text>
-<text class="a k81" x="18" y="361"><tspan class="d">one · 5h 5% · 7d 25%</tspan></text>
-<text class="a k82" x="18" y="266"><tspan class="g">● </tspan><tspan class="f">Update src/retry.py (+18 −2)</tspan></text>
-<text class="a k83" x="18" y="285"><tspan class="g">● </tspan><tspan class="f">Bash pytest -q · 44 passed</tspan></text>
+<text class="a k54 s" x="18" y="361"><tspan class="d">two · </tspan><tspan class="y">5h 95% (16:00)</tspan><tspan class="d"> · 7d 62%</tspan></text>
+<text class="a k55 s" x="18" y="190"><tspan class="d">  ↳ fairshare tells the agent: </tspan><tspan class="b">account two is at 95% of its 5h window … Best other account: one</tspan></text>
+<text class="a k56 s" x="18" y="209"><tspan class="g">● </tspan><tspan class="w">two is at 95%: checkpointing, then moving this session to one.</tspan></text>
+<text class="a k57 s" x="18" y="228"><tspan class="g">● </tspan><tspan class="f">Bash fairshare checkpoint "upload.py retries done; retry.py next"</tspan></text>
+<text class="a k58 s" x="18" y="247"><tspan class="g">● </tspan><tspan class="f">Bash fairshare pickup</tspan></text>
+<text class="a k59" x="18" y="57"><tspan class="b">fairshare · picking up 7c1e04b2 (Opus 5.5 · high)…</tspan></text>
+<text class="a k60" x="18" y="95"><tspan class="g">● </tspan><tspan class="f">Bash pytest -q · 41 passed</tspan></text>
+<text class="a k61" x="18" y="114"><tspan class="g">● </tspan><tspan class="f">Update src/retry.py</tspan></text>
+<text class="a k62" x="18" y="133"><tspan class="g">● </tspan><tspan class="w">two is at 95%: checkpointing, then moving this session to one.</tspan></text>
+<text class="a k63" x="18" y="152"><tspan class="g">● </tspan><tspan class="f">Bash fairshare checkpoint "upload.py retries done; retry.py next"</tspan></text>
+<text class="a k64" x="18" y="171"><tspan class="g">● </tspan><tspan class="f">Bash fairshare pickup</tspan></text>
+<text class="a k65" x="18" y="209"><tspan class="d">&gt; </tspan><tspan class="w">fairshare moved this session from account two to account one because a move was asked for. Continue</tspan></text>
+<text class="a k66" x="18" y="228"><tspan class="d">  </tspan><tspan class="w">where you left off.</tspan></text>
+<text class="a k67" x="18" y="361"><tspan class="d">one · 5h 5% · 7d 25%</tspan></text>
+<text class="a k68" x="18" y="266"><tspan class="g">● </tspan><tspan class="f">Update src/retry.py (+18 −2)</tspan></text>
+<text class="a k69" x="18" y="285"><tspan class="g">● </tspan><tspan class="f">Bash pytest -q · 44 passed</tspan></text>
+<text class="a k70" x="427" y="212" text-anchor="middle"><tspan class="g3">$ </tspan><tspan class="h3">pipx install fairshare-cli</tspan></text>
 </svg>
