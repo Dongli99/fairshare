@@ -22,6 +22,8 @@ class Provider(Protocol):
     not_copied: tuple[str, ...]  # of those, what join never copies in: live state, keys
     usage_timeout: float     # seconds read_usage waits at most
     resumes_at_reset: bool   # the tool resumes a session its limit stopped once the limit resets
+    remote_control: str | None   # what setup offers to turn on in every session (a name and
+                                 # what it does, for its question); None: the tool has nothing
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.
@@ -179,6 +181,15 @@ class Provider(Protocol):
         (`<command> hook <name>`); None when it already does. Every byte outside fairshare's own
         entries stays, and no other hook is changed, moved or removed. Raises ValueError for a
         text it cannot change safely."""
+
+    def remote_controlled(self, text: str | None) -> bool | None:
+        """Whether the capture file's text turns `remote_control` on in every session: True or
+        False as it says; None when it says nothing."""
+
+    def with_remote_control(self, text: str | None) -> str | None:
+        """That file's text with `remote_control` on in every session; None when it already says
+        either way. Every other byte stays. Raises ValueError for a text it cannot change
+        safely."""
 
     def skill(self, shared: Path) -> tuple[Path, str]:
         """Where fairshare's skill (which teaches main sessions workers, watch and checkpoints)

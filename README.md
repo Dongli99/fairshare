@@ -48,6 +48,8 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 - **the first folder joined decides the shared settings, CLAUDE.md and keybindings**. Later folders'
   differences are shown, not applied. `all` joins signed-in folders first, your default
   `~/.claude` first among them; type numbers to choose the order yourself;
+- it asks once whether to turn on Remote Control for every session (Enter: yes), unless your
+  settings already say;
 - it does not touch your shell files: plain `claude` still uses `~/.claude`, outside the hub.
   Start sessions with `fairshare`.
 

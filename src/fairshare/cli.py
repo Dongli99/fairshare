@@ -2919,12 +2919,32 @@ def _setup() -> int:
     failed = [c.id for c in picked if c.id not in joined and _join(None, c.config_dir) != 0]
     for prov in providers.REGISTRY.values():         # each join did this; also with none picked
         _wire_hub(prov, hub, installed)
+        _offer_remote_control(prov, hub)
     if failed:
         _say(f"not joined: {', '.join(failed)}")
     prov = _provider()
     print(f"start sessions with `fairshare`; plain `{prov.command}` still uses {prov.default_dir}, "
           "outside the hub")
     return 1 if failed else 0
+
+
+def _offer_remote_control(prov, hub: Path) -> None:
+    """Setup's one question about the provider's remote control, asked only while the shared
+    settings say nothing about it: an answer already there (the user's, from the folder that
+    seeded them) stands. Enter turns it on for every session on every account (one shared
+    file); n leaves the file alone."""
+    path = prov.capture_file(hub_mod.shared_dir(hub))
+    try:
+        text = path.read_text(encoding="utf-8") if path.exists() else None
+    except (OSError, UnicodeDecodeError):
+        return
+    if not prov.remote_control or prov.remote_controlled(text) is not None:
+        return
+    if input(f"Turn on {prov.remote_control} for every session? [Y/n] "
+             ).strip().lower()[:1] == "n":
+        print("not turned on")
+    elif note := hub_mod.edit_shared(hub, path, prov.with_remote_control, "settings"):
+        print(f"remote control: {note}")
 
 
 def cmd_setup(_a) -> int:

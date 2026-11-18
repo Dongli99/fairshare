@@ -29,6 +29,8 @@ name = "claude"                      # fairshare's own id for this provider (acc
 tool = "Claude Code"                 # the tool as users know it, for messages
 web = "claude.ai"                    # where a subscription signs in and out in a browser
 default_plan = "claude-pro"
+# what setup offers to turn on in every session, for its question
+remote_control = "Remote Control (follow and steer sessions from claude.ai/code or the Claude app)"
 
 # The command-line tool.
 BINARY = "claude"
@@ -166,6 +168,10 @@ CAPTURE_COST, CAPTURE_COST_TOTAL = "cost", "total_cost_usd"
 # The statusLine re-runs on a timer as well as on events (seconds, minimum 1; documented). The bar
 # then re-reads the local snapshot once a minute, which costs nothing.
 STATUS_REFRESH_KEY, STATUS_REFRESH_S = "refreshInterval", 60
+# A boolean in the settings file: start Remote Control in every session ("Start Remote Control
+# bridge automatically each session", the settings schema in the binary, 2.1.327, 2026-11-17).
+# Organization policy may lock it, and some organizations turn it on by default.
+REMOTE_CONTROL_KEY = "remoteControlAtStartup"
 
 # fairshare's own hooks in the settings file: `hooks.<event>` is a list of groups, each a
 # `matcher` and a `hooks` list of commands (documented, read 2026-11-11). Keyed by fairshare's
@@ -984,6 +990,34 @@ def hooked(text: str | None) -> tuple[str, ...] | None:
                or g.get(HOOK_MATCHER_KEY) == FAIRSHARE_HOOKS[name][1]]
     runners = set(matched)
     return runners.pop() if len(matched) == len(FAIRSHARE_HOOKS) and len(runners) == 1 else None
+
+
+def remote_controlled(text: str | None) -> bool | None:
+    """Whether that settings text starts remote control in every session: True or False as it
+    says; None when it says nothing (or cannot be read)."""
+    try:
+        d = json.loads(text) if text and text.strip() else {}
+    except ValueError:
+        return None
+    v = d.get(REMOTE_CONTROL_KEY) if isinstance(d, dict) else None
+    return v if isinstance(v, bool) else None
+
+
+def with_remote_control(text: str | None) -> str | None:
+    """That settings text with remote control started in every session; None when it already
+    says either way (the user's own answer stays). Every other byte stays. Raises ValueError for
+    a text that is not a settings object."""
+    d = json.loads(text) if text and text.strip() else {}
+    if not isinstance(d, dict):
+        raise ValueError("unexpected layout")
+    if isinstance(d.get(REMOTE_CONTROL_KEY), bool):
+        return None
+    if not (text and text.strip()):
+        return json.dumps({REMOTE_CONTROL_KEY: True}, indent=2) + "\n"
+    new = _json_set(text, [REMOTE_CONTROL_KEY], True)
+    if json.loads(new) != {**d, REMOTE_CONTROL_KEY: True}:
+        raise ValueError("could not change that setting alone")
+    return new
 
 
 def wire(text: str | None, command: str) -> str | None:

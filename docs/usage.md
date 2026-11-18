@@ -38,6 +38,11 @@ want that folder's settings instead. A file that is new in the hub (fairshare's 
 setup, say) is reported in one line (`installed <what> in <path>`); diffs are kept for changes to
 a file that already exists.
 
+Last, while the shared settings say nothing about it, setup asks once whether to turn on Claude
+Code's Remote Control for every session (follow and steer them from claude.ai/code or the Claude
+app). Enter turns it on, for every account at once, since they share one settings file; `n`
+leaves the settings alone. A setting already there, from the folder that seeded them, is kept.
+
 setup always leaves a complete hub, even when it joins nothing; until an account is joined,
 `fairshare`, `run` and `status` say ``no accounts yet: `fairshare join <name>` signs one in``
 (exit 1). If the `claude` command is not on PATH, setup still writes the config and builds the

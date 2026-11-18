@@ -221,8 +221,9 @@ class UserFolders(Base):
     def setup_all(self):
         # shown as claude (the default folder), claude-old, play, work; `all` joins the signed-in
         # ones first: claude, work, then claude-old, play. Questions: the hub folder, which to
-        # join, then copying state from ~/.claude.json (claude) and ~/.claude-work (work).
-        return self.go("setup", answers=["", "all", "y", "y"])
+        # join, then copying state from ~/.claude.json (claude) and ~/.claude-work (work), then
+        # remote control for every session (Enter: on).
+        return self.go("setup", answers=["", "all", "y", "y", ""])
 
 
 class Setup(UserFolders):
@@ -284,7 +285,7 @@ class Setup(UserFolders):
         self.assert_untouched()
 
     def test_numbers_join_in_the_order_typed(self):
-        self.assertEqual(self.go("setup", answers=["", "3 4", "y"]), 0, self.err)
+        self.assertEqual(self.go("setup", answers=["", "3 4", "y", ""]), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["play", "work"])
         s = json.loads((hub.shared_dir(self.hub) / "settings.json").read_text())
         self.assertEqual(s["theme"], "light")                       # play's: joined first
@@ -294,14 +295,14 @@ class Setup(UserFolders):
         self.assert_untouched()
 
     def test_picking_some_joins_those_only(self):
-        self.assertEqual(self.go("setup", answers=["", "3"]), 0, self.err)
+        self.assertEqual(self.go("setup", answers=["", "3", ""]), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["play"])
         self.assertTrue(self.out.endswith("start sessions with `fairshare`; plain `claude` still "
                                           "uses ~/.claude, outside the hub\n"), self.out)
         self.assert_untouched()
 
     def test_joining_none_leaves_a_hub_that_says_no_accounts_yet(self):
-        self.assertEqual(self.go("setup", answers=["", ""]), 0, self.err)
+        self.assertEqual(self.go("setup", answers=["", "", ""]), 0, self.err)
         self.assertIn("start sessions with `fairshare`", self.out)
         self.assertTrue(hub.present(self.hub))
         for argv in (["status"], ["run"], []):
@@ -321,7 +322,7 @@ class Setup(UserFolders):
 
     def test_on_a_terminal_each_folder_is_asked_a_name(self):
         # play takes the name work would default to; work's default is then refused
-        answers = ["", "3 4", "x y", "work", "", "", "job", "", "y"]
+        answers = ["", "3 4", "x y", "work", "", "", "job", "", "y", ""]
         self.person("job", "zoe")
         self.assertEqual(self.go("setup", tty=True, answers=answers), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["work", "job"])
@@ -335,7 +336,7 @@ class Setup(UserFolders):
 
     def test_a_chosen_hub_folder_is_stored(self):
         elsewhere = self.tmp / "my hub"
-        self.assertEqual(self.go("setup", answers=[str(elsewhere), ""]), 0, self.err)
+        self.assertEqual(self.go("setup", answers=[str(elsewhere), "", ""]), 0, self.err)
         self.assertEqual(load_accounts(self.cfg)[2], elsewhere)
         self.assertTrue((elsewhere / "shared/settings.json").is_file())
         self.assertEqual(self.go("setup", answers=[""]), 0)          # asked no hub this time
@@ -359,6 +360,41 @@ class Setup(UserFolders):
             self.go("setup")
         self.assertIn("fix it or move it aside", str(e.exception))
         self.assertEqual(self.cfg.read_text(), "hub = \n")
+
+
+class RemoteControl(UserFolders):
+    """Stage 6: setup's one question; one shared settings file covers every account."""
+    QUESTION = f"Turn on {claude.remote_control} for every session? [Y/n] "
+
+    def shared(self):
+        return json.loads((hub.shared_dir(self.hub) / "settings.json").read_text())
+
+    def test_enter_turns_it_on_for_every_account_and_it_is_asked_once(self):
+        self.assertEqual(self.go("setup", answers=["", "3 4", "y", ""]), 0, self.err)
+        self.assertEqual(self.asked.call_args_list[-1].args[0], self.QUESTION)
+        self.assertIs(self.shared()[claude.REMOTE_CONTROL_KEY], True)
+        self.assertEqual(self.shared()["theme"], "light")                  # nothing else changed
+        for acct in ("play", "work"):                                      # one file for all
+            self.assertEqual((hub.accounts_dir(self.hub) / acct / "settings.json").read_text(),
+                             (hub.shared_dir(self.hub) / "settings.json").read_text())
+        self.assertIn("remote control: updated", self.out)
+        self.assertEqual(self.go("setup", answers=[""]), 0, self.err)
+        self.assertNotIn(self.QUESTION, [c.args[0] for c in self.asked.call_args_list])
+        self.assert_untouched()
+
+    def test_n_leaves_the_settings_alone(self):
+        self.assertEqual(self.go("setup", answers=["", "3", "n"]), 0, self.err)
+        self.assertNotIn(claude.REMOTE_CONTROL_KEY, self.shared())
+        self.assertIn("not turned on", self.out)
+
+    def test_an_answer_in_the_first_folder_joined_stands(self):
+        play = self.home / ".claude-play/settings.json"
+        play.write_text(json.dumps({"theme": "light", claude.REMOTE_CONTROL_KEY: False}))
+        self.before = self.user_bytes()
+        self.assertEqual(self.go("setup", answers=["", "3"]), 0, self.err)
+        self.assertNotIn(self.QUESTION, [c.args[0] for c in self.asked.call_args_list])
+        self.assertIs(self.shared()[claude.REMOTE_CONTROL_KEY], False)
+        self.assert_untouched()
 
 
 class NoTool(UserFolders):
@@ -883,7 +919,7 @@ class BareAndUninstall(UserFolders):
         self.assertIn("run `fairshare setup`", self.err)
         self.assertEqual(self.go(tty=True, answers=["n"]), 2)
         self.assertFalse(self.cfg.exists())
-        self.assertEqual(self.go(tty=True, answers=["", "", ""]), 0, self.err)   # yes, default hub,
+        self.assertEqual(self.go(tty=True, answers=["", "", "", ""]), 0, self.err)   # yes, default hub,
         self.assertTrue(self.cfg.exists())                                 # join none
         self.assert_untouched()
 
@@ -927,6 +963,22 @@ class BareAndUninstall(UserFolders):
 
 
 class Pure(unittest.TestCase):
+    def test_remote_control_is_read_and_set_alone(self):
+        for text, said in ((None, None), ("", None), ("{}", None), ("not json", None),
+                           ('{"remoteControlAtStartup": false}', False),
+                           ('{"remoteControlAtStartup": true}', True),
+                           ('{"remoteControlAtStartup": "yes"}', None)):
+            with self.subTest(text=text):
+                self.assertIs(claude.remote_controlled(text), said)
+        self.assertEqual(claude.with_remote_control('{\n  "theme": "dark"\n}\n'),
+                         '{\n  "theme": "dark",\n  "remoteControlAtStartup": true\n}\n')
+        self.assertEqual(json.loads(claude.with_remote_control(None)),
+                         {"remoteControlAtStartup": True})
+        for said in ("true", "false"):                                    # an answer stands
+            self.assertIsNone(claude.with_remote_control(f'{{"remoteControlAtStartup": {said}}}'))
+        with self.assertRaises(ValueError):
+            claude.with_remote_control("[1]")
+
     THEIRS = '{\n  "theme": "dark",\n  "statusLine": {"type": "command", "command": "~/l.sh \'a b\'", "padding": 0}\n}\n'
 
     def test_wire_wraps_theirs_and_keeps_every_other_byte(self):

@@ -906,6 +906,21 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       eligible. Launches now take the first eligible verdict, as pickups always did, and `status`
       marks that one with `>`.
 
+27. **Remote control: one setup question, one shared setting** (stage 6). Claude Code starts
+    Remote Control in every session when the user settings say `remoteControlAtStartup: true`
+    (the settings schema in the binary, 2.1.327). That file is shared by the hub, so one value
+    covers every account. Seen live on a hub whose seeded settings carried it: a session on one
+    of its accounts could be followed from another device (the other account not checked). `setup`, after wiring the hub, asks once
+    `Turn on <provider's remote_control> for every session? [Y/n]`, and only while the shared
+    settings say nothing either way: a value already there (from the folder that seeded them)
+    stands, whatever it is. Enter writes `true` through `hub.edit_shared` (lock, backup, atomic
+    write); `n` writes nothing. `join` does not ask. The adapter owns the key and the question's
+    words (`remote_control`, `remote_controlled`, `with_remote_control`); a provider without
+    such a feature sets `remote_control = None` and setup asks nothing. Not handled: an
+    organization's policy that locks the setting or turns it on by default (Claude Code reports
+    both; fairshare reads neither), so on such an account Enter may write a value the policy
+    then overrides.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -1072,6 +1087,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | `BROWSER` called with the sign-in link as its one argument, not word-split | `browser.ENV`, `browser.script`, `browser.env` | the sign-in prints the link to paste, as without a browser | `claude auth login`: 2.1.322, 2026-11-10; `/login` in a session: UNVERIFIED |
 | Chrome's `Local State` (`profile.info_cache.<folder>.name`), `open -na "Google Chrome" --args --profile-directory=` | `browser.CHROME_LOCAL_STATE`, `CHROME_PROFILES`, `CHROME_NAME`, `CHROME_APP` | no profiles offered; a launcher that fails leaves the paste-the-link text | not run live (tests use fake data) |
 | statusLine payload and common hook input: `session_id`, `transcript_path`, `cwd` | `SESSION_ID`, `SESSION_TRANSCRIPT`, `SESSION_CWD`, `session_of` | no session records: no bar mark, `pickup SESSION` finds nothing (the launch still works) | documented: code.claude.com/docs/en/statusline and /hooks ("Common input fields"), read 2026-11-11 |
+| settings `remoteControlAtStartup` (boolean; start Remote Control in every session) | `REMOTE_CONTROL_KEY`, `remote_controlled`, `with_remote_control` | setup's question writes a key the tool ignores: no remote control, nothing else breaks | the settings schema in the binary, 2.1.327, 2026-11-17; live: a hub session followed from another device |
 | statusLine `refreshInterval` (seconds, minimum 1, on the statusLine object) | `STATUS_REFRESH_KEY`, `STATUS_REFRESH_S`, `wire` | the bar redraws on events only | documented: /statusline, read 2026-11-11; whether a re-run carries fresh `rate_limits` is unverified (fairshare assumes the last payload) |
 | StopFailure hook: `hooks.StopFailure[{matcher: "rate_limit", hooks: [{type: "command", command}]}]`; input field `error` (`rate_limit`, `overloaded`, `authentication_failed`, ... `unknown`); output and exit code ignored | `HOOKS_KEY`, `HOOK_MATCHER_KEY`, `HOOK_LIST_KEY`, `STOP_FAILURE`, `RATE_LIMIT`, `HOOK_ERROR`, `FAIRSHARE_HOOKS`, `hook_of`, `hooked`, `hook_session` | no automatic pickup and no bar mark; `doctor` fails the hook line; `! fairshare pickup` still works | documented: /hooks, read 2026-11-11 (StopFailure input: `error`, optional `error_details`, `last_assistant_message`); hook table: 2.1.322. The wired entry passes the settings validator on 2.1.322, 2026-11-11 (`claude doctor`, throwaway folder and HOME under `env -i`, no login: no "Invalid settings"; a control with a numeric matcher was reported). Firing on a real limit: not yet checked live |
 | PostToolUse (`matcher: "*"`: every tool) and UserPromptSubmit (no matcher support) hooks; their JSON answer `{"hookSpecificOutput": {"hookEventName": <event>, "additionalContext": <text>}}` is added to the model's context | `POST_TOOL`, `ALL_TOOLS`, `PROMPT`, `HOOK_OUTPUT`, `HOOK_EVENT_NAME`, `HOOK_CONTEXT`, `CONTEXT_EVENTS`, `FAIRSHARE_HOOKS`, `hook_output` | no warnings or checkpoint requests reach sessions (watch still reports); `doctor` fails the hooks line | documented: code.claude.com/docs/en/hooks, read 2026-11-11 (no version on the page). The wired entries pass the settings validator on 2.1.322, 2026-11-11 (`claude doctor`, throwaway folder and HOME under `env -i`, no login: no "Invalid settings"; a control with a numeric PostToolUse matcher was reported). Context reaching a real session: not yet checked live |
