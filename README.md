@@ -6,20 +6,14 @@ budget is best used right now, judged by its real usage. When an account runs ou
 session continues on another one with its context. The aim is to use every account fully before
 its weekly reset. It is a heuristic, not a guarantee.
 
+![A 30-second demo with three made-up accounts: fairshare status ranks them by real usage; fairshare starts a session on the best one; when that account hits its 5-hour limit mid-task, the status bar says when it resets, and ! fairshare pickup continues the same session on another account](https://raw.githubusercontent.com/Dongli99/fairshare/main/docs/demo.svg)
+
 > Status: early (0.x). Claude Code on Pro, Max and Ultra plans is the first supported provider.
 > Runs on macOS and Linux; Windows is not supported.
 
 **Terms.** Whether spreading work across several subscriptions fits a provider's terms is for
 you to check. [docs/terms-and-limits.md](https://github.com/Dongli99/fairshare/blob/main/docs/terms-and-limits.md) says what fairshare
 deliberately never does and what is left for you to decide.
-
-```
-$ fairshare status
-> two   claude-pro   score 2.40  seven_day 40% used, resets in 25h
-  one   claude-pro   score 0.27  seven_day 70% used, resets in 111h
-
-$ fairshare       # starts a session on the account at the top of that list
-```
 
 ## Quick start
 
