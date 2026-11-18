@@ -147,8 +147,8 @@ text{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"DejaVu Sa
 <text class="a k62" x="18" y="133"><tspan class="g">● </tspan><tspan class="w">two is at 95%: checkpointing, then moving this session to one.</tspan></text>
 <text class="a k63" x="18" y="152"><tspan class="g">● </tspan><tspan class="f">Bash fairshare checkpoint "upload.py retries done; retry.py next"</tspan></text>
 <text class="a k64" x="18" y="171"><tspan class="g">● </tspan><tspan class="f">Bash fairshare pickup</tspan></text>
-<text class="a k65" x="18" y="209"><tspan class="d">&gt; </tspan><tspan class="w">fairshare moved this session from account two to account one because a move was asked for. Continue</tspan></text>
-<text class="a k66" x="18" y="228"><tspan class="d">  </tspan><tspan class="w">where you left off.</tspan></text>
+<text class="a k65" x="18" y="209"><tspan class="d">&gt; </tspan><tspan class="w">fairshare moved this session from account two to account one because two is near its usage limit.</tspan></text>
+<text class="a k66" x="18" y="228"><tspan class="d">  </tspan><tspan class="w">Continue where you left off.</tspan></text>
 <text class="a k67" x="18" y="361"><tspan class="d">one · 5h 5% · 7d 25%</tspan></text>
 <text class="a k68" x="18" y="266"><tspan class="g">● </tspan><tspan class="f">Update src/retry.py (+18 −2)</tspan></text>
 <text class="a k69" x="18" y="285"><tspan class="g">● </tspan><tspan class="f">Bash pytest -q · 44 passed</tspan></text>

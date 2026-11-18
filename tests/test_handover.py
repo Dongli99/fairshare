@@ -22,7 +22,7 @@ from fairshare.model import (EFFORT_NONE, ROLE_WORKER, Request, SessionRecord, S
                              Snapshot, Window, Worker)
 from fairshare.providers import claude
 
-from test_honest import H, NOW
+from test_honest import H, NOW, Fleet
 from test_hub import write
 import test_pickup
 from test_pickup import SID, TRANSCRIPT, Stranded
@@ -69,6 +69,7 @@ MOVED = ("fairshare moved this session from account a to account {new} because {
          "where you left off.")
 LIMIT = "a hit its usage limit"
 ASKED = "a move was asked for"
+NEAR = "a is near its usage limit"
 
 
 class Handover(Stranded):
@@ -197,7 +198,7 @@ class LauncherPickup(Handover):
 
     def test_automatic_and_manual_resume_the_same_id_with_model_and_effort(self):
         self.policy("resume_wait_minutes = 30")                     # opted in; a is out for 3h
-        for manual, why in ((False, LIMIT), (True, ASKED)):
+        for manual, why in ((False, LIMIT), (True, NEAR)):          # manual: a's 5h at 100%
             with self.subTest(manual=manual):
                 self.record(model="claude-opus-5-5", effort="high", stranded=not manual)
                 code, err = self.launches("run", "-a", "a", requests=[Request(SID, manual, 4321)])
@@ -634,12 +635,38 @@ class NoteWait(unittest.TestCase):
         self.assertEqual(self.wait(seconds=0.4), "timeout")
 
 
-class MovedPrompt(unittest.TestCase):
-    """The resumed session's first prompt names a move only when the account changed."""
+class MovedPrompt(Fleet):
+    """The resumed session's first prompt names a move only when the account changed, and why:
+    a limit, a plan window at the first warning level (a move the warning asked for), or a move
+    asked for."""
+    def setUp(self):
+        super().setUp()
+        self.add("a")
+        self.add("b")
 
     def test_another_account_is_a_move(self):
         rec = SessionRecord(SID, "a", "/w", None, NOW)
         self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
+
+    def test_a_window_at_the_warning_level_is_near_the_limit(self):
+        rec = SessionRecord(SID, "a", "/w", None, NOW)
+        for five, seven, why in (((90, 1), (10, 50), NEAR), ((10, 1), (95, 50), NEAR),
+                                 ((89, 1), (89, 50), ASKED)):
+            with self.subTest(five=five, seven=seven):
+                self.snap("a", five=five, seven=seven)
+                self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=why))
+
+    def test_a_window_reset_since_or_a_model_week_is_not_near(self):
+        rec = SessionRecord(SID, "a", "/w", None, NOW)
+        store.save("a", Snapshot(NOW, {"five_hour": Window(97, NOW - 60),
+                                       "seven_day": Window(20, NOW + 50 * H),
+                                       "seven_day:Opus": Window(99, NOW + 30 * H)}))
+        self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
+
+    def test_a_limit_comes_first(self):
+        rec = SessionRecord(SID, "a", "/w", None, NOW, stranded_at=NOW)
+        self.snap("a", five=(100, 1), seven=(10, 50))
+        self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=LIMIT))
 
     def test_the_same_account_is_a_restart(self):
         rec = SessionRecord(SID, "a", "/w", None, NOW, stranded_at=NOW)

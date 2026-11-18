@@ -541,8 +541,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       normal launch (trust offer, start check, child) in the session's folder on the top
       eligible account that has the session's model (decision 23), with `--resume <id>`, the
       model and effort, and the moved prompt (`fairshare moved this session from account A to
-      account B because <A hit its usage limit | a move was asked for>. Continue where you left
-      off.`) and `FAIRSHARE_CONTINUES=<its pid>:<id>`; building those arguments clears the
+      account B because <A hit its usage limit | A is near its usage limit | a move was asked
+      for>. Continue where you left off.`; "near" when one of A's plan windows, not yet reset,
+      is at the first warning level, 90%: the move the warning asked for) and
+      `FAIRSHARE_CONTINUES=<its pid>:<id>`; building those arguments clears the
       record's stranded mark and wait and leaves its account: the first capture under the same
       id writes B, and a new id (another account, decision 23) is linked to it. None eligible
       is decision 11's flow, carrying them (reached by a manual request only: an automatic one

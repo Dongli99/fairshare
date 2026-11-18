@@ -1171,10 +1171,23 @@ RESTARTED_PROMPT = ("fairshare restarted this session on account {new} because {
                     "the best account. Continue where you left off.")
 
 
+def _near_limit(acct_id: str, now: float) -> bool:
+    """Whether the account's snapshot has a plan window, not yet reset, at the first of
+    WARN_LEVELS or above: the level at which its sessions were told to move."""
+    acct = next((a for a in _load()[0] if a.id == acct_id), None)
+    snap = store.load(acct_id)
+    if acct is None or acct.plan is None or snap is None:
+        return False
+    return any(w.resets_at > now and w.used_pct >= WARN_LEVELS[0]
+               for k in (acct.plan.short_name, acct.plan.long_name)
+               if k and (w := snap.windows.get(k)))
+
+
 def _moved_prompt(rec: SessionRecord, new: str) -> str:
     """The first prompt of a session resumed on another account, or on the same one when that
     is still the best. Provider-neutral."""
     why = (f"{rec.account} hit its usage limit" if rec.stranded_at is not None
+           else f"{rec.account} is near its usage limit" if _near_limit(rec.account, _now())
            else "a move was asked for")
     text = RESTARTED_PROMPT if new == rec.account else MOVED_PROMPT
     return text.format(old=rec.account, new=new, why=why)
