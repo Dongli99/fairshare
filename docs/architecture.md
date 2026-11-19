@@ -569,9 +569,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       so; the link comes through `FAIRSHARE_CONTINUES` with `:copy`); inside a session or with
       `--bg`, in the background: `claude --bg --name
       <name> --resume <id> [--fork-session] --model M --effort E <moved prompt>` (a worker keeps
-      its own name, any other session is `pickup-<first 8>`; a handoff's fresh session takes
-      the name the handoff gave it, below) in the recorded folder, on the top
-      eligible account that has the model and trusts that folder or can get its trust by copy
+      its own name; any other session its listed name with the next handoff number, since
+      the old one may still hold it and Claude Code gives no two running sessions one name (a
+      background start is joined by its name), else `pickup-<first 8>` when it is not listed;
+      a handoff's fresh session takes the name the handoff gave it, below; the launcher's
+      pickup reads the name while its child runs and resumes under it after the stop,
+      2026-11-19) in the recorded folder, on the top eligible account that has the model and trusts that folder or can get its trust by copy
       (decision 21; nothing can ask), with the account's clean environment and no BROWSER (a
       background session would not receive it, and uses the system browser), its output passed
       through (it names the attach command). `--fork-session` only when the session is not

@@ -243,6 +243,13 @@ moved into another (a worktree, say). It is named after the old session, as Clau
 `fairshare-6a-h3`; when that name cannot be read, after the folder. A worker's fresh session
 keeps the worker's name. A switch takes nothing over.
 
+A pickup keeps the session's name: the launcher reads it while the session still runs and gives
+it to the resumed one once the old one has stopped. Claude Code gives no two running sessions one
+name, so a pickup that starts while the old session still runs (in the background, or a copy of
+a session that was not stopped by its limit) takes the next number instead, `fairshare-6a-h2`; a
+background pickup of a session Claude Code no longer lists is named `pickup-<first 8 of its id>`.
+A worker keeps its own name.
+
 **Handoff with no note** (`! fairshare handoff`, you, in the session) has the launcher stop the
 session, resume it headless for one turn that writes the note (no tools), then start the fresh
 session in the same terminal. Meanwhile one line shows what it is doing, with a spinner and a

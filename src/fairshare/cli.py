@@ -1043,7 +1043,7 @@ def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None, Request] 
             return None
         rec = store.session(got.session)
         if rec is None or got.manual:
-            return (rec, None, got) if rec else None
+            return (rec, None, _kept_name(got, rec)) if rec else None
         if rec.stranded_at is None:
             return None
         s = _survey()
@@ -1057,7 +1057,7 @@ def _pickup_request(child: int) -> tuple[SessionRecord, Survey | None, Request] 
             if before is None or abs(before - until) > store.SAME_WINDOW_S:
                 _say(_wait_text(s, rec.account, lim))
             return None
-        return rec, s, replace(got, kind=STOP) if before is not None else got
+        return rec, s, replace(got, kind=STOP) if before is not None else _kept_name(got, rec)
     except (Exception, SystemExit):
         return None
 
@@ -1222,18 +1222,20 @@ def _moved_prompt(rec: SessionRecord, new: str) -> str:
     return text.format(old=rec.account, new=new, why=why)
 
 
-def _resumed(rec: SessionRecord, copy: bool = False):
+def _resumed(rec: SessionRecord, copy: bool = False, name: str | None = None):
     """The arguments that resume `rec` on the chosen account, with the moved prompt (`_start`
-    passes `continues` with them). Building them, just before the start, clears its stranded
-    mark and wait; the account stays: the first capture writes it under the same id, and a new
-    id (another account) is linked to this one (`_continuation`). `copy`: a copy under a new id
-    instead (the provider's fork argument), and the record is left as it is."""
+    passes `continues` with them), named `name` when given. Building them, just before the
+    start, clears its stranded mark and wait; the account stays: the first capture writes it
+    under the same id, and a new id (another account) is linked to this one (`_continuation`).
+    `copy`: a copy under a new id instead (the provider's fork argument), and the record is left
+    as it is."""
     def build(acct: Account) -> list[str]:
         prompt = _moved_prompt(rec, acct.id)
         if not copy:
             store.update_session(rec.id, lambda old: old and replace(
                 old, stranded_at=None, waiting_until=None))
-        return [*providers.get(acct.provider).resume_args(rec.id, copy), prompt]
+        prov = providers.get(acct.provider)
+        return [*(prov.name_args(name) if name else ()), *prov.resume_args(rec.id, copy), prompt]
     return build
 
 
@@ -1355,7 +1357,7 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
             _say(f"not continued; to resume it later: {_resume_line(rec)}")
             return 0
     _to_folder(rec)
-    return _start(rec, req, _resumed(rec), moving=None if s or req.kind != PICKUP
+    return _start(rec, req, _resumed(rec, name=req.name), moving=None if s or req.kind != PICKUP
                   else rec.account, continues=rec.id)
 
 
@@ -1632,7 +1634,7 @@ def cmd_pickup(a) -> int:
         return 1
     os.chdir(rec.cwd)
     copy = _may_run(rec)
-    return _start(rec, req, _resumed(rec, copy), moving=rec.account,
+    return _start(rec, req, _resumed(rec, copy, _running_name(rec)), moving=rec.account,
                   continues=rec.id + (COPY if copy else ""))
 
 
@@ -1676,7 +1678,8 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
          else f"picking up {rec.id} on {acct.id}" + (f" ({v.reason})" if v else "")
          + ", in the background")
     prov, w = providers.get(acct.provider), _worker_of(rec.id)
-    name = (req.name if fresh else None) or (w.name if w else f"pickup-{rec.id[:8]}")
+    name = (req.name if fresh else None) or (w.name if w else None) or _running_name(rec) \
+        or f"pickup-{rec.id[:8]}"
     extra = prov.model_args(model, effort)
     before = _live_named(acct, name)
     if fresh:
@@ -1770,6 +1773,17 @@ def _handed_name(name: str) -> str:
     return f"{m[1]}-h{int(m[2]) + 1}" if m else f"{name}-h2"
 
 
+def _live_name(rec: SessionRecord) -> str | None:
+    """`rec`'s name as its own account lists it now; None when it is not listed (it no longer
+    runs), has no name, or the list cannot be had. Never raises: a pickup never fails on it."""
+    try:
+        acct = next((x for x in _load()[0] if x.id == rec.account), None)
+        live = acct and providers.get(acct.provider).list_sessions(acct)
+    except (Exception, SystemExit):
+        return None
+    return next((x.name for x in live or () if x.id == rec.id), None)
+
+
 def _handoff_name(rec: SessionRecord) -> str:
     """What a handoff names the fresh session that continues `rec`: a worker's name as it is
     (workers are joined by name); else the next handoff number of `rec`'s name as its own
@@ -1777,10 +1791,20 @@ def _handoff_name(rec: SessionRecord) -> str:
     Read here, while `rec` still runs: the launcher acts after it stopped."""
     if w := _worker_of(rec.id):
         return w.name
-    acct = next((x for x in _load()[0] if x.id == rec.account), None)
-    live = acct and providers.get(acct.provider).list_sessions(acct)
-    name = next((x.name for x in live or () if x.id == rec.id), None)
-    return _handed_name(name or (rec.cwd and Path(rec.cwd).name) or "session")
+    return _handed_name(_live_name(rec) or (rec.cwd and Path(rec.cwd).name) or "session")
+
+
+def _kept_name(req: Request, rec: SessionRecord) -> Request:
+    """In the launcher, while its child still runs: a pickup request carrying the session's
+    listed name, which the resume keeps (the child is stopped first, so the name is free)."""
+    return replace(req, name=_live_name(rec)) if req.kind == PICKUP and not req.name else req
+
+
+def _running_name(rec: SessionRecord) -> str | None:
+    """The name for a pickup that starts while `rec` may still run: its listed name with the
+    next handoff number (the provider gives no two running sessions one name, and a background
+    start is joined by its name); None when it is not listed."""
+    return _handed_name(name) if (name := _live_name(rec)) else None
 
 
 def cmd_handoff(a) -> int:

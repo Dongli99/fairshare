@@ -496,6 +496,48 @@ class Handoff(Handover):
         self.assertEqual(args[4:6], ["--name", "work-h2"])
         self.assertIn("Read its checkpoint note", args[6])
 
+    def test_the_launchers_pickup_keeps_the_listed_name(self):
+        self.record(stranded=None)
+        (self.log / "live").write_text(f"{SID} fairshare-6a\n")
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321, "pickup")])
+        self.assertEqual(code, 0, err)
+        args, _ = self.started_args()
+        self.assertEqual(args[:4], ["--name", "fairshare-6a", "--resume", SID])
+
+    def test_the_launchers_pickup_of_an_unlisted_session_passes_no_name(self):
+        self.record(stranded=None)
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321, "pickup")])
+        self.assertEqual(code, 0, err)
+        args, _ = self.started_args()
+        self.assertEqual(args[:2], ["--resume", SID])
+
+    def test_a_failed_listing_never_loses_the_launchers_pickup(self):
+        self.record(stranded=None)
+        with mock.patch.object(claude, "list_sessions", side_effect=OSError("boom")):
+            code, err = self.launches("run", "-a", "a",
+                                      requests=[Request(SID, True, 4321, "pickup")])
+        self.assertEqual(code, 0, err)
+        args, _ = self.started_args()
+        self.assertEqual(args[:2], ["--resume", SID])
+
+    def test_a_background_copy_of_a_running_session_takes_the_next_number(self):
+        self.record(stranded=None)
+        (self.log / "live").write_text(f"{SID} fairshare-6a\n")    # still running: its name is held
+        code, out, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "fairshare-6a-h2", "--resume",
+                                                 SID, "--fork-session"])
+        self.assertIn("continued as session s-fairshare-6a-h2 on b", out)
+
+    def test_a_foreground_copy_of_a_running_session_takes_the_next_number(self):
+        self.record(stranded=None)
+        (self.log / "live").write_text(f"{SID} fairshare-6a\n")
+        code, _, err = self.go("pickup", SID[:8], tty=True)
+        self.assertEqual(code, 0, err)
+        cmd = self.launched.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--name") + 1], "fairshare-6a-h2")
+        self.assertIn("--fork-session", cmd)
+
     def test_the_launcher_has_the_note_written_on_the_sessions_own_account(self):
         self.record(model="claude-opus-5-5", effort="high", stranded=None)
         self.snap("a", five=(10, 3), seven=(50, 90))                 # a can work: its cache
