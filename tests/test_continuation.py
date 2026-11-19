@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from fairshare import cli, store
@@ -164,18 +165,71 @@ class Launcher(Continuation):
         self.capture(sid=SID, value=env["FAIRSHARE_CONTINUES"], ancestors=(os.getpid(),))
         self.assertEqual(store.session(SID).account, "b")                  # the capture writes it
 
-    def test_not_for_a_switch_or_a_handoff_and_an_inherited_value_is_dropped(self):
-        for kind in ("switch", "handoff"):
-            with self.subTest(kind=kind), mock.patch.dict(os.environ, {
-                    "FAIRSHARE_CONTINUES": f"{LAUNCHER}:{SID}"}):
-                self.launches("run", "-a", "a", requests=[Request(SID, True, 4321, kind)])
-                self.assertEqual(len(self.calls), 2)
-                self.assertTrue(all("FAIRSHARE_CONTINUES" not in env for _, env, _ in self.calls))
+    def test_not_for_a_switch_and_an_inherited_value_is_dropped(self):
+        with mock.patch.dict(os.environ, {"FAIRSHARE_CONTINUES": f"{LAUNCHER}:{SID}"}):
+            self.launches("run", "-a", "a", requests=[Request(SID, True, 4321, "switch")])
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(all("FAIRSHARE_CONTINUES" not in env for _, env, _ in self.calls))
+        self.capture(value=None)                       # the switch's fresh session
+        self.assertIsNone(store.session(NEW).continues)
+        self.assertEqual((store.session(SID).moved_to, store.session("s-w").parent), (None, SID))
 
     def test_a_foreground_pickup_from_a_terminal(self):
         self.go("pickup", SID[:8], tty=True)
         env = self.launched.call_args.args[1]
         self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}")
+
+
+class Handoff(Continuation):
+    """A handoff's fresh session continues the old one: linked in its place, as a resume under a
+    new id is, and started in the folder the old session started in, though its shell moved."""
+
+    def moved_shell(self):
+        (wt := self.work / "wt").mkdir()
+        store.note_session(SessionSeen(SID, str(wt)), "a", NOW - 40)     # a hook after `cd wt`
+        return wt
+
+    def handed_off(self):
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321, "handoff")])
+        self.assertEqual(code, 0, err)
+        env = self.calls[1][1]
+        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}")
+        self.capture(value=env["FAIRSHARE_CONTINUES"], ancestors=(os.getpid(),))
+
+    def test_a_handoff_links_and_re_parents_workers(self):
+        self.handed_off()
+        new, old = store.session(NEW), store.session(SID)
+        self.assertEqual((new.account, new.continues, new.role, new.parent), ("b", SID,
+                                                                             ROLE_WORKER, "p-1"))
+        self.assertEqual((old.account, old.moved_to), ("a", NEW))
+        self.assertEqual([w.name for w in store.workers(NEW)], ["w-1"])
+        self.assertEqual(store.session("s-w").parent, NEW)
+
+    def test_watch_in_the_new_session_sees_the_old_ones_worker(self):
+        self.handed_off()
+        store.append_checkpoint("s-w", "## w\nhalf\n")
+        code, out, err = self.inside("watch", "--timeout", "1", sid=NEW)
+        self.assertEqual(code, 0, err)
+        self.assertIn("worker w-1 wrote a checkpoint", out)
+
+    def test_a_moved_shell_is_handed_off_and_picked_up_in_its_start_folder(self):
+        self.moved_shell()
+        self.assertEqual(store.session(SID).cwd, str(self.work))
+        for kind in ("handoff", "pickup"):
+            with self.subTest(kind=kind):
+                self.launches("run", "-a", "a", requests=[Request(SID, True, 4321, kind)])
+                self.assertEqual(Path(self.calls[1][2]).resolve(), self.work.resolve())
+
+    def test_without_a_launcher_the_background_session_is_linked_in_its_folder(self):
+        self.moved_shell()
+        code, out, err = self.inside("handoff", "Done A.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(Path((self.log / "cwd-b").read_text().strip()), self.work.resolve())
+        fresh = "s-pickup-0a1b2c3d"
+        self.assertEqual((store.session(fresh).continues, store.session(SID).moved_to),
+                         (SID, fresh))
+        self.assertEqual(store.session("s-w").parent, fresh)
+        self.assertEqual([w.name for w in store.workers(fresh)], ["w-1"])
 
 
 class Readers(Continuation):

@@ -300,9 +300,11 @@ def _drop_old(dest: Path, now: float) -> None:
 
 def note_session(seen: SessionSeen, account_id: str, now: float,
                  stranded: bool | None = None) -> SessionRecord | None:
-    """Record that `seen` runs on `account_id`, keeping its folder and transcript (a field the
-    provider left out keeps its old value) and every other field. `stranded` True marks it
-    stopped by its account's limit now, False clears that, None leaves it. Written only when it
+    """Record that `seen` runs on `account_id`, keeping its transcript (a field the provider
+    left out keeps its old value) and every other field. Its folder is the first one seen: the
+    one it started in, where the provider finds it to resume (the folder a hook names moves with
+    the session's shell). `stranded` True marks it stopped by its account's limit now, False
+    clears that, None leaves it. Written only when it
     is new or changed, or last seen SESSION_WRITE_S ago or more, so a redraw costs no write;
     a change of `stranded` either way also ends a wait for the provider's own resume;
     each write drops the records unseen for SESSION_KEEP_S. Under a lock: a hook and a usage
@@ -316,7 +318,7 @@ def note_session(seen: SessionSeen, account_id: str, now: float,
     with locked(dest / ".lock"):
         old = _read_session(dest / f"{seen.id}.json")
         new = replace(old or SessionRecord(seen.id, account_id, None, None, now),
-                      account=account_id, cwd=seen.cwd or (old and old.cwd),
+                      account=account_id, cwd=(old and old.cwd) or seen.cwd,
                       transcript=seen.transcript or (old and old.transcript), seen=now,
                       stranded_at=now if stranded else None if stranded is False
                       else old and old.stranded_at)
@@ -396,8 +398,9 @@ def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
     """`seen` continues the session `old_id` under a new id on `account_id` (a resume on another
     account, or a copy). Its record takes the old one's role, parent, model, display name and
     effort where it lacks them (a model `seen` names wins, as in `note_session`), the limits
-    that stopped it, the account, `seen`'s folder and transcript, `continues=old_id`, and keeps
-    a cost series of its own; the old checkpoint note is copied when the new id has none. When
+    that stopped it, the account, its first folder (as `note_session` keeps it) and `seen`'s
+    transcript, `continues=old_id`, and keeps a cost series of its own; the old checkpoint note
+    is copied when the new id has none. When
     the old session has stopped (not `copy`), the new one takes its place: the old record keeps its account and costs, gets
     `moved_to`, and is no longer stranded or waiting, and workers (their records and their
     sessions' records) whose parent is the old id now name the new one. A `copy` of a session
@@ -418,7 +421,7 @@ def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
         model = (seen.model, seen.model_name, seen.effort) if seen.model else \
             (new.model, new.model_name, new.effort) if new.model else \
             (old.model, old.model_name, seen.effort or old.effort)
-        new = replace(new, account=account_id, cwd=seen.cwd or new.cwd or old.cwd,
+        new = replace(new, account=account_id, cwd=new.cwd or seen.cwd or old.cwd,
                       transcript=seen.transcript or new.transcript, seen=now,
                       role=new.role or old.role, parent=new.parent or old.parent,
                       model=model[0], model_name=model[1], effort=model[2], continues=old_id,

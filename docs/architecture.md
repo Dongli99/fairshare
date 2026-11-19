@@ -514,7 +514,11 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       (Claude Code resumes it then)` and the main session decides.
     - **The session map.** capture keeps one small record per session in the state folder
       (`sessions/<id>.json`, atomic, under a lock): account, folder, transcript path, last seen,
-      and when its limit stopped it. Written only when new or changed or last seen a minute ago;
+      and when its limit stopped it. The folder is the first one seen, which is the one the
+      session started in: the `cwd` of later inputs follows its shell (a `cd` into a worktree), and
+      the provider finds a session to resume by its start folder; a pickup and a handoff start
+      there (fixed after a handoff started a fresh session inside a worktree the old one had
+      `cd`'d into). Written only when new or changed or last seen a minute ago;
       records unseen for 7 days are dropped at each write. The adapter maps the payload's
       `session_id`, `cwd`, `transcript_path` (`Provider.session_of`); nothing else names them.
     - **The signal.** `fairshare hook stop-failure` (wired under StopFailure, matcher
@@ -760,7 +764,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       `handing off <id8> to a fresh session on <acct>, in the background`, then one line to the
       calling agent, `this session keeps running: stop here and leave the work to the new
       session`, since nothing stops it. The background start joins the new session by name as
-      a pickup does (decision 19).
+      a pickup does (decision 19), and links it in the old one's place (`_copied`, not as a
+      copy: the old one was told to stop). Either way the fresh session is linked (below,
+      "The link"): a handoff left unlinked once left the new main session blind to the old
+      one's worker, so `watch` timed out while it finished.
       Without NOTE (the user's `! fairshare handoff`: a `!` command starts no model turn and
       holds the session while it runs, so the session cannot write the note during it): the
       command sends the launcher a `handoff-note` request and returns; the launcher stops the
@@ -810,14 +817,15 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       regenerated on the new account; a resume on the same account loses nothing. This weighs
       for waiting (decisions 19 and 25): waiting for the reset keeps both.
       - **The link.** The launcher passes `FAIRSHARE_CONTINUES=<its pid>:<old id>` to a resume
-        only (not a switch, not a handoff's fresh session; an inherited value is dropped).
+        and to a handoff's fresh session, which continues the old one under a new id (not a
+        switch, which carries nothing; an inherited value is dropped otherwise).
         Capture, the prompt and post-tool hooks and the stop-failure hook call `_continuation`
         before recording the session: when the pid is one of its ancestors (as for
         `FAIRSHARE_LAUNCHER`), the old id is not its own and its record is missing or not yet
         linked, `store.link_session` runs, under the sessions' lock: the new record takes the
         old one's role, parent, model, display name and effort where it lacks them (a model its
-        own payload names wins), the new account, its folder and transcript, a cost series of
-        its own and `continues=<old id>`; the old record keeps its account and costs, gets
+        own payload names wins), the new account, its first folder and transcript, a cost
+        series of its own and `continues=<old id>`; the old record keeps its account and costs, gets
         `moved_to=<new id>` and is no longer stranded or waiting; workers whose parent is the
         old id (worker records and their sessions' records) name the new one; the old
         checkpoint note is copied (never moved) when the new id has none. An old record already

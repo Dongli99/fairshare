@@ -618,16 +618,18 @@ def _launcher() -> int | None:
     return pid if pid > 1 and pid in _ancestors() else None
 
 
-CONTINUES_ENV = "FAIRSHARE_CONTINUES"   # set by the launcher for a resume: "<its pid>:<old id>"
+CONTINUES_ENV = "FAIRSHARE_CONTINUES"   # set by the launcher for a resume or a handoff's fresh
+                                        # session: "<its pid>:<old id>"
 COPY = ":copy"     # after the old id in CONTINUES_ENV: the resume is a copy (`_may_run`)
 
 
 def _continuation(seen: SessionSeen, acct: Account, now: float) -> None:
     """Called before a session is recorded from inside it: when the launcher resumed a session
-    and it goes on under a new id (another account: decision 23, or a copy: `_may_run`), link the
-    two (`store.link_session`; a copy as a copy). Only when CONTINUES_ENV names one of this
-    process's ancestors (a value leaked into a nested session never links a stranger), its old
-    id is not `seen`'s, and `seen` has no record or one not yet linked. Never raises."""
+    and it goes on under a new id (another account: decision 23, or a copy: `_may_run`), or
+    started a handoff's fresh session in its place, link the two (`store.link_session`; a copy
+    as a copy). Only when CONTINUES_ENV names one of this process's ancestors (a value leaked
+    into a nested session never links a stranger), its old id is not `seen`'s, and `seen` has
+    no record or one not yet linked. Never raises."""
     try:
         pid, _, old = os.environ.get(CONTINUES_ENV, "").partition(":")
         old, copy = old.removesuffix(COPY), old.endswith(COPY)
@@ -946,11 +948,11 @@ def _launch(v: Verdict, args, explicit: bool = False, continues: str | None = No
     folder, then start the provider as a child, in its clean environment (with the account's
     browser and LAUNCHER_ENV naming this process), and return its exit code. `args`: a list, or
     a function of the account that builds them now. `continues`: the id of the session this
-    start resumes, passed as CONTINUES_ENV (with this process's id) so a new id links to it;
-    any inherited value is dropped otherwise; a resume on an account whose limit stopped that
-    session is refused until the limit lifts (`_held`), whatever chose it. A request (SIGUSR1,
-    `_pickup_request`) stops the child and acts on its session (`_continue`), with this process
-    still the parent, so a later limit picks up again."""
+    start resumes or hands off from, passed as CONTINUES_ENV (with this process's id) so a new
+    id links to it; any inherited value is dropped otherwise; a resume on an account whose
+    limit stopped that session is refused until the limit lifts (`_held`), whatever chose it.
+    A request (SIGUSR1, `_pickup_request`) stops the child and acts on its session
+    (`_continue`), with this process still the parent, so a later limit picks up again."""
     prov, acct = providers.get(v.account.provider), v.account
     hub = acct.config_dir.parent.parent
     rec = continues and store.session(continues.removesuffix(COPY))
@@ -1321,7 +1323,8 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
     """After the launcher stopped its child, in the session's folder, by the request's kind:
     - a switch: one line to resume the old session, then a fresh session (the launch pause
       applies);
-    - a handoff: a fresh session with the pickup prompt, which reads the checkpoint first; for
+    - a handoff: a fresh session with the pickup prompt, which reads the checkpoint first and
+      is linked to this one in its place (`continues`, as a resume under a new id is); for
       HANDOFF_NOTE the launcher has the stopped session write that note first, and anything
       wrong there is a pickup instead (one line why);
     - a pickup: for an automatic one on a terminal, a countdown (cancel says how to resume
@@ -1340,7 +1343,7 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
         return _start(rec, req, [], pause=True)
     if req.kind == HANDOFF or (req.kind == HANDOFF_NOTE and _write_note(rec, req)):
         _to_folder(rec)
-        return _start(rec, req, [_pickup_prompt(rec, _now())])
+        return _start(rec, req, [_pickup_prompt(rec, _now())], continues=rec.id)
     if s is not None and _interactive():
         best = next((v.account.id for v in s.verdicts if v.eligible), None)
         where = f"on {best}" if best else "(no account can take work now)"
@@ -1636,7 +1639,8 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
     copy (nothing can ask); the tool's own output passes through. It resumes the session under
     its own id, or, when it was not stopped by its limit (it may still run, and fairshare stops
     no session it did not start), a copy under a new id with the record copied. `fresh`: a new
-    session with the pickup prompt instead (a handoff)."""
+    session with the pickup prompt instead (a handoff), joined by name and linked in this one's
+    place, as it was told to stop."""
     if not (rec.cwd and os.path.isdir(rec.cwd)):
         _say(f"the session's folder {rec.cwd} is gone; not picked up")
         return 1
@@ -1671,11 +1675,15 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
     prov, w = providers.get(acct.provider), _worker_of(rec.id)
     name = w.name if w else f"pickup-{rec.id[:8]}"
     extra = prov.model_args(model, effort)
-    if fresh:
-        return _start_background(acct, name, _pickup_prompt(rec, s.now, handed=True), rec.cwd,
-                                 extra)
-    fork = _may_run(rec)
     before = _live_named(acct, name)
+    if fresh:
+        if code := _start_background(acct, name, _pickup_prompt(rec, s.now, handed=True),
+                                     rec.cwd, extra):
+            return code
+        if new := _named_session(acct, name, before):
+            _copied(rec, new, acct, model, effort, w, False)
+        return 0
+    fork = _may_run(rec)
     if code := _start_background(acct, name, _moved_prompt(rec, acct.id), rec.cwd,
                                  [*prov.resume_args(rec.id, fork), *extra]):
         return code
@@ -1721,10 +1729,10 @@ def _named_session(acct: Account, name: str, before: set[str] | None) -> str | N
 
 def _copied(rec: SessionRecord, new: str, acct: Account, model: str | None,
             effort: str | None, w: Worker | None, fork: bool) -> None:
-    """A copy of `rec` runs as `new` on `acct`: link the two (`store.link_session`: role,
-    parent, model and effort as carried, the checkpoint note copied; workers re-parented only
-    when `rec` stopped, not for a `fork` of a session that may still run), and a worker's name
-    now joins it."""
+    """A copy of `rec` (or a handoff's fresh session) runs as `new` on `acct`: link the two
+    (`store.link_session`: role, parent, model and effort as carried, the checkpoint note
+    copied; workers re-parented only when `rec` stopped, not for a `fork` of a session that may
+    still run), and a worker's name now joins it."""
     store.link_session(rec.id, SessionSeen(
         new, rec.cwd, None, model, rec.model_name if model and model == rec.model else None,
         effort), acct.id, _now(), copy=fork)

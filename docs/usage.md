@@ -235,6 +235,11 @@ handed over at that time and may still be running, and the command ends with `th
 running: stop here and leave the work to the new session`. fairshare never stops a session it
 did not start, so the old agent must stop itself.
 
+Either way the fresh session takes the old one's place: `status`, `watch`, `checkpoint --request`
+and `pickup <old id>` find the fresh one, and workers the old session started are now its
+workers. It starts in the folder the old session started in, even when the old one's shell had
+moved into another (a worktree, say). A switch takes nothing over.
+
 **Handoff with no note** (`! fairshare handoff`, you, in the session) has the launcher stop the
 session, resume it headless for one turn that writes the note (no tools), then start the fresh
 session in the same terminal. Meanwhile one line shows what it is doing, with a spinner and a

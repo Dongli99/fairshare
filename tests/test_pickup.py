@@ -69,9 +69,16 @@ class Sessions(Base):
     def test_a_change_is_written_at_once(self):
         self.capture()
         self.clock[0] += 5
-        self.capture(cwd="/work/other")
+        self.capture(transcript="/t/y.jsonl")
         r = store.session(SID)
-        self.assertEqual((r.cwd, r.seen), ("/work/other", T0 + 5))
+        self.assertEqual((r.transcript, r.seen), ("/t/y.jsonl", T0 + 5))
+
+    def test_the_folder_is_the_one_it_started_in(self):
+        self.capture()
+        self.clock[0] += 61
+        self.capture(cwd="/work/demo/worktree")          # its shell moved; the session did not
+        r = store.session(SID)
+        self.assertEqual((r.cwd, r.seen), ("/work/demo", T0 + 61))
 
     def test_a_field_left_out_keeps_its_value(self):
         self.capture()
