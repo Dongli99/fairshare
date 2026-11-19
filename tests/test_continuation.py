@@ -225,7 +225,7 @@ class Handoff(Continuation):
         code, out, err = self.inside("handoff", "Done A.")
         self.assertEqual(code, 0, err)
         self.assertEqual(Path((self.log / "cwd-b").read_text().strip()), self.work.resolve())
-        fresh = "s-pickup-0a1b2c3d"
+        fresh = "s-work-h2"
         self.assertEqual((store.session(fresh).continues, store.session(SID).moved_to),
                          (SID, fresh))
         self.assertEqual(store.session("s-w").parent, fresh)

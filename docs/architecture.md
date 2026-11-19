@@ -569,7 +569,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       so; the link comes through `FAIRSHARE_CONTINUES` with `:copy`); inside a session or with
       `--bg`, in the background: `claude --bg --name
       <name> --resume <id> [--fork-session] --model M --effort E <moved prompt>` (a worker keeps
-      its own name, any other session is `pickup-<first 8>`) in the recorded folder, on the top
+      its own name, any other session is `pickup-<first 8>`; a handoff's fresh session takes
+      the name the handoff gave it, below) in the recorded folder, on the top
       eligible account that has the model and trusts that folder or can get its trust by copy
       (decision 21; nothing can ask), with the account's clean environment and no BROWSER (a
       background session would not receive it, and uses the system browser), its output passed
@@ -651,17 +652,19 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       both. Big or long work goes to workers: background sessions that can be stopped, moved and
       relaunched. A session record's optional `role` (`worker`; missing means main) and
       `parent` say which is which; fairshare's own fields are written only when set.
-    - **`fairshare worker --model M --effort E [--account ID] [--name NAME] PROMPT`**, inside
+    - **`fairshare worker --name NAME --model M --effort E [--account ID] PROMPT`**, inside
       a session (the parent is the provider's session id; outside one, exit 2). The main session
       chooses the model and effort (both required; `--effort none` for a model without levels,
       which passes no effort argument; kept on the worker record). The account is `--account`
       or the top eligible one by the usual survey (probes included) whose week for that model
       is not spent and that trusts the folder or can get it by copy (decision 21); then `claude
       --bg --name <name> --model M --effort E <prompt>` in the folder with the
-      account's clean environment (no BROWSER: `--bg` passes no environment). The default name
-      is `w-<first 8 of the parent>-<n>`, the lowest free; a name is claimed in the state
-      folder (`workers/<name>.json`: parent, account, folder, start time, later the session id)
-      before the start, so it is unique, and an explicit `--name` already recorded is refused.
+      account's clean environment (no BROWSER: `--bg` passes no environment). The name is
+      required (2026-11-19: the earlier default, `w-<first 8 of the parent>-<n>`, said nothing
+      in watch lines; the skill has the agent name the task, with a project prefix); it is
+      claimed in the state folder (`workers/<name>.json`: parent, account, folder, start time,
+      later the session id) before the start, so it is unique, and a name already recorded is
+      refused.
       The prompt gets one line first: `You are a worker for session <parent id>. When fairshare
       asks for a checkpoint, run fairshare checkpoint "<what is done, what is next>".`
     - **The join.** `--bg` does not pass the caller's environment to the session (it comes
@@ -767,7 +770,15 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       a pickup does (decision 19), and links it in the old one's place (`_copied`, not as a
       copy: the old one was told to stop). Either way the fresh session is linked (below,
       "The link"): a handoff left unlinked once left the new main session blind to the old
-      one's worker, so `watch` timed out while it finished.
+      one's worker, so `watch` timed out while it finished. The fresh session is named
+      (2026-11-19): the old one's name as its own account lists it (`list_sessions`), else its
+      folder's name, else `session`, with the next handoff number (`x` -> `x-h2`, `x-h2` ->
+      `x-h3`; only a trailing `-h<digits>` counts, and the tool's automatic names end in two
+      hex characters); a worker's keeps the worker's name (workers are joined by name). It is
+      read in `cmd_handoff`, while the old session still runs (the launcher acts after it
+      stopped it, when it is no longer listed), and travels on the request (`name`); the
+      launcher passes it with the provider's `name_args`, the background start as its name. A
+      failed listing falls back; it never blocks a handoff.
       Without NOTE (the user's `! fairshare handoff`: a `!` command starts no model turn and
       holds the session while it runs, so the session cannot write the note during it): the
       command sends the launcher a `handoff-note` request and returns; the launcher stops the
@@ -1142,7 +1153,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Stop hook (no matcher): fires when the main agent ends a turn (a subagent's end fires SubagentStop, with `agent_id`; an API error fires StopFailure instead); input adds `stop_hook_active`, `last_assistant_message`, `background_tasks` (tasks running or pending in the background: `id`, `type`, `status`, `description`, ...) and `session_crons` | `STOP`, `HOOK_AGENT`, `HOOK_BACKGROUND`, `MAIN_EVENTS`, `FAIRSHARE_HOOKS`, `hook_session`, `hook_background` | watch falls back to the listing's busy and idle (which can say busy for hours after a turn ended); a changed `background_tasks` reads as none, so the line drops its count; `doctor` fails the hooks line when the entry is missing | the binary, 2.1.327, 2026-11-18: the code that builds the input (Stop, SubagentStop with `agent_id`, the same base fields as every hook), the task list filter (running or pending, not a foreground task), and its callers (every turn end: a model's end of turn, a turn ended by a tool result or a loop tick; no gate on a background session, only on hooks switched off and on cache-warming and comparison queries). Not run live: a throwaway HOME has no sign-in to run a turn with |
 | `agent_id` (and `agent_type`) in every hook's input when it fires in a subagent, a teammate, or a session started with `--agent` | `HOOK_AGENT`, `hook_session` | warnings and requests would reach subagents too | documented: /hooks ("Common input fields"), read 2026-11-11 |
 | Inside a session: `CLAUDE_CODE_SESSION_ID` (full id), `CLAUDE_PID` (the session's process) | `SESSION_ID_ENV`, `SESSION_PID_ENV`, `current_session`, `session_pid` | `pickup` with no SESSION says "not inside a session"; a request carries no pid (accepted) | tool shells: 2.1.322, 2026-11-11; `!` and hooks: not yet checked live |
-| `--bg --name <name> <prompt>` (a session with no terminal, which prints how to attach; no prompt: an idle session), `--resume <id>`; `--bg` passes no environment but the folder variable | `BG_ARGS`, `NAME_ARGS`, `RESUME_ARGS`, `background`, `resume_args` | background pickup and `worker` fail with the tool's own message; the countdown's cancel hint is wrong | 2.1.322, 2026-11-11 (a marker variable set for `claude --bg --name X` was absent from the session; only `CLAUDE_CONFIG_DIR` arrived; the process comes from the tool's own pool) |
+| `--bg --name <name> <prompt>` (a session with no terminal, which prints how to attach; no prompt: an idle session), `--resume <id>`; `--bg` passes no environment but the folder variable; `--name` names a foreground session too | `BG_ARGS`, `NAME_ARGS`, `RESUME_ARGS`, `background`, `name_args`, `resume_args` | background pickup and `worker` fail with the tool's own message; the countdown's cancel hint is wrong | 2.1.322, 2026-11-11 (a marker variable set for `claude --bg --name X` was absent from the session; only `CLAUDE_CONFIG_DIR` arrived; the process comes from the tool's own pool) |
 | Transcript layout (internal, per version): one JSON record per line; `type` `user`/`assistant` with `isSidechain` false; `message.content` a string or blocks of which `text` ones are words | `T_*`, `transcript_text` | `fairshare transcript` prints the path and "layout not understood" (exit 1); the pickup prompt also names the full transcript path | 2.1.322, 2026-11-11 (synthetic fixture `tests/fixtures/claude-2.1.322/transcript.jsonl`) |
 | `!` commands in the transcript: user messages `<bash-input>…</bash-input>`, then `<bash-stdout>…</bash-stdout>` / `<bash-stderr>…</bash-stderr>` | `T_BANG_INPUT`, `T_BANG_OUTPUT`, `transcript_text` | they show raw, as plain user messages | 2.1.322, 2026-11-11 (a real transcript through `fairshare transcript`) |
 | `claude agents --json` (live sessions with `pid`, `sessionId`, `cwd`, `kind`, `name`, `startedAt`, `status` `busy`/`idle`; ended sessions not listed without `--all`; no account) | `AGENTS_ARGS`, `AGENT_ID`, `AGENT_NAME`, `AGENT_STATUS`, `AGENT_BUSY`, `AGENT_IDLE`, `list_sessions` | a worker is never joined (it hears no request, warnings treat it as a main session) and `watch` reports no ended or idle workers | 2.1.322, 2026-11-11 (a `--bg --name` session appeared with its `sessionId` within 4 s); top-level shape not recorded (a list, or an object holding one, accepted). 2.1.327, 2026-11-18: a background session is listed only through the account it runs on, so each worker is looked for in its own account's listing |

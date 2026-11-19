@@ -165,7 +165,8 @@ class Worker:
 class Request:
     """What a command asks the launcher to do with its child's session (`kind`), with the
     user's flags: a model, an effort, an account. `manual`: asked by the user (no check that the
-    account is out); `pid`: the session's own process, when known."""
+    account is out); `pid`: the session's own process, when known; `name`: what a handoff names
+    its fresh session."""
     session: str
     manual: bool
     pid: int | None = None
@@ -173,6 +174,7 @@ class Request:
     model: str | None = None
     effort: str | None = None
     account: str | None = None
+    name: str | None = None
 
 
 @dataclass(frozen=True)

@@ -1343,7 +1343,10 @@ def _continue(rec: SessionRecord, s: Survey | None, req: Request) -> int:
         return _start(rec, req, [], pause=True)
     if req.kind == HANDOFF or (req.kind == HANDOFF_NOTE and _write_note(rec, req)):
         _to_folder(rec)
-        return _start(rec, req, [_pickup_prompt(rec, _now())], continues=rec.id)
+        prompt = _pickup_prompt(rec, _now())
+        return _start(rec, req, lambda acct: [
+            *(providers.get(acct.provider).name_args(req.name) if req.name else ()), prompt],
+            continues=rec.id)
     if s is not None and _interactive():
         best = next((v.account.id for v in s.verdicts if v.eligible), None)
         where = f"on {best}" if best else "(no account can take work now)"
@@ -1673,7 +1676,7 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
          else f"picking up {rec.id} on {acct.id}" + (f" ({v.reason})" if v else "")
          + ", in the background")
     prov, w = providers.get(acct.provider), _worker_of(rec.id)
-    name = w.name if w else f"pickup-{rec.id[:8]}"
+    name = (req.name if fresh else None) or (w.name if w else f"pickup-{rec.id[:8]}")
     extra = prov.model_args(model, effort)
     before = _live_named(acct, name)
     if fresh:
@@ -1758,6 +1761,28 @@ def _write_checkpoint(session_id: str, text: str) -> Path:
     return path
 
 
+HANDED = re.compile(r"(.*)-h(\d+)")   # a name that carries a handoff number
+
+
+def _handed_name(name: str) -> str:
+    """The name after `name` in a line of handoffs: `x` -> `x-h2`, `x-h2` -> `x-h3`."""
+    m = HANDED.fullmatch(name)
+    return f"{m[1]}-h{int(m[2]) + 1}" if m else f"{name}-h2"
+
+
+def _handoff_name(rec: SessionRecord) -> str:
+    """What a handoff names the fresh session that continues `rec`: a worker's name as it is
+    (workers are joined by name); else the next handoff number of `rec`'s name as its own
+    account lists it, or, when that cannot be had, of its folder's name, else of `session`.
+    Read here, while `rec` still runs: the launcher acts after it stopped."""
+    if w := _worker_of(rec.id):
+        return w.name
+    acct = next((x for x in _load()[0] if x.id == rec.account), None)
+    live = acct and providers.get(acct.provider).list_sessions(acct)
+    name = next((x.name for x in live or () if x.id == rec.id), None)
+    return _handed_name(name or (rec.cwd and Path(rec.cwd).name) or "session")
+
+
 def cmd_handoff(a) -> int:
     """Hand the current session over to a fresh session that reads its checkpoint first. With
     NOTE: the note is appended, then the launcher stops this session and starts the fresh one
@@ -1776,8 +1801,12 @@ def cmd_handoff(a) -> int:
         _say(f"no record of this session ({here}) yet; it appears once its status line ran")
         return 1
     launcher = _launcher()
+    if not a.note and launcher is None:
+        _say("this session was not started by fairshare, so nothing can write its note while it "
+             "waits; ask the session's agent instead: /fairshare handoff")
+        return 1
     req = Request(rec.id, True, prov.session_pid(), HANDOFF if a.note else HANDOFF_NOTE,
-                  a.model, a.effort, a.account)
+                  a.model, a.effort, a.account, _handoff_name(rec))
     if a.note:
         print(_write_checkpoint(rec.id, a.note))
         if launcher is None:
@@ -1788,10 +1817,6 @@ def cmd_handoff(a) -> int:
         _request(launcher, req)
         print("the launcher will stop this session and start a fresh one that reads the note first")
         return 0
-    if launcher is None:
-        _say("this session was not started by fairshare, so nothing can write its note while it "
-             "waits; ask the session's agent instead: /fairshare handoff")
-        return 1
     _request(launcher, req)
     print("the launcher will stop this session, have it write its handoff note, and start a "
           "fresh one that reads it first")
@@ -2152,21 +2177,6 @@ def _join_pending(pending: list[Worker], accounts: list[Account], now: float) ->
     return found
 
 
-def _new_worker(parent: str, acct: Account, cwd: str, name: str | None, model: str,
-                effort: str) -> Worker | None:
-    """Record a new worker under `name`, or under the first free `w-<parent's first 8>-<n>`;
-    None when `name` is taken."""
-    now = _now()
-    for n in range(1, 10_000):
-        w = Worker(name or f"w-{parent[:8]}-{n}", parent, acct.id, cwd, now, model=model,
-                   effort=effort)
-        if store.add_worker(w):
-            return w
-        if name:
-            return None
-    return None
-
-
 def cmd_worker(a) -> int:
     """Start a background session for the calling session, on the model and effort the main
     session chose (`--effort none` for a model without one): on --account, else the top
@@ -2176,7 +2186,7 @@ def cmd_worker(a) -> int:
     if (parent := prov.current_session()) is None:
         _say("not inside a session: a worker belongs to the session that starts it")
         return 2
-    if a.name is not None and not ACCOUNT_ID.fullmatch(a.name):
+    if not ACCOUNT_ID.fullmatch(a.name):
         _say(f"worker name {a.name!r}: use letters, digits, '.', '-' or '_'")
         return 2
     here = Path(os.getcwd()).resolve()
@@ -2206,8 +2216,8 @@ def cmd_worker(a) -> int:
         _say(f"{', '.join(c.id for c in candidates)} cannot work in {here}: "
              f"{_why_untrusted(here, accounts)}; no worker started")
         return 1
-    w = _new_worker(parent, acct, str(here), a.name, a.model, a.effort)
-    if w is None:
+    w = Worker(a.name, parent, acct.id, str(here), _now(), model=a.model, effort=a.effort)
+    if not store.add_worker(w):
         _say(f"a worker named {a.name} is recorded already; choose another --name")
         return 2
     _say(f"starting worker {w.name} on {acct.id}{why and why[acct.id]}")
@@ -3415,7 +3425,8 @@ def main(argv: list[str] | None = None) -> int:
     _carry_flags(kp)
     kp.set_defaults(f=cmd_pickup)
     hq = sub.add_parser("handoff", help="inside a session: a checkpoint, then a fresh session "
-                        "that reads it first (with no NOTE, the launcher has the session write it)")
+                        "that reads it first, named after this one with the next -hN (with no "
+                        "NOTE, the launcher has the session write it)")
     hq.add_argument("note", nargs="?", metavar="NOTE", help="what was done, what is next, open "
                     "decisions, files touched")
     _carry_flags(hq)
@@ -3431,7 +3442,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(f=cmd_trust)
     wp = sub.add_parser("worker", help="inside a session: start a background worker session")
     wp.add_argument("--account", metavar="ID", help="default: the best account")
-    wp.add_argument("--name", help="default: w-<first 8 of this session>-<n>")
+    wp.add_argument("--name", required=True, help="the task in a few words, unique across "
+                    "every recorded worker: e.g. fs-watch-stops")
     wp.add_argument("--model", required=True, help="the worker's model, fitted to its task")
     wp.add_argument("--effort", required=True, help="its effort level; `none` for a model "
                     "without one")

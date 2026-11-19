@@ -13,8 +13,11 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 - Small, short work: a subagent (the Agent tool). fairshare tells subagents nothing; if the
   limit hits, you and the subagent stop together and one pickup covers both.
 - Big or long work: a worker, a background session that can be stopped, moved and relaunched:
-  `fairshare worker --model <model> --effort <level> "<prompt>"` (optional `--account ID`,
-  `--name NAME`). It prints the worker's name and session id.
+  `fairshare worker --name <name> --model <model> --effort <level> "<prompt>"` (optional
+  `--account ID`). It prints the worker's name and session id.
+- Always pass `--name`: the task in a few words, lowercase and hyphenated, starting with a short
+  project prefix, since names are unique across every recorded worker (`fs-watch-stops`). A
+  retry of the same task adds `-2`. Never an id or a date alone.
 - Always name a model and an effort fitted to the worker's task: mechanical work (renames,
   field additions, doc edits) gets a cheaper model and a lower effort; design work or changes
   across many files get the strongest model at high effort. For a model without effort levels,
@@ -45,7 +48,7 @@ A warning names the account, its percent, when that window resets and the best o
   - **handoff**: `fairshare handoff "<what was done, what is next, open decisions, constraints
     the user set, what was tried and failed, files touched>"`. A fresh session starts on the
     best account and reads that note first; it can read this session's transcript for anything
-    the note missed.
+    the note missed. fairshare names it after this session with the next `-hN` (`x-h2`).
   - **pickup**: `fairshare checkpoint "<where you stand>"`, then `fairshare pickup`. This same
     session continues on the best account with its whole context (on another account that
     context is read again once, uncached).

@@ -565,7 +565,8 @@ def take_request(launcher: int) -> Request | None:
         pid = d.get("pid")
         return Request(str(d["session"]), d.get("manual") is True,
                        pid if isinstance(pid, int) else None, _text(d.get("kind")) or "pickup",
-                       _text(d.get("model")), _text(d.get("effort")), _text(d.get("account")))
+                       _text(d.get("model")), _text(d.get("effort")), _text(d.get("account")),
+                       _text(d.get("name")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 

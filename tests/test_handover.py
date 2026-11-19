@@ -14,6 +14,7 @@ import sys
 import termios
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -401,7 +402,7 @@ class Handoff(Handover):
         self.assertEqual(code, 0, err)
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
         self.assertEqual(store.take_request(launcher.pid),
-                         Request(SID, True, 4321, "handoff", "opus"))
+                         Request(SID, True, 4321, "handoff", "opus", name="work-h2"))
         self.assertTrue(self.note().endswith("\nDone A; next B.\n"))
 
     def test_with_a_note_and_no_launcher_a_fresh_background_session(self):
@@ -409,7 +410,7 @@ class Handoff(Handover):
         code, out, err = self.inside("handoff", "Done A.")
         self.assertEqual(code, 0, err)
         args = self.bg_args("b")
-        self.assertEqual(args[:7], ["--bg", "--name", "pickup-0a1b2c3d", "--model",
+        self.assertEqual(args[:7], ["--bg", "--name", "work-h2", "--model",
                                     "claude-opus-5-5", "--effort", "high"])
         self.assertNotIn("--resume", args)
         self.assertIn(f"Read its checkpoint note {store.checkpoint_path(SID)} first", args[7])
@@ -435,7 +436,37 @@ class Handoff(Handover):
         self.assertEqual(code, 0)
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
         self.assertEqual(store.take_request(launcher.pid),
-                         Request(SID, True, 4321, "handoff-note", account="c"))
+                         Request(SID, True, 4321, "handoff-note", account="c", name="work-h2"))
+
+    def test_the_fresh_session_is_named_after_the_listed_name_with_the_next_number(self):
+        self.record(stranded=None)
+        for listed, named in (("fairshare-6a", "fairshare-6a-h2"), ("x-h2", "x-h3"),
+                              ("x-h9", "x-h10"), ("ab-h", "ab-h-h2")):
+            with self.subTest(listed=listed):
+                (self.log / "live").write_text(f"s-other other\n{SID} {listed}\n")
+                launcher = self.started()
+                self.assertEqual(self.inside("handoff", launcher=launcher)[0], 0)
+                launcher.wait(timeout=WAIT)
+                self.assertEqual(store.take_request(launcher.pid).name, named)
+
+    def test_without_a_listed_name_the_folder_or_session_is_named(self):
+        self.record(stranded=None)
+        rec = store.session(SID)
+        self.assertEqual(cli._handoff_name(rec), "work-h2")           # not listed
+        with mock.patch.object(claude, "list_sessions", lambda acct: None):
+            self.assertEqual(cli._handoff_name(rec), "work-h2")       # no listing
+        with mock.patch.object(claude, "list_sessions",
+                               lambda acct: [claude.LiveSession(SID, None, True)]):
+            self.assertEqual(cli._handoff_name(rec), "work-h2")       # listed with no name
+            self.assertEqual(cli._handoff_name(replace(rec, cwd=None)), "session-h2")
+
+    def test_a_workers_handoff_keeps_the_workers_name(self):
+        store.add_worker(Worker("fs-parser", "p-1", "a", str(self.work), NOW, SID))
+        self.record(stranded=None)
+        (self.log / "live").write_text(f"{SID} fs-parser\n")
+        code, _, err = self.inside("handoff", "Done A.")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.bg_args("b")[:3], ["--bg", "--name", "fs-parser"])
 
     def test_the_launcher_starts_a_fresh_session_for_a_written_note(self):
         self.record(model="claude-opus-5-5", effort="high", stranded=None)
@@ -446,6 +477,24 @@ class Handoff(Handover):
         self.assertEqual((args[:4], acct), (["--model", "claude-opus-5-5", "--effort", "high"], "b"))
         self.assertEqual(args[4:], [cli._pickup_prompt(store.session(SID), NOW)])
         self.assertIn("Read its checkpoint note", args[4])
+
+    def test_a_request_file_without_a_name_still_reads(self):
+        store._requests().mkdir(parents=True, exist_ok=True)
+        (store._requests() / "77.json").write_text(json.dumps(
+            {"session": SID, "manual": True, "pid": 4321, "kind": "handoff"}))
+        self.assertEqual(store.take_request(77), Request(SID, True, 4321, "handoff"))
+        store.save_request(78, Request(SID, True, 4321, "handoff", name="x-h2"))
+        self.assertEqual(store.take_request(78).name, "x-h2")
+
+    def test_the_launcher_names_the_fresh_session_as_asked(self):
+        self.record(model="claude-opus-5-5", effort="high", stranded=None)
+        store.append_checkpoint(SID, "## x\nnote\n")
+        code, err = self.launches("run", "-a", "a", requests=[
+            Request(SID, True, 4321, "handoff", name="work-h2")])
+        self.assertEqual(code, 0, err)
+        args, _ = self.started_args()
+        self.assertEqual(args[4:6], ["--name", "work-h2"])
+        self.assertIn("Read its checkpoint note", args[6])
 
     def test_the_launcher_has_the_note_written_on_the_sessions_own_account(self):
         self.record(model="claude-opus-5-5", effort="high", stranded=None)
@@ -547,7 +596,7 @@ class WorkerModel(Handover):
     def worker(self, *argv):
         os.chdir(self.work)                       # a trusted folder (HOME takes no copy)
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "p-1"}):
-            return self.go("worker", *argv)
+            return self.go("worker", "--name", f"fs-{argv[-1]}", *argv)
 
     def test_model_and_effort_are_required(self):
         for argv in (("x",), ("--model", "opus", "x"), ("--effort", "high", "x")):
@@ -581,7 +630,8 @@ class Skill(unittest.TestCase):
 
     def test_the_skill_says_so_and_never_mentions_carrying_over(self):
         text = claude.skill(Path("/x"))[1]
-        for words in ('fairshare worker --model <model> --effort <level> "<prompt>"',
+        for words in ('fairshare worker --name <name> --model <model> --effort <level> "<prompt>"',
+                      "Always pass `--name`", "the next `-hN`",
                       "--effort none", "cheaper model", "strongest model",
                       "run `fairshare <args>` exactly as given", "write the note yourself",
                       'fairshare handoff "<note>"', "`! fairshare ...`"):

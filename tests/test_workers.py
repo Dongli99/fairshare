@@ -140,10 +140,11 @@ class TrustCommand(Work):
 
 
 class WorkerCommand(Work):
-    def worker(self, *argv, env=None, inside=True, model=("--model", "opus", "--effort", "high")):
+    def worker(self, *argv, env=None, inside=True, model=("--model", "opus", "--effort", "high"),
+               name=("--name", "fs-parser")):
         e = {**({"CLAUDE_CODE_SESSION_ID": PARENT} if inside else {}), **(env or {})}
         with mock.patch.dict(os.environ, e):
-            return self.go("worker", *model, *argv)
+            return self.go("worker", *model, *name, *argv)
 
     def bg_args(self, account):
         return (self.log / f"args-{account}").read_text().splitlines()
@@ -158,8 +159,8 @@ class WorkerCommand(Work):
         self.trusted("a")
         code, out, err = self.worker("Refactor the parser.")
         self.assertEqual(code, 0, err)
-        name = "w-9f8e7d6c-1"
-        self.assertEqual(out, f"worker {name} started on a (session s-w-9f8e)\n")
+        name = "fs-parser"
+        self.assertEqual(out, f"worker {name} started on a (session s-fs-par)\n")
         args = self.bg_args("a")
         self.assertEqual(args[:3], ["--bg", "--name", name])
         self.assertEqual(args[3:], ["--model", "opus", "--effort", "high",
@@ -184,25 +185,25 @@ class WorkerCommand(Work):
         for gone in ("BROWSER", "FAIRSHARE_LAUNCHER", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
             self.assertNotIn(gone, env)
 
-    def test_names_are_unique_among_the_parents_workers(self):
+    def test_a_name_is_required_and_unique(self):
         self.trusted("a")
-        self.worker("one")
-        self.worker("two")
-        self.assertEqual([w.name for w in store.workers(PARENT)],
-                         ["w-9f8e7d6c-1", "w-9f8e7d6c-2"])
-        code, _, _ = self.worker("--name", "mine", "three")
+        with self.assertRaises(SystemExit) as e:
+            self.worker("one", name=())                    # argparse refuses: --name is required
+        self.assertEqual(e.exception.code, 2)
+        self.assertEqual(store.workers(), [])
+        code, _, _ = self.worker("three", name=("--name", "mine"))
         self.assertEqual((code, store.worker("mine").parent), (0, PARENT))
-        code, _, err = self.worker("--name", "mine", "four")
+        code, _, err = self.worker("four", name=("--name", "mine"))
         self.assertEqual(code, 2)
         self.assertIn("a worker named mine is recorded already", err)
-        self.assertEqual(self.worker("--name", "../x", "five")[0], 2)
+        self.assertEqual(self.worker("five", name=("--name", "../x"))[0], 2)
 
     def test_account_choice(self):
         self.trusted("a", "b", "c")
         self.snap("a", five=(100, 3), seven=(10, 50))           # a is out: b is the top eligible
         self.assertEqual(self.worker("x")[0], 0)
         self.assertEqual(store.workers()[0].account, "b")
-        self.assertEqual(self.worker("--account", "c", "y")[0], 0)
+        self.assertEqual(self.worker("--account", "c", "y", name=("--name", "fs-y"))[0], 0)
         self.assertEqual(store.workers()[1].account, "c")
         code, _, err = self.worker("--account", "zz", "z")
         self.assertEqual(code, 2)
@@ -225,7 +226,7 @@ class WorkerCommand(Work):
         store.remember_trust_only(self.here)
         code, _, err = self.worker("x")                         # c trusts and is eligible: c
         self.assertEqual((code, store.workers()[0].account), (0, "c"))
-        self.assertEqual(store.workers()[0].name, "w-9f8e7d6c-1")
+        self.assertEqual(store.workers()[0].name, "fs-parser")
         self.assertFalse((self.log / "args-a").exists() and "--bg" in self.bg_args("a"))
 
     def test_a_failed_start_records_nothing(self):
@@ -238,14 +239,14 @@ class WorkerCommand(Work):
         start = self.clock[0]
         code, out, _ = self.worker("x", env={"FAKE_NO_LIST": "1"})
         self.assertEqual(code, 0)
-        self.assertEqual(out, "worker w-9f8e7d6c-1 started on a; its session id is not known "
+        self.assertEqual(out, "worker fs-parser started on a; its session id is not known "
                               "yet (fairshare finds it by name later)\n")
         self.assertEqual(self.clock[0], start)     # no list before the start: no wait, no guess
-        self.assertIsNone(store.worker("w-9f8e7d6c-1").session)
+        self.assertIsNone(store.worker("fs-parser").session)
         accounts = load_accounts(self.tmp / "accounts.toml")[0]
         found = cli._join_pending(store.workers(PARENT), accounts, self.clock[0])
-        self.assertEqual(found, {"w-9f8e7d6c-1": "s-w-9f8e7d6c-1"})
-        self.assertEqual(store.session("s-w-9f8e7d6c-1").role, ROLE_WORKER)
+        self.assertEqual(found, {"fs-parser": "s-fs-parser"})
+        self.assertEqual(store.session("s-fs-parser").role, ROLE_WORKER)
 
     def test_a_join_that_times_out_says_so(self):
         self.trusted("a")
@@ -255,16 +256,16 @@ class WorkerCommand(Work):
         self.assertIn("its session id is not known yet", out)
         self.assertGreaterEqual(self.clock[0] - start, cli.JOIN_WAIT)   # waited, on the clock
         self.assertLess(self.clock[0] - start, cli.JOIN_WAIT + 1)
-        self.assertIsNone(store.worker("w-9f8e7d6c-1").session)
+        self.assertIsNone(store.worker("fs-parser").session)
 
     def test_a_session_already_running_under_the_name_is_never_joined(self):
         self.trusted("a")
-        (self.log / "live").write_text("w-9f8e7d6c-1\n")       # an earlier one, as s-w-…
+        (self.log / "live").write_text("fs-parser\n")          # an earlier one, as s-fs-…
         start = self.clock[0]
         code, out, _ = self.worker("x", env={"FAKE_NO_JOIN": "1"})
         self.assertEqual(code, 0)
         self.assertIn("its session id is not known yet", out)
-        self.assertIsNone(store.worker("w-9f8e7d6c-1").session)
+        self.assertIsNone(store.worker("fs-parser").session)
         self.assertGreaterEqual(self.clock[0] - start, cli.JOIN_WAIT)
 
     def test_a_retry_gives_up_on_an_old_worker(self):

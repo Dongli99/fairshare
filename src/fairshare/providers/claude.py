@@ -52,6 +52,8 @@ usage_timeout = USAGE_TIMEOUT
 # A pickup in the background: `claude --bg --name <name> <prompt>` starts a session with no
 # terminal and prints how to attach to it. `--bg` passes the caller's environment on to the
 # session (2.1.322, planner): only CONFIG_DIR_ENV arrives, so nothing else can travel that way.
+# `--name <name>` names a foreground session too ("Set a display name for this session", 2.1.328
+# `--help`); `agents --json` lists that name.
 # `--resume <id>` continues a session under its own id (any account can: the hub shares where
 # the tool keeps sessions), in the foreground or with `--bg` (docs: CLI reference, /sessions and
 # /agent-view, read 2026-11-12: on 2.1.257 or later the same id, or a copy with a `note:` line);
@@ -316,6 +318,11 @@ def resume_args(session_id: str, fork: bool = False) -> list[str]:
     return [*RESUME_ARGS, session_id, *(FORK_ARGS if fork else ())]
 
 
+def name_args(name: str) -> list[str]:
+    """Arguments that start a session named `name` (in the foreground or with `--bg`)."""
+    return [*NAME_ARGS, name]
+
+
 def model_args(model: str | None, effort: str | None) -> list[str]:
     """Arguments that start a session on `model` at `effort` (EFFORT_NONE or None: no effort
     argument); none for what is None."""
@@ -335,7 +342,7 @@ def background(account: Account, name: str, prompt: str, extra: list[str] = ()
                ) -> tuple[list[str], dict[str, str]]:
     """The command and environment that start a session of `account` with no terminal, named
     `name`, with `extra` arguments (a resume, a model) and `prompt` as its first message."""
-    return ([real_binary(), *BG_ARGS, *NAME_ARGS, name, *extra, prompt],
+    return ([real_binary(), *BG_ARGS, *name_args(name), *extra, prompt],
             clean_env(account.config_dir))
 
 

@@ -238,7 +238,10 @@ did not start, so the old agent must stop itself.
 Either way the fresh session takes the old one's place: `status`, `watch`, `checkpoint --request`
 and `pickup <old id>` find the fresh one, and workers the old session started are now its
 workers. It starts in the folder the old session started in, even when the old one's shell had
-moved into another (a worktree, say). A switch takes nothing over.
+moved into another (a worktree, say). It is named after the old session, as Claude Code lists it
+(`fairshare-6a`, or the name you gave it), with the next handoff number: `fairshare-6a-h2`, then
+`fairshare-6a-h3`; when that name cannot be read, after the folder. A worker's fresh session
+keeps the worker's name. A switch takes nothing over.
 
 **Handoff with no note** (`! fairshare handoff`, you, in the session) has the launcher stop the
 session, resume it headless for one turn that writes the note (no tools), then start the fresh
@@ -279,17 +282,18 @@ work goes to a worker, which can be stopped, moved and picked up on its own. fai
 skill in the hub (`skills/fairshare/`) that teaches the main session all of this; you can also
 run the commands yourself, from inside a session:
 
-- `fairshare worker --model M --effort E "<prompt>"` starts one on the best account that has that
-  model's week left (`--account ID` to choose, `--name NAME` to name it; default `w-<first 8 of
-  this session>-<n>`) in the current folder and prints `worker w-1a2b3c4d-1 started on b (session
-  9f8e7d6c)`. The main session chooses the model and effort (both required; `--effort none` for a
+- `fairshare worker --name NAME --model M --effort E "<prompt>"` starts one on the best account
+  that has that model's week left (`--account ID` to choose) in the current folder and prints
+  `worker fs-watch-stops started on b (session 9f8e7d6c)`. The name is required and unique across
+  every recorded worker; the skill has the agent use the task in a few words with a short project
+  prefix. The main session chooses the model and effort (both required; `--effort none` for a
   model without effort levels); the skill tells it to fit them to the task. The worker's prompt
   starts with one line telling it to checkpoint when asked.
 - `fairshare watch` waits until something concerns this session and prints one line per event:
   its account crossed 90% or 95%, a worker wrote a checkpoint (with the note's path), a worker was
   stopped by its limit (with when that limit resets, since Claude Code resumes the worker by
   itself then, and `fairshare pickup <id>` to move it now), a worker ended its turn and is
-  waiting (`worker w-1 ended its turn and is waiting: fairshare transcript 5e55105e --tail 1`;
+  waiting (`worker fs-watch-stops ended its turn and is waiting: fairshare transcript 5e55105e --tail 1`;
   when it left background tasks running, the line says how many: it wakes again when one ends),
   or a worker ended or went idle. A worker's turn end comes from its own `Stop` hook, which
   fairshare wires in the hub: Claude Code's list of sessions can call a worker busy for hours
@@ -337,7 +341,7 @@ seen in the last 10 minutes, heaviest in the last hour first (at most 5, then `+
 ```
 > b   claude-pro   score  2.40  seven_day 40% used, resets in 25h
     session 1f2e3d4c · Opus · api · main · $6.00 (70%)
-    session 9a8b7c6d · Haiku · api · w-1f2e3d4c-1 · $1.10 (13%)
+    session 9a8b7c6d · Haiku · api · fs-watch-stops · $1.10 (13%)
     session 4d5e6f70 · Sonnet · web · main · -
 ```
 

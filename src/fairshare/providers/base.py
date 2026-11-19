@@ -56,6 +56,10 @@ class Provider(Protocol):
         """Arguments that continue the session `session_id` under its own id, on whichever
         account starts it; `fork`: in a copy under a new id."""
 
+    def name_args(self, name: str) -> list[str]:
+        """Arguments that start a session under the display name `name`, as the provider lists
+        it (`list_sessions`)."""
+
     def model_args(self, model: str | None, effort: str | None) -> list[str]:
         """Arguments that start a session on `model` at `effort` (`model.EFFORT_NONE` or None:
         no effort argument); none for what is None."""
