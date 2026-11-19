@@ -227,7 +227,10 @@ the folder trust check still applies):
 | `fairshare handoff ["<note>"]` | a fresh session that first reads a handoff note: what was done, what is next, open decisions, files touched |
 | `fairshare` (bare, inside a session) | a fresh session with nothing carried but the folder, the model and the effort (a switch) |
 
-**Handoff with a note** (what the agent runs) saves the note as the session's checkpoint. In a
+**Handoff with a note** (what the agent runs) saves the note as the session's checkpoint. When
+your project already has its own way to hand off (a handoff file it writes somewhere, say), the
+skill tells the agent to follow it and pass that file's path as the note, so the fresh session
+reads your file; fairshare only carries the pointer. In a
 session started by `fairshare`, the launcher then stops the session and starts the fresh one.
 Without a launcher, the fresh one starts in the background: fairshare prints `handing off <id> to
 a fresh session on <account>, in the background`, the fresh session is told that the old one

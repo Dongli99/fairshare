@@ -1750,8 +1750,9 @@ def _copied(rec: SessionRecord, new: str, acct: Account, model: str | None,
 
 HANDOFF_NOTE_ASK = ("fairshare is handing this session over to a fresh session, which reads your "
                     "note first. Write that note now, as plain text: what was done, what is "
-                    "next, the open decisions, and the files touched. Use no tools; answer with "
-                    "the note alone.")
+                    "next, the open decisions, and the files touched; if this project's own "
+                    "instructions set a form for a handoff, follow that form. Use no tools; "
+                    "answer with the note alone.")
 HANDOFF_WAIT_S = 300   # seconds the launcher waits for the handoff note before a pickup instead
 
 

@@ -49,6 +49,10 @@ A warning names the account, its percent, when that window resets and the best o
     the user set, what was tried and failed, files touched>"`. A fresh session starts on the
     best account and reads that note first; it can read this session's transcript for anything
     the note missed. fairshare names it after this session with the next `-hN` (`x-h2`).
+    If the project's own instructions say how to write a handoff (a file, where it goes, what
+    it holds), they win: write it as they say, then pass its path as the note, adding only
+    what it lacks. Otherwise, for a long note, write it to a scratch file and pass
+    `"$(cat <file>)"`.
   - **pickup**: `fairshare checkpoint "<where you stand>"`, then `fairshare pickup`. This same
     session continues on the best account with its whole context (on another account that
     context is read again once, uncached).
