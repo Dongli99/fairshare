@@ -208,3 +208,25 @@ class Spread(unittest.TestCase):
     def test_nothing_eligible_is_left_alone(self):
         snaps = {"a": snap((10, 3), (99, 5)), "b": snap((10, 3), (99, 9))}
         self.assertEqual(self.ids(snaps, {"a": 4}), ["a", "b"])
+
+
+class PlannedReset(unittest.TestCase):
+    """A full reset the user plans this week: its refill counts as room in the week."""
+
+    def test_the_planned_refill_counts_as_room_left(self):
+        snaps = {"a": snap((10, 3), (50, 80)), "b": snap((10, 3), (20, 80))}
+        self.assertEqual(order([acct("a"), acct("b")], snaps), ["b", "a"])
+        v = rank([acct("a"), acct("b")], snaps, NOW, extra={"a": 100.0})
+        self.assertEqual([x.account.id for x in v], ["a", "b"])
+        self.assertAlmostEqual(v[0].score, 150 / 80)
+        self.assertIn("+100% planned", v[0].reason)
+
+    def test_a_spent_week_stays_spent_until_the_refill_shows(self):
+        snaps = {"a": snap((10, 3), (100, 80)), "b": snap((10, 3), (90, 80))}
+        v = rank([acct("a"), acct("b")], snaps, NOW, extra={"a": 100.0})
+        self.assertEqual([(x.account.id, x.eligible) for x in v], [("b", True), ("a", False)])
+
+    def test_no_plan_ranks_as_before(self):
+        snaps = {"a": snap((10, 3), (50, 80))}
+        self.assertEqual(rank([acct("a")], snaps, NOW, extra={}),
+                         rank([acct("a")], snaps, NOW))
