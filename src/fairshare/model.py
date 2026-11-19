@@ -138,6 +138,8 @@ class SessionRecord:
     limits: dict = field(default_factory=dict)  # the limits that stopped it, as the launcher
                                                 # confirmed them: {account: its reset}; no resume
                                                 # there before that reset (`cli._held`)
+    stopped: list = field(default_factory=list)  # a worker's last turn end, as its Stop hook saw
+                                                 # it: [time, background tasks still running]
 
 
 ROLE_WORKER = "worker"

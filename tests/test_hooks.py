@@ -190,6 +190,43 @@ class Speaking(Work):
         listed.assert_not_called()
 
 
+class TurnEnd(Speaking):
+    """`hook stop`: a worker's turn end, stamped on its record for `watch`."""
+
+    def stop(self, sid=SID, **extra):
+        return self.hook("stop", sid, hook_event_name="Stop", stop_hook_active=False,
+                         last_assistant_message="done", **extra)
+
+    def test_a_worker_is_stamped_with_its_background_tasks(self):
+        self.worker()
+        self.assertIsNone(self.stop(background_tasks=[]))
+        self.assertEqual(store.session(SID).stopped, [NOW, 0])
+        self.clock[0] += 60
+        self.stop(background_tasks=[{"id": "b1", "type": "shell", "status": "running"},
+                                    {"id": "b2", "type": "monitor", "status": "running"}])
+        self.assertEqual(store.session(SID).stopped, [NOW + 60, 2])
+        self.clock[0] += 60
+        self.stop()                                     # an input without the list: none
+        self.assertEqual(store.session(SID).stopped, [NOW + 120, 0])
+
+    def test_a_main_session_and_a_subagent_are_not_stamped(self):
+        store.note_session(SessionSeen(SID), "a", NOW)
+        self.stop()
+        self.assertEqual(store.session(SID).stopped, [])
+        self.assertIsNone(store.session("s-none"))
+        self.stop(sid="s-none")                         # no record: none is made
+        self.assertIsNone(store.session("s-none"))
+        self.worker()
+        self.stop(agent_id="agent-1", agent_type="Explore")
+        self.assertEqual(store.session(SID).stopped, [])
+
+    def test_a_pending_worker_is_joined_by_name_then_stamped(self):
+        store.add_worker(Worker("w-late", PARENT, "a", str(self.here), NOW))
+        (self.log / "live").write_text("w-late\n")
+        self.stop(sid="s-w-late")
+        self.assertEqual(store.session("s-w-late").stopped, [NOW, 0])
+
+
 class Wired(Work):
     THEIRS = ('{\n  "hooks": {\n    "PostToolUse": [{"matcher": "Bash", "hooks": [{"type": '
               '"command", "command": "~/lint.sh"}]}],\n    "UserPromptSubmit": [{"hooks": '
@@ -228,6 +265,16 @@ class Wired(Work):
         text = json.dumps(full, indent=2)
         self.assertIsNone(claude.hooked(text))
         self.assertEqual(claude.hooked(claude.wire(text, "/bin/fairshare")), ("/bin/fairshare",))
+
+    def test_an_install_with_the_three_older_hooks_is_flagged_and_only_stop_is_added(self):
+        full = json.loads(claude.wire(None, "/bin/fairshare"))
+        del full["hooks"]["Stop"]
+        text = json.dumps(full, indent=2)
+        self.assertIsNone(claude.hooked(text))          # doctor: FAIL, fix with --fix
+        new = json.loads(claude.wire(text, "/bin/fairshare"))
+        self.assertEqual(new["hooks"]["Stop"], [{"hooks": [
+            {"type": "command", "command": "/bin/fairshare hook stop"}]}])
+        self.assertEqual({k: v for k, v in new["hooks"].items() if k != "Stop"}, full["hooks"])
 
 
 HOOK_RUNS = 20

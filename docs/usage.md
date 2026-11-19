@@ -283,13 +283,18 @@ run the commands yourself, from inside a session:
 - `fairshare watch` waits until something concerns this session and prints one line per event:
   its account crossed 90% or 95%, a worker wrote a checkpoint (with the note's path), a worker was
   stopped by its limit (with when that limit resets, since Claude Code resumes the worker by
-  itself then, and `fairshare pickup <id>` to move it now), or a worker ended or went idle. The
-  main session keeps it running as a background command and starts it again after each event;
-  `--timeout SECONDS` gives up with `nothing happened`.
+  itself then, and `fairshare pickup <id>` to move it now), a worker ended its turn and is
+  waiting (`worker w-1 ended its turn and is waiting: fairshare transcript 5e55105e --tail 1`;
+  when it left background tasks running, the line says how many: it wakes again when one ends),
+  or a worker ended or went idle. A worker's turn end comes from its own `Stop` hook, which
+  fairshare wires in the hub: Claude Code's list of sessions can call a worker busy for hours
+  after it stopped. The main session keeps it running as a background command and starts it
+  again after each event; `--timeout SECONDS` gives up with `nothing happened`.
 - `fairshare checkpoint "<what is done, what is next>"` appends a dated note to this session's
   checkpoint file (in fairshare's state folder) and prints its path; a handoff's fresh session
   reads it first. `fairshare checkpoint --request <worker name | session | all>` asks workers for
-  one (each hears it at its next step); `--show <worker or session>` prints a note.
+  one (each hears it at its next step; `all` skips the workers watch saw end); `--show <worker or
+  session>` prints a note.
 - A worker stopped by its limit: wait for its reset, or `fairshare pickup <its session id>`
   resumes it on the best account, in the background, under its own name, with its model and
   effort. To move the main session itself: `fairshare pickup` (the same session) or `fairshare
@@ -404,8 +409,8 @@ account's hub folder, which are Claude Code's own commands. It checks
 that the `claude` command is found (with its version), `accounts.toml` loads, the hub is where it
 is configured, and for each account: its plan exists, its sign-in check answers (with the date
 the sign-in ends), its usage probe answers (or is off) and its `.claude.json` still holds folder
-trust where fairshare expects it. Then: the hub's statusLine still calls capture, its three hooks
-(stop-failure, post-tool, prompt) still call `fairshare hook`, fairshare's skill in the hub is
+trust where fairshare expects it. Then: the hub's statusLine still calls capture, its four hooks
+(stop-failure, post-tool, prompt, stop) still call `fairshare hook`, fairshare's skill in the hub is
 current, and the `fairshare` command they call runs. One line per check, account ids and plan
 names only, so the output can go into a public issue; exit 0 when all pass.
 

@@ -37,9 +37,11 @@ class Watch(Work):
         with mock.patch.dict(os.environ, env):
             return self.go("watch", *argv)
 
-    def worker(self, name="w-1", live=True):
+    def worker(self, name="w-1", live=True, started=NOW - 120):
+        """A joined worker of PARENT on b, started (by default) longer ago than the grace a new
+        one gets before it is judged ended."""
         sid = f"s-{name}"
-        w = Worker(name, PARENT, "b", str(self.here), NOW)
+        w = Worker(name, PARENT, "b", str(self.here), started)
         store.add_worker(w)
         cli._joined(w, sid, NOW)
         if live:
@@ -131,8 +133,8 @@ class Watch(Work):
         """A background session is listed only through the account it runs on: a worker on
         another account than the first one's is neither ended at once nor missed at its end."""
         self.worker("w-1")
-        store.add_worker(Worker("w-2", PARENT, "a", str(self.here), NOW + 1))
-        cli._joined(store.worker("w-2"), "s-w-2", NOW + 1)
+        store.add_worker(Worker("w-2", PARENT, "a", str(self.here), NOW - 119))
+        cli._joined(store.worker("w-2"), "s-w-2", NOW - 119)
         by = {"b": [claude.LiveSession("s-w-1", "w-1", True)],
               "a": [claude.LiveSession("s-w-2", "w-2", True)]}
         with mock.patch.object(claude, "list_sessions", lambda acct: by[acct.id]):
@@ -141,6 +143,68 @@ class Watch(Work):
             self.assertEqual(self.watch("--timeout", "5")[1], "worker w-2 ended\n")
             by["b"] = None                      # b's listing failed: w-1 is not judged
             self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+
+    def stopped(self, sid, at, tasks=0):
+        store.update_session(sid, lambda r: cli.replace(r, stopped=[at, tasks]))
+
+    def test_a_turn_end_once_though_the_listing_says_busy(self):
+        """The listing can say busy for hours after a worker's turn ended: its own Stop hook's
+        stamp is said once, and the busy mark goes, so no later idle says it again."""
+        sid = self.worker()
+        self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")   # seen busy
+        self.assertEqual(store.session(PARENT).reported, {f"busy:{sid}": 1})
+        self.stopped(sid, NOW)
+        self.assertEqual(self.watch("--timeout", "5")[1],
+                         f"worker w-1 ended its turn and is waiting: fairshare transcript "
+                         f"{sid[:8]} --tail 1\n")
+        self.assertNotIn(f"busy:{sid}", store.session(PARENT).reported)
+        self.assertEqual(self.watch("--timeout", "20")[1], "nothing happened\n")  # still busy
+        self.assertNotIn(f"busy:{sid}", store.session(PARENT).reported)
+        idle = [claude.LiveSession(sid, "w-1", False)]
+        with mock.patch.object(claude, "list_sessions", lambda acct: idle):
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+        self.stopped(sid, NOW + 60)                    # its next turn end is news
+        self.assertIn("ended its turn", self.watch("--timeout", "5")[1])
+
+    def test_a_turn_end_with_background_tasks_says_so(self):
+        sid = self.worker()
+        self.stopped(sid, NOW, tasks=1)
+        self.assertEqual(self.watch("--timeout", "5")[1],
+                         f"worker w-1 ended its turn with 1 background task still running (it "
+                         f"wakes when that ends): fairshare transcript {sid[:8]} --tail 1\n")
+        self.stopped(sid, NOW + 1, tasks=3)
+        self.assertIn("with 3 background tasks still running (it wakes when one ends)",
+                      self.watch("--timeout", "5")[1])
+
+    def test_a_turn_end_before_its_limit_stop_is_said_as_the_limit_stop_only(self):
+        sid = self.worker()
+        self.stopped(sid, NOW - 30)
+        store.note_session(SessionSeen(sid), "b", NOW, stranded=True)
+        self.assertEqual(self.watch("--timeout", "5")[1],
+                         f"worker w-1 was stopped by b's limit: fairshare pickup {sid}\n")
+        self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+        self.stopped(sid, NOW + 10)            # resumed later (at the reset) and ended a turn
+        self.assertIn("worker w-1 ended its turn", self.watch("--timeout", "5")[1])
+
+    def test_a_new_worker_not_listed_yet_is_not_ended(self):
+        self.worker(live=False, started=NOW - 10)
+        self.assertEqual(self.watch("--timeout", "45")[1], "nothing happened\n")
+        self.assertEqual(self.watch("--timeout", "30")[1], "worker w-1 ended\n")  # grace over
+
+    def test_a_checkpoint_copied_by_a_pickup_is_not_new(self):
+        sid = self.worker()
+        store.append_checkpoint(sid, "## t\nhalf\n")
+        self.watch("--timeout", "5")
+        store.link_session(sid, SessionSeen("s-new", str(self.here)), "a", NOW)
+        store.join_worker("w-1", "s-new")
+        with open(self.log / "live", "a") as f:
+            f.write("s-new\n")
+        with mock.patch.object(claude, "list_sessions",
+                               lambda acct: [claude.LiveSession("s-new", "w-1", True)]):
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+            path = store.append_checkpoint("s-new", "## t\nall\n")
+            self.assertEqual(self.watch("--timeout", "5")[1],
+                             f"worker w-1 wrote a checkpoint: {path}\n")
 
     def test_several_events_one_line_each(self):
         sid = self.worker()

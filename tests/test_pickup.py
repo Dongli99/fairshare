@@ -132,14 +132,15 @@ class Wiring(unittest.TestCase):
             '    "Stop": [{"hooks": [{"type": "command", "command": "~/stop.sh"}]}]\n  },\n'
             '  "theme": "dark"\n}\n')
 
-    def test_added_beside_the_users_own_stop_failure_hooks_keeping_every_other_byte(self):
+    def test_added_beside_the_users_own_stop_hooks_keeping_every_other_byte(self):
         new = claude.wire(self.MINE, "/bin/fairshare")
         self.assertEqual(new, self.MINE.replace(
             '"/bin/fairshare capture"}', '"/bin/fairshare capture", "refreshInterval": 60}'
         ).replace('"~/notify.sh"}]\n      }\n', '"~/notify.sh"}]\n      },\n      {"matcher": '
                   '"rate_limit", "hooks": [{"type": "command", "command": "/bin/fairshare hook '
                   'stop-failure"}]}\n').replace(
-            '"~/stop.sh"}]}]\n', '"~/stop.sh"}]}],\n    "PostToolUse": [{"matcher": "*", "hooks": '
+            '"~/stop.sh"}]}]\n', '"~/stop.sh"}]},{"hooks": [{"type": "command", "command": '
+            '"/bin/fairshare hook stop"}]}],\n    "PostToolUse": [{"matcher": "*", "hooks": '
             '[{"type": "command", "command": "/bin/fairshare hook post-tool"}]}],\n    '
             '"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "/bin/fairshare hook '
             'prompt"}]}]\n'))
@@ -198,13 +199,13 @@ class HookWiredInHub(Base):
         write(self.settings, json.dumps({"statusLine": {
             "type": "command", "command": f"{self.bin}/fairshare capture"}}))
         self.assertEqual(self.doctor_line(), "FAIL  claude: hooks in the hub (stop-failure, "
-                                             "post-tool, prompt) do not all call fairshare hook "
-                                             "(run `fairshare doctor --fix`)")
+                                             "post-tool, prompt, stop) do not all call fairshare "
+                                             "hook (run `fairshare doctor --fix`)")
         self.go("doctor", "--fix")
-        for name in ("stop-failure", "post-tool", "prompt"):
+        for name in ("stop-failure", "post-tool", "prompt", "stop"):
             self.assertIn(f'+            "command": "{self.bin}/fairshare hook {name}"', self.out)
         self.assertEqual(self.doctor_line(), "pass  claude: hooks in the hub (stop-failure, "
-                                             "post-tool, prompt) call fairshare hook")
+                                             "post-tool, prompt, stop) call fairshare hook")
         self.assertEqual(claude.hooked(self.settings.read_text()), (f"{self.bin}/fairshare",))
 
     def test_the_hook_command_says_nothing_and_exits_0_whatever_it_gets(self):

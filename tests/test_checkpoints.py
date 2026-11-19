@@ -66,6 +66,19 @@ class Checkpoints(Work):
         self.assertEqual(self.cp("--request", "all", session="lonely")[1],
                          "this session has no workers\n")
 
+    def test_all_skips_a_worker_watch_saw_end_but_a_named_one_is_asked(self):
+        store.note_session(SessionSeen(PARENT), "a", NOW)
+        store.update_session(PARENT, lambda r: cli.replace(r, reported={f"ended:{W2}": 1}))
+        self.assertEqual(self.cp("--request", "all"),
+                         (0, "skipped 1 worker that ended\n"
+                             "w-1 (session s-w-1): asked for a checkpoint\n", ""))
+        self.assertIsNone(store.session(W2).checkpoint_requested)
+        self.assertEqual(self.cp("--request", "w-2")[1],
+                         "w-2 (session s-w-2): asked for a checkpoint\n")
+        store.update_session(PARENT, lambda r: cli.replace(
+            r, reported={f"ended:{W1}": 1, f"ended:{W2}": 1}))
+        self.assertEqual(self.cp("--request", "all"), (0, "skipped 2 workers that ended\n", ""))
+
     def test_a_worker_not_joined_yet_is_not_asked(self):
         store.add_worker(Worker("new", PARENT, "b", str(self.here), NOW))
         with mock.patch.dict(os.environ, {"FAKE_NO_LIST": "1"}):

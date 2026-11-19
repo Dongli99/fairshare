@@ -824,10 +824,33 @@ def _speak(name: str, raw: object) -> str | None:
     return None
 
 
+def _turn_end(name: str, raw: object) -> None:
+    """`hook stop`: the session ended its turn. On a worker's record, stamp the time and the
+    background tasks it left running, for its main session's `watch`. Says nothing; a main
+    session's turn end costs a read of its record (and a listing only while a worker waits to be
+    joined, as in the prompt hook)."""
+    accounts, _, _ = _load()
+    if (acct := _session_account(accounts)) is None:
+        return
+    prov = providers.get(acct.provider)
+    if (seen := prov.hook_session(name, raw)) is None:
+        return
+    now = _now()
+    _continuation(seen, acct, now)
+    rec = store.session(seen.id)
+    if (rec is None or rec.role is None) and _join_pending(store.workers(), accounts, now):
+        rec = store.session(seen.id)
+    if rec and rec.role == ROLE_WORKER:
+        store.update_session(seen.id, lambda old: old and replace(
+            old, stopped=[now, prov.hook_background(raw)]))
+
+
 STOP_FAILURE, POST_TOOL_HOOK, PROMPT_HOOK = "stop-failure", "post-tool", "prompt"
+STOP_HOOK = "stop"
 HOOKS = {STOP_FAILURE: _stop_failure,   # fairshare's hook name -> handler(name, input): what to
          POST_TOOL_HOOK: _speak,        # print, or None
-         PROMPT_HOOK: _speak}
+         PROMPT_HOOK: _speak,
+         STOP_HOOK: _turn_end}
 
 
 def _say(text: str) -> None:
@@ -2240,13 +2263,21 @@ def _target_workers(target: str, here: str | None) -> list[Worker] | None:
 
 
 def _request_checkpoints(target: str, here: str | None) -> int:
-    """Ask each named worker for a checkpoint: its hooks pass it on at its next event."""
+    """Ask each named worker for a checkpoint: its hooks pass it on at its next event. `all`
+    skips the workers that `watch` saw end (a named one is still asked)."""
     found = _target_workers(target, here)
     if found is None:
         return 2
     if not found:
         print("this session has no workers")
         return 0
+    if target == "all" and (parent := store.session(store.latest(here))):
+        live = [w for w in found if not (w.session and parent.reported.get(f"ended:{w.session}"))]
+        if skipped := len(found) - len(live):
+            print(f"skipped {skipped} worker{'s' if skipped > 1 else ''} that ended")
+        if not live:
+            return 0
+        found = live
     accounts, now, left = _load()[0], _now(), 0
     joined = _join_pending(found, accounts, now)
     for w in found:
@@ -2302,8 +2333,10 @@ WATCH_LIST_S = 15.0    # seconds between listings of the running sessions (a sub
 def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tuning,
                  now: float) -> list[str]:
     """What concerns the session `here` in local state: a new crossing of its account, and per
-    worker a checkpoint written or a stop by its limit, since watch last said so. Said things
-    are marked on the session's record."""
+    worker a checkpoint written, a stop by its limit or a turn end, since watch last said so.
+    Said things are marked on the session's record. A checkpoint copied to a worker's new
+    session (a pickup) counts as said when the old session's was; a turn end clears the worker's
+    busy mark (`_watch_live`), and one older than its stop by its limit goes unsaid."""
     events = []
     _measure_still(store.workers(here), now)
     if acct and acct.plan and (c := _tell_crossing(here, acct, t, now)):
@@ -2315,7 +2348,8 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
         note = store.checkpoint_path(w.session)
         size = note.stat().st_size if note and note.is_file() else 0
         rec = store.session(w.session)
-        found.append((w, note, size, rec and rec.stranded_at, rec and rec.account))
+        found.append((w, note, size, rec and rec.stranded_at, rec and rec.account,
+                      rec and rec.stopped, rec and rec.continues))
     resets = {}
     for x in {f[4] for f in found if f[3]}:
         a = next((a for a in accounts if a.id == x), None)
@@ -2328,49 +2362,77 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
         if old is None:
             return None
         seen, said = dict(old.reported), []
-        for w, note, size, stranded, account in found:
-            if size > seen.get(f"checkpoint:{w.session}", 0):
-                seen[f"checkpoint:{w.session}"] = size
+        for w, note, size, stranded, account, stopped, before in found:
+            if size > seen.get(f"checkpoint:{w.session}",
+                               seen.get(f"checkpoint:{before}", 0) if before else 0):
                 said.append(f"worker {w.name} wrote a checkpoint: {note}")
+            if size:
+                seen[f"checkpoint:{w.session}"] = size
             if stranded and seen.get(f"stranded:{w.session}") != stranded:
                 seen[f"stranded:{w.session}"] = stranded
                 said.append(f"worker {w.name} was stopped by {account}'s limit: "
                             f"{resets.get(account, '')}fairshare pickup {w.session}")
+            if stopped and seen.get(f"stopped:{w.session}") != stopped[0]:
+                seen[f"stopped:{w.session}"] = stopped[0]
+                seen.pop(f"busy:{w.session}", None)
+                if not (stranded and stranded >= stopped[0]):
+                    said.append(f"worker {w.name} {_turn_end_text(stopped[1])}: "
+                                f"fairshare transcript {w.session[:8]} --tail 1")
         events.extend(said)
-        return replace(old, reported=seen) if said else None
+        return replace(old, reported=seen) if seen != old.reported else None
     store.update_session(here, change)
     return events
 
 
+def _turn_end_text(tasks: int) -> str:
+    """What a worker's turn end is called in `watch`, by the background tasks it left running."""
+    if not tasks:
+        return "ended its turn and is waiting"
+    return (f"ended its turn with {tasks} background task{'s' if tasks > 1 else ''} still running "
+            f"(it wakes when {'that' if tasks == 1 else 'one'} ends)")
+
+
+WORKER_GRACE_S = 60.0   # a worker missing from the listing this soon after its start is not
+                        # judged ended: a new background session may not be listed yet
+
+
 def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
-    """From the running sessions: each worker of `here` that ended (no longer listed) or went
-    idle after it was seen busy, once each; pending joins are retried first. A worker is looked
-    for in the listing of the account its session runs on, and only when that listing came."""
+    """From the running sessions: each worker of `here` that ended (no longer listed, once
+    WORKER_GRACE_S has passed since its start) or went idle after it was seen busy, once each;
+    pending joins are retried first. A worker is looked for in the listing of the account its
+    session runs on, and only when that listing came. Busy and idle are not read for a worker
+    whose turn ends its own hook stamps (`_watch_local` says those): the listing can say busy
+    for hours after a turn ended."""
     mine = store.workers(here)
     if not mine:
         return []
     joined = _join_pending(mine, accounts, now)
-    mine = [(w, (r.account if (r := store.session(w.session)) else w.account))
+    mine = [(w, store.session(w.session))
             for w in (replace(w, session=w.session or joined.get(w.name)) for w in mine)
             if w.session]
-    live = _listings({x for _, x in mine}, accounts)
+    mine = [(w, r.account if r else w.account, bool(r and r.stopped)) for w, r in mine]
+    live = _listings({x for _, x, _ in mine}, accounts)
     state = {x: {s.id: s.busy for s in ls} for x, ls in live.items() if ls is not None}
-    mine = [(w, state[x]) for w, x in mine if x in state]
+    mine = [(w, state[x], stamps) for w, x, stamps in mine if x in state]
     events, ended_now = [], []
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:
             return None
         seen, said = dict(old.reported), []
-        for w, state in mine:
+        for w, state, stamps in mine:
             ended, busy = f"ended:{w.session}", f"busy:{w.session}"
             if w.session not in state:
+                if now - w.started < WORKER_GRACE_S:
+                    continue
                 ended_now.append(w)
                 if not seen.get(ended):
                     seen[ended] = 1
                     said.append(f"worker {w.name} ended")
                 continue
             seen.pop(ended, None)
+            if stamps:
+                continue
             if state[w.session]:
                 seen[busy] = 1
             elif state[w.session] is False and seen.pop(busy, None):

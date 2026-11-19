@@ -37,7 +37,11 @@ class Provider(Protocol):
     def hook_session(self, hook: str, raw: object) -> SessionSeen | None:
         """For fairshare's hook named `hook` (`fairshare hook <name>`): the session its input
         `raw` describes, when the input is the event that hook is wired for; else None. None too
-        for a hook that speaks to the model when the input comes from inside a subagent."""
+        for a hook that speaks to the model, or the turn-end hook, when the input comes from
+        inside a subagent."""
+
+    def hook_background(self, raw: object) -> int:
+        """How many background tasks the turn-end hook's input `raw` lists as still running."""
 
     def hook_output(self, hook: str, text: str) -> str:
         """What fairshare's hook `hook` prints so that `text` reaches the model as context."""

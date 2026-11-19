@@ -26,6 +26,7 @@ launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► hold
                                     └──► stop child ──► fresh, no prompt (switch)
 PostToolUse / UserPromptSubmit ──► hook post-tool | prompt ──► snapshot + session record (local)
                                    ──► additionalContext: crossing warning or checkpoint request
+Stop ──► hook stop ──► a worker's record: stopped [time, background tasks] ──► watch says it
 worker ──► survey (model filter) ──► trust (copy) ──► claude --bg --name --model --effort ──► join
 status ──► survey ──► rows + each account's live sessions (spend in the last hour, share)
 watch (background command) ──► snapshot, records, checkpoints/ (5 s), agents (15 s) ──► exit
@@ -136,8 +137,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      every other byte; any older capture form is replaced and keeps what it wrapped). The same
      `wire` adds `refreshInterval` to the statusLine when it has none and fairshare's own hook,
      `<installed fairshare> hook stop-failure` under `hooks.StopFailure` with matcher
-     `rate_limit`, `hook post-tool` under `hooks.PostToolUse` with matcher `*` and `hook prompt`
-     under `hooks.UserPromptSubmit` (no matcher: that event takes none), each appended to its
+     `rate_limit`, `hook post-tool` under `hooks.PostToolUse` with matcher `*`, `hook prompt`
+     under `hooks.UserPromptSubmit` and `hook stop` under `hooks.Stop` (no matcher: those events
+     take none), each appended to its
      event's list (no other hook changed, moved or removed; recognised by its command, like the
      capture). setup, join and `doctor --fix` wire them all with one diff, and install
      fairshare's skill (decision 22) beside it. `capture`
@@ -342,8 +344,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     the reason; `usage probe off (usage_args = [])` passes), and its state file reads and, when
     it holds project entries, at least
     one uses the trust field (otherwise "trust field not found; Claude Code may have renamed
-    it"); the hub's one settings file still calls capture, and fairshare's three hooks
-    (stop-failure, post-tool, prompt; one line listing them) still call `fairshare hook`;
+    it"); the hub's one settings file still calls capture, and fairshare's four hooks
+    (stop-failure, post-tool, prompt, stop; one line listing them) still call `fairshare hook`
+    (an install from before the stop hook FAILs this line and keeps working as before: watch
+    then has only the listing's busy and idle; `doctor --fix` adds the one missing hook);
     fairshare's skill in the hub is current (missing, outdated, or another skill in its folder
     each FAIL); the `fairshare` command it calls
     exists and runs (`--help`; with no hook wired, the installed one). It reads settings and
@@ -675,7 +679,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       `## <local time>`, a newline and the text to `checkpoints/<session id>.md` in the state
       folder (locked, append-only) and clears the session's pending request; `--request
       SESSION|NAME|all` sets `checkpoint_requested` on the named workers' records (`all`: the
-      caller's workers; a worker not joined yet is joined first, or named as not asked);
+      caller's workers, less those watch saw end, with a count of the skipped; a worker not
+      joined yet is joined first, or named as not asked);
       `--show SESSION|NAME` prints a note. A handoff's fresh session reads the note first
       (decision 23); a pickup resumes the session itself, which knows its own state.
     - **Warnings** (`hook post-tool`, `hook prompt`): percent crossings, 90 then 95, once each
@@ -694,9 +699,26 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     - **`fairshare watch [--timeout SECONDS]`**, inside a session: local state every 5 s, the
       running sessions every 15 s; it exits 0 with one line per event: its account's crossing
       (the same marks as the hooks: whichever tells first), a worker's checkpoint note grown, a
-      worker stranded (`fairshare pickup <id>`), a worker ended or idle after busy;
-      `nothing happened` on timeout. What it said is kept on the caller's record (`reported`),
-      so a restarted watch does not repeat itself.
+      worker stranded (`fairshare pickup <id>`), a worker's turn end, a worker ended or idle
+      after busy; `nothing happened` on timeout. What it said is kept on the caller's record
+      (`reported`), so a restarted watch does not repeat itself. A checkpoint note a pickup
+      copied to a worker's new session counts as said when the old session's was. A worker
+      missing from the listing within 60 s of its start is not judged ended yet (a new
+      background session may not be listed yet; a grace period delays a true end by at most a
+      minute, where waiting to see it listed once would miss a worker that ends before that).
+    - **A worker's turn end** (`hook stop`, under Stop). The listing's busy and idle come from
+      Claude Code's own judgement of the session, which can say busy for hours after a turn
+      ended; the turn end itself comes from the worker's Stop hook. In a worker (by its record;
+      nothing for a subagent's input, nor a main session's, which costs a read of its record)
+      it stamps `stopped` = [time, background tasks still running] on the worker's record.
+      watch says each new stamp once (`worker <name> ended its turn and is waiting: fairshare
+      transcript <id8> --tail 1`), clears that worker's busy mark, and from then on reads no
+      busy or idle for it (its own stamps say its turn ends). A stamp older than the worker's
+      stop by its limit is said as that stop only. A worker that ends its turn with background
+      tasks still running is woken again when they end; the stamp counts them and the line says
+      so (`... with 2 background tasks still running (it wakes when one ends)`) instead of
+      staying silent: a task can run for hours or never end (a server, a monitor), and a missed
+      turn end costs far more than one extra event.
     - **The skill.** A Claude Code skill (`providers/claude_skill/SKILL.md`, package data; front
       matter `name: fairshare`, `description`) teaches main sessions all this. setup, join and
       `doctor --fix` install it as the hub's shared `skills/fairshare/` with its diff shown,
@@ -971,7 +993,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   the session's own process (the launcher ignores a request carrying another pid); the
   PostToolUse/UserPromptSubmit context reaching a real session; `fairshare worker` starting and
   joining; `fairshare watch` waking a main session as a background command; the skill loading;
-  the first prompt of a `--bg` session firing UserPromptSubmit.
+  the first prompt of a `--bg` session firing UserPromptSubmit; Stop firing in a `--bg` session
+  (read in the binary, not run: a throwaway HOME has no sign-in to run a turn with).
 - A worker's join depends on `claude agents --json` listing the session by the name given
   with `--name`, within 10 s (seen within 4 s) or later at a retry; its top-level shape was not
   recorded (a list, or an object holding one list, is accepted). Until joined, a worker hears no
@@ -1108,6 +1131,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | statusLine `refreshInterval` (seconds, minimum 1, on the statusLine object) | `STATUS_REFRESH_KEY`, `STATUS_REFRESH_S`, `wire` | the bar redraws on events only | documented: /statusline, read 2026-11-11; whether a re-run carries fresh `rate_limits` is unverified (fairshare assumes the last payload) |
 | StopFailure hook: `hooks.StopFailure[{matcher: "rate_limit", hooks: [{type: "command", command}]}]`; input field `error` (`rate_limit`, `overloaded`, `authentication_failed`, ... `unknown`); output and exit code ignored | `HOOKS_KEY`, `HOOK_MATCHER_KEY`, `HOOK_LIST_KEY`, `STOP_FAILURE`, `RATE_LIMIT`, `HOOK_ERROR`, `FAIRSHARE_HOOKS`, `hook_of`, `hooked`, `hook_session` | no automatic pickup and no bar mark; `doctor` fails the hook line; `! fairshare pickup` still works | documented: /hooks, read 2026-11-11 (StopFailure input: `error`, optional `error_details`, `last_assistant_message`); hook table: 2.1.322. The wired entry passes the settings validator on 2.1.322, 2026-11-11 (`claude doctor`, throwaway folder and HOME under `env -i`, no login: no "Invalid settings"; a control with a numeric matcher was reported). Firing on a real limit: not yet checked live |
 | PostToolUse (`matcher: "*"`: every tool) and UserPromptSubmit (no matcher support) hooks; their JSON answer `{"hookSpecificOutput": {"hookEventName": <event>, "additionalContext": <text>}}` is added to the model's context | `POST_TOOL`, `ALL_TOOLS`, `PROMPT`, `HOOK_OUTPUT`, `HOOK_EVENT_NAME`, `HOOK_CONTEXT`, `CONTEXT_EVENTS`, `FAIRSHARE_HOOKS`, `hook_output` | no warnings or checkpoint requests reach sessions (watch still reports); `doctor` fails the hooks line | documented: code.claude.com/docs/en/hooks, read 2026-11-11 (no version on the page). The wired entries pass the settings validator on 2.1.322, 2026-11-11 (`claude doctor`, throwaway folder and HOME under `env -i`, no login: no "Invalid settings"; a control with a numeric PostToolUse matcher was reported). Context reaching a real session: not yet checked live |
+| Stop hook (no matcher): fires when the main agent ends a turn (a subagent's end fires SubagentStop, with `agent_id`; an API error fires StopFailure instead); input adds `stop_hook_active`, `last_assistant_message`, `background_tasks` (tasks running or pending in the background: `id`, `type`, `status`, `description`, ...) and `session_crons` | `STOP`, `HOOK_AGENT`, `HOOK_BACKGROUND`, `MAIN_EVENTS`, `FAIRSHARE_HOOKS`, `hook_session`, `hook_background` | watch falls back to the listing's busy and idle (which can say busy for hours after a turn ended); a changed `background_tasks` reads as none, so the line drops its count; `doctor` fails the hooks line when the entry is missing | the binary, 2.1.327, 2026-11-18: the code that builds the input (Stop, SubagentStop with `agent_id`, the same base fields as every hook), the task list filter (running or pending, not a foreground task), and its callers (every turn end: a model's end of turn, a turn ended by a tool result or a loop tick; no gate on a background session, only on hooks switched off and on cache-warming and comparison queries). Not run live: a throwaway HOME has no sign-in to run a turn with |
 | `agent_id` (and `agent_type`) in every hook's input when it fires in a subagent, a teammate, or a session started with `--agent` | `HOOK_AGENT`, `hook_session` | warnings and requests would reach subagents too | documented: /hooks ("Common input fields"), read 2026-11-11 |
 | Inside a session: `CLAUDE_CODE_SESSION_ID` (full id), `CLAUDE_PID` (the session's process) | `SESSION_ID_ENV`, `SESSION_PID_ENV`, `current_session`, `session_pid` | `pickup` with no SESSION says "not inside a session"; a request carries no pid (accepted) | tool shells: 2.1.322, 2026-11-11; `!` and hooks: not yet checked live |
 | `--bg --name <name> <prompt>` (a session with no terminal, which prints how to attach; no prompt: an idle session), `--resume <id>`; `--bg` passes no environment but the folder variable | `BG_ARGS`, `NAME_ARGS`, `RESUME_ARGS`, `background`, `resume_args` | background pickup and `worker` fail with the tool's own message; the countdown's cancel hint is wrong | 2.1.322, 2026-11-11 (a marker variable set for `claude --bg --name X` was absent from the session; only `CLAUDE_CONFIG_DIR` arrived; the process comes from the tool's own pool) |

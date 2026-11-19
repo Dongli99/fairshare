@@ -61,20 +61,22 @@ SECRETS = ("s3cr3t-value", "mcp-secret-value", "example.invalid", "org-", "Examp
 
 
 def own_hooks(runner: str) -> dict:
-    """fairshare's three hooks as `wire` writes them, running `runner`."""
+    """fairshare's four hooks as `wire` writes them, running `runner`."""
     return {"StopFailure": [{"matcher": "rate_limit", "hooks": [
                 {"type": "command", "command": f"{runner} hook stop-failure"}]}],
             "PostToolUse": [{"matcher": "*", "hooks": [
                 {"type": "command", "command": f"{runner} hook post-tool"}]}],
             "UserPromptSubmit": [{"hooks": [
-                {"type": "command", "command": f"{runner} hook prompt"}]}]}
+                {"type": "command", "command": f"{runner} hook prompt"}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": f"{runner} hook stop"}]}]}
 
 
 OWN_HOOKS_TEXT = ('{"StopFailure": [{"matcher": "rate_limit", "hooks": [{"type": "command", '
                   '"command": "{r} hook stop-failure"}]}], "PostToolUse": [{"matcher": "*", '
                   '"hooks": [{"type": "command", "command": "{r} hook post-tool"}]}], '
                   '"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "{r} hook '
-                  'prompt"}]}]}')
+                  'prompt"}]}], "Stop": [{"hooks": [{"type": "command", "command": "{r} hook '
+                  'stop"}]}]}')
 
 
 def write(p: Path, text: str) -> Path:

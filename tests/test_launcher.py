@@ -227,7 +227,8 @@ class Doctor(Fleet):
             "pass  b: usage probe answers (five_hour, seven_day, 1 model week), local command",
             "pass  b: no state file yet",
             "pass  claude: usage hook in the hub calls fairshare capture",
-            "pass  claude: hooks in the hub (stop-failure, post-tool, prompt) call fairshare hook",
+            "pass  claude: hooks in the hub (stop-failure, post-tool, prompt, stop) call "
+            "fairshare hook",
             "pass  claude: skill in the hub is current",
             "pass  fairshare command (called by the claude usage hook) runs"])
 

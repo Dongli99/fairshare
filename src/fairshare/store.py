@@ -243,6 +243,13 @@ def _limits(v: object) -> dict:
     return {k: float(x) for k, x in v.items()}
 
 
+def _stopped(v: object) -> list:
+    """A turn end as stored ([time, background tasks]); [] for anything that is not one."""
+    if not isinstance(v, list) or len(v) != 2 or _num(v[0]) is None or _num(v[1]) is None:
+        return []
+    return [float(v[0]), int(v[1])]
+
+
 def _read_session(path: Path) -> SessionRecord | None:
     try:
         d = json.loads(path.read_text())
@@ -257,7 +264,7 @@ def _read_session(path: Path) -> SessionRecord | None:
                              _text(d.get("effort")), _num(d.get("waiting_until")),
                              _costs(d.get("costs")), _text(d.get("continues")),
                              _text(d.get("moved_to")), _drawn(d.get("drawn")),
-                             _limits(d.get("limits")))
+                             _limits(d.get("limits")), _stopped(d.get("stopped")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 

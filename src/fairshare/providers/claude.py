@@ -182,14 +182,20 @@ REMOTE_CONTROL_KEY = "remoteControlAtStartup"
 # UserPromptSubmit (no matcher support: one would be ignored) take a JSON answer whose
 # `hookSpecificOutput.additionalContext` is added to the model's context (documented: /hooks,
 # read 2026-11-11). Every hook's input names a subagent or teammate it fired in by `agent_id`.
+# Stop fires when the main agent ends a turn (a subagent's end fires SubagentStop instead, with
+# `agent_id`); nothing in its caller depends on the session running in the background or in a
+# terminal; it takes no matcher. Its input adds `background_tasks`: the session's tasks still
+# running or pending in the background (shells, monitors, subagents, ...). Read in the binary,
+# 2.1.327, 2026-11-18.
 HOOKS_KEY, HOOK_MATCHER_KEY, HOOK_LIST_KEY = "hooks", "matcher", "hooks"
-STOP_FAILURE, RATE_LIMIT = "StopFailure", "rate_limit"
+STOP, STOP_FAILURE, RATE_LIMIT = "Stop", "StopFailure", "rate_limit"
 POST_TOOL, ALL_TOOLS, PROMPT = "PostToolUse", "*", "UserPromptSubmit"
-HOOK_ERROR, HOOK_AGENT = "error", "agent_id"
+HOOK_ERROR, HOOK_AGENT, HOOK_BACKGROUND = "error", "agent_id", "background_tasks"
 HOOK_OUTPUT, HOOK_EVENT_NAME, HOOK_CONTEXT = "hookSpecificOutput", "hookEventName", "additionalContext"
 FAIRSHARE_HOOKS = {"stop-failure": (STOP_FAILURE, RATE_LIMIT), "post-tool": (POST_TOOL, ALL_TOOLS),
-                   "prompt": (PROMPT, None)}
+                   "prompt": (PROMPT, None), "stop": (STOP, None)}
 CONTEXT_EVENTS = (POST_TOOL, PROMPT)  # the events whose hooks may speak to the model
+MAIN_EVENTS = (*CONTEXT_EVENTS, STOP)  # the events whose hooks ignore an input from a subagent
 
 # fairshare's skill, which teaches main sessions to use workers, watch and checkpoints: a folder
 # holding SKILL.md, whose front matter (between `---` lines) gives `name` and `description`
@@ -470,17 +476,24 @@ def transcript_text(path: Path) -> list[tuple[str, str]] | None:
 def hook_session(hook: str, raw: object) -> SessionSeen | None:
     """For fairshare's hook `hook`: the session its input describes, when the input is the event
     fairshare wired it for (an input naming another error is not); else None. A hook that
-    speaks to the model gets None for an input from inside a subagent: the main session
-    decides."""
+    speaks to the model, and the turn-end hook, get None for an input from inside a subagent:
+    the main session decides, and its turn is the one that counts."""
     if hook not in FAIRSHARE_HOOKS or not isinstance(raw, dict):
         return None
     event, matcher = FAIRSHARE_HOOKS[hook]
-    if event in CONTEXT_EVENTS:
+    if event in MAIN_EVENTS:
         if raw.get(HOOK_AGENT) is not None:
             return None
     elif (error := raw.get(HOOK_ERROR)) is not None and error != matcher:
         return None
     return _session(raw)
+
+
+def hook_background(raw: object) -> int:
+    """How many background tasks a turn-end hook's input lists as still running (0 when it lists
+    none, or has no such list)."""
+    tasks = raw.get(HOOK_BACKGROUND) if isinstance(raw, dict) else None
+    return len(tasks) if isinstance(tasks, list) else 0
 
 
 def hook_output(hook: str, text: str) -> str:
