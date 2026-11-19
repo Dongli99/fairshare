@@ -837,11 +837,43 @@ def _ask_checkpoint(session_id: str) -> bool:
     return bool(got)
 
 
+def _tell_parent(session_id: str, accounts: list[Account]) -> str | None:
+    """For a worker whose main session continued under a new id (`store.link_session`
+    re-parents it) since it was last told: the line that says so, once, marked in the same
+    locked step. The new id's name (the provider's list, by which its messages are addressed)
+    when listed; the id alone otherwise."""
+    got: list[SessionRecord] = []
+
+    def change(old: SessionRecord | None) -> SessionRecord | None:
+        if (old is None or old.role != ROLE_WORKER or not old.parent or not old.parent_said
+                or old.parent == old.parent_said):
+            return None
+        got.append(old)
+        return replace(old, parent_said=old.parent)
+    store.update_session(session_id, change)
+    if not got:
+        return None
+    new, was = got[0].parent, got[0].parent_said
+    name = None
+    try:
+        main = store.session(new)
+        acct = next((a for a in accounts if main and a.id == main.account), None)
+        if acct:
+            name = next((x.name for x in providers.get(acct.provider).list_sessions(acct) or []
+                         if x.id == new), None)
+    except Exception:       # the notice is said, with the id alone
+        name = None
+    return (f"fairshare: your main session is now {new}" + (f" ({name})" if name else "")
+            + f": it continued {was}. Reach it there.")
+
+
 def _speak(name: str, raw: object) -> str | None:
     """`hook post-tool` and `hook prompt`: what to put in the session's context, as the
-    provider's hook answer, or None. Silent inside a subagent. A worker with a pending request
-    hears it; otherwise a new crossing of its account is said for the session's role. Reads only
-    local files, except that the prompt hook looks pending workers up by name."""
+    provider's hook answer, or None. Silent inside a subagent. A worker hears its main
+    session's new id (once, after a continuation under one) and a pending request; otherwise a
+    new crossing of its account is said for the session's role. Reads only local files, except
+    that the prompt hook looks pending workers up by name and a worker's notice of a new main
+    session looks that session's name up."""
     accounts, tuning, _ = _load()
     if (acct := _session_account(accounts)) is None or acct.plan is None:
         return None
@@ -859,8 +891,10 @@ def _speak(name: str, raw: object) -> str | None:
         return None
     if name == PROMPT_HOOK and rec.role != ROLE_WORKER:
         _measure_still(store.workers(rec.id), now)
-    if _ask_checkpoint(rec.id):
-        return prov.hook_output(name, CHECKPOINT_ASK)
+    said = [x for x in (_tell_parent(rec.id, accounts),
+                        _ask_checkpoint(rec.id) and CHECKPOINT_ASK) if x]
+    if said:
+        return prov.hook_output(name, "\n".join(said))
     if crossing := _tell_crossing(rec.id, acct, tuning, now):
         return prov.hook_output(name, _warning_text(rec, acct, crossing, accounts, tuning, now))
     return None
@@ -2218,7 +2252,7 @@ def _joined(w: Worker, session_id: str, now: float) -> None:
     store.join_worker(w.name, session_id)
     store.update_session(session_id, lambda old: replace(
         old or SessionRecord(session_id, w.account, w.cwd, None, now),
-        role=ROLE_WORKER, parent=w.parent))
+        role=ROLE_WORKER, parent=w.parent, parent_said=w.parent))
 
 
 def _listings(account_ids: set[str], accounts: list[Account]) -> dict[str, list | None]:

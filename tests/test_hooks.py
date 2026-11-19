@@ -190,6 +190,74 @@ class Speaking(Work):
         listed.assert_not_called()
 
 
+class NewParent(Speaking):
+    """A worker hears, once, that its main session continued under a new id."""
+    NEW = "9f8e7d6c-0000-4000-8000-00000000000b"
+
+    def handed_off(self, copy=False):
+        store.note_session(SessionSeen(PARENT), "a", NOW)
+        store.link_session(PARENT, SessionSeen(self.NEW), "b", NOW, copy=copy)
+
+    def notice(self, name=None):
+        return (f"fairshare: your main session is now {self.NEW}"
+                + (f" ({name})" if name else "") + f": it continued {PARENT}. Reach it there.")
+
+    def test_a_handoff_is_said_once_with_the_name(self):
+        self.worker()
+        self.assertIsNone(self.said())                           # told its parent at start
+        self.handed_off()
+        listed = [claude.LiveSession("other", "x", False), claude.LiveSession(self.NEW, "x-h2", True)]
+        seen = []
+        with mock.patch.object(claude, "list_sessions",
+                               lambda acct: seen.append(acct.id) or listed):
+            self.assertEqual(self.said(), self.notice("x-h2"))
+            self.assertIsNone(self.said())
+            self.assertIsNone(self.said("prompt"))
+        self.assertEqual(seen, ["b"])                            # the new parent's account, once
+        self.assertEqual(store.session(SID).parent_said, self.NEW)
+
+    def test_unlisted_or_failing_listing_says_the_id(self):
+        for listing in (lambda acct: [], lambda acct: None, mock.Mock(side_effect=OSError("x"))):
+            with self.subTest(listing=listing):
+                self.reset()
+                self.worker()
+                self.handed_off()
+                with mock.patch.object(claude, "list_sessions", listing):
+                    self.assertEqual(self.said(), self.notice())
+
+    def reset(self):
+        for p in (store.state_dir() / "sessions").glob("*.json"):
+            p.unlink()
+        for p in (store.state_dir() / "workers").glob("*.json"):
+            p.unlink()
+
+    def test_a_copy_or_a_same_id_pickup_says_nothing(self):
+        self.worker()
+        self.handed_off(copy=True)                               # the old one may still run
+        store.move_session(PARENT, "b")                          # same id, another account
+        with mock.patch.object(claude, "list_sessions") as listed:
+            self.assertIsNone(self.said())
+        listed.assert_not_called()
+
+    def test_an_old_record_without_the_field_says_nothing_until_reparented(self):
+        self.worker()
+        path = store.state_dir() / "sessions" / f"{SID}.json"
+        d = json.loads(path.read_text())
+        del d["parent_said"]
+        path.write_text(json.dumps(d))
+        self.assertIsNone(self.said())
+        self.handed_off()
+        with mock.patch.object(claude, "list_sessions", lambda acct: None):
+            self.assertEqual(self.said(), self.notice())
+
+    def test_a_request_and_the_notice_together(self):
+        self.worker(requested=NOW)
+        self.handed_off()
+        with mock.patch.object(claude, "list_sessions", lambda acct: None):
+            self.assertEqual(self.said(), self.notice() + "\n" + cli.CHECKPOINT_ASK)
+            self.assertIsNone(self.said())
+
+
 class TurnEnd(Speaking):
     """`hook stop`: a worker's turn end, stamped on its record for `watch`."""
 

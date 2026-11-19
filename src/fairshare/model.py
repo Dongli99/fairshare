@@ -140,6 +140,8 @@ class SessionRecord:
                                                 # there before that reset (`cli._held`)
     stopped: list = field(default_factory=list)  # a worker's last turn end, as its Stop hook saw
                                                  # it: [time, background tasks still running]
+    parent_said: str | None = None    # the main session a worker was last told (cli._tell_parent);
+                                      # read as `parent` when not stored
 
 
 ROLE_WORKER = "worker"

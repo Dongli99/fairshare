@@ -319,7 +319,8 @@ def _read_session(path: Path) -> SessionRecord | None:
                              _text(d.get("effort")), _num(d.get("waiting_until")),
                              _costs(d.get("costs")), _text(d.get("continues")),
                              _text(d.get("moved_to")), _drawn(d.get("drawn")),
-                             _limits(d.get("limits")), _stopped(d.get("stopped")))
+                             _limits(d.get("limits")), _stopped(d.get("stopped")),
+                             _text(d.get("parent_said")) or _text(d.get("parent")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 

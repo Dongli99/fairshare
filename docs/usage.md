@@ -339,6 +339,12 @@ run the commands yourself, from inside a session:
   reads it first. `fairshare checkpoint --request <worker name | session | all>` asks workers for
   one (each hears it at its next step; `all` skips the workers watch saw end); `--show <worker or
   session>` prints a note.
+- When the main session hands off, or is picked up under a new id, its workers follow it (watch
+  and `checkpoint --request` reach them from the new session) and each worker hears it once at
+  its next step: `fairshare: your main session is now <new id> (<its name>): it continued <old
+  id>. Reach it there.` The name is the one Claude Code lists the new session under (messages
+  between sessions go by name); without one, the id alone. A pickup under the same id says
+  nothing.
 - A worker stopped by its limit: wait for its reset, or `fairshare pickup <its session id>`
   resumes it on the best account, in the background, under its own name, with its model and
   effort. To move the main session itself: `fairshare pickup` (the same session) or `fairshare

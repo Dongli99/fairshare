@@ -841,7 +841,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
         own payload names wins), the new account, its first folder and transcript, a cost
         series of its own and `continues=<old id>`; the old record keeps its account and costs, gets
         `moved_to=<new id>` and is no longer stranded or waiting; workers whose parent is the
-        old id (worker records and their sessions' records) name the new one; the old
+        old id (worker records and their sessions' records) name the new one, and each such
+        worker is told at its next step (below); the old
         checkpoint note is copied (never moved) when the new id has none. An old record already
         moved, or missing, is not linked (a nested session under the same launcher never takes
         the place). Never raises. The background copy (`_copied`) uses the same function. A
@@ -849,6 +850,17 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
         pickup, whose value ends in `:copy`) is linked with `copy=True`: the new record is
         written the same way, and the old one, its workers and its line in `status` are left as
         they are (no `moved_to`).
+      - **Telling a worker.** A worker learns its parent once, in its first prompt; its session
+        record keeps the parent it was last told (`parent_said`, set when it joins; a record
+        without it reads as told its current parent, so a worker recorded before the field
+        hears nothing spurious). When re-parenting leaves `parent != parent_said`, the worker's
+        next prompt or post-tool hook (`_tell_parent`, in the same path that passes a checkpoint
+        request, both said when both are pending) adds `Your main session is now <new id>
+        (<name>): it continued <old id>. Reach it there.` and sets `parent_said`, under the
+        sessions' lock, so it is said once. The name comes from the provider's session list
+        through the new parent's account, asked only when the notice fires: Claude Code
+        addresses messages between sessions by name, and a handoff renames the fresh session
+        (`-h2`). A listing that fails or lacks it leaves the id alone; it never fails the hook.
       - **Readers.** `status` does not list a record with `moved_to` (its spend still counts for
         its own account). `watch`, worker targeting (`checkpoint --request`), `pickup <prefix>`
         and `transcript` take a session at the end of its chain (`store.latest`: `moved_to`
