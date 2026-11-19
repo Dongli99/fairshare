@@ -31,6 +31,10 @@ web = "claude.ai"                    # where a subscription signs in and out in 
 default_plan = "claude-pro"
 # what setup offers to turn on in every session, for its question
 remote_control = "Remote Control (follow and steer sessions from claude.ai/code or the Claude app)"
+# how a full reset claude.ai granted is used, for messages: it refills the 5-hour and the weekly
+# limit now and keeps the weekly reset day (claude.ai, seen by the owner, 2026-11; fairshare
+# cannot read held resets: the tool gets them from an internal service, not documented)
+full_reset = "`/limit-reset` in a session on that account, or claude.ai's usage page"
 
 # The command-line tool.
 BINARY = "claude"

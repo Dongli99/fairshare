@@ -94,6 +94,50 @@ def preference(now: float) -> tuple[str, float] | None:
     return None
 
 
+def _full_resets_file() -> Path:
+    return state_dir() / "full-reset.json"
+
+
+def full_resets() -> dict[str, tuple[float, float | None]]:
+    """The planned full resets, by account id: (the account's weekly reset when it was planned,
+    when the reset was seen used or None). An entry that does not read is left out."""
+    try:
+        d = json.loads(_full_resets_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: (week, _num(v.get("used_at"))) for k, v in d.items()
+            if isinstance(v, dict) and (week := _num(v.get("week_resets_at"))) is not None} \
+        if isinstance(d, dict) else {}
+
+
+def active_full_resets(now: float) -> dict[str, float]:
+    """The accounts whose planned full reset is still to be used this week, with their weekly
+    reset: not seen used and that week not over. A plan never carries into the next week."""
+    return {k: week for k, (week, used) in full_resets().items() if used is None and now < week}
+
+
+def _change_full_resets(change) -> None:
+    """Apply `change` (the plans as stored -> the plans to store) under the file's lock and
+    write the result atomically."""
+    path = _full_resets_file()
+    with locked(path.with_name(path.name + ".lock")):
+        plans = change({k: {"week_resets_at": week, "used_at": used}
+                        for k, (week, used) in full_resets().items()})
+        _write_json(state_dir(), path.name, plans)
+
+
+def plan_full_reset(account_id: str, week_resets_at: float) -> None:
+    """Plan a full reset on the account this week, replacing any plan it had."""
+    _change_full_resets(lambda d: {**d, account_id: {"week_resets_at": week_resets_at,
+                                                     "used_at": None}})
+
+
+def drop_full_reset(account_id: str | None = None) -> None:
+    """Drop the account's planned full reset (every account's with None)."""
+    _change_full_resets(lambda d: {k: v for k, v in d.items()
+                                   if account_id is not None and k != account_id})
+
+
 SAME_WINDOW_S = 3600   # resets this close together belong to the same window
 PROBE_ROUNDING = 1.0   # the probe's text gives whole percents: a fall this small is rounding
 
@@ -129,13 +173,24 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
            probe: bool = False) -> Snapshot:
     """Merge `fresh` into the stored snapshot and save it, holding the account's lock, so two
     captures arriving together cannot both read the old snapshot and the last one win. `probe`:
-    the windows came from the provider's own usage probe (see `merge`)."""
+    the windows came from the provider's own usage probe (see `merge`). An active planned full
+    reset of the account is marked used, in the same locked step, when a running window fell
+    (only the probe's credited-back path lowers one) or its reset moved: within a window usage
+    only rises and a full reset keeps the reset times. A small credit-back taken for the reset
+    only ends the planned bonus early."""
     dest = state_dir() / "snapshots"
     dest.mkdir(parents=True, exist_ok=True)
     with open(dest / f"{account_id}.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        snap = merge(load(account_id), fresh, now, probe)
+        old = load(account_id)
+        snap = merge(old, fresh, now, probe)
         save(account_id, snap)
+        if old and account_id in active_full_resets(now) and any(
+                (w := snap.windows.get(k)) and (w.used_pct < was.used_pct
+                                                or abs(w.resets_at - was.resets_at) > SAME_WINDOW_S)
+                for k, was in old.windows.items() if was.resets_at > now):
+            _change_full_resets(lambda d: {**d, account_id: {**d[account_id], "used_at": now}}
+                                if account_id in d else d)
     return snap
 
 

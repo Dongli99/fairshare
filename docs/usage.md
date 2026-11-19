@@ -163,6 +163,31 @@ shows `as of 14:05` until they arrive. The bar redraws once a minute (`refreshIn
 the hub's statusLine when it has none). It also shows a per-model weekly limit once it is nearly
 used up (`Fable 96% (Thu 03:00)`).
 
+## A full reset this week
+
+claude.ai sometimes grants an account a full reset, with a date to use it by. Using it
+(`/limit-reset` in a session on that account, or claude.ai's usage page) refills the 5-hour and
+the weekly limit now; the weekly reset day stays the same. Claude Code does not tell fairshare
+which resets an account holds, so you tell it: pick a busy week and plan the reset.
+
+`fairshare full-reset ID` plans it for this week: the account then ranks as if its week had 100%
+more room (`status` shows `+100% planned` on its row and when the plan ends). A spent week still
+takes no work until the reset is used. `fairshare full-reset` shows the plans,
+`fairshare full-reset ID --cancel` drops one (`--cancel` alone drops them all); planning again
+replaces it. An account whose current week fairshare has not seen yet cannot be planned
+(`fairshare status` asks for its usage).
+
+The status bar marks the week: `7d 20% +reset`, and `7d 92% (Sun 10:00) use reset` once the week
+is at 90% or more. A warning to a main session on that account also says the reset is planned,
+so the agent tells you to use it now.
+
+The plan ends when fairshare sees the reset used: a usage probe that finds the 5-hour or the
+weekly window lower than before under the same reset (the status bar's own lower numbers are
+taken for a stale redraw, so the next probe, within `refresh_minutes`, is what notices), or a
+window's reset time moving. It also ends at the regular weekly reset, used or not: a plan never
+carries into the next week. Usage the provider credits back for another reason ends it too,
+early; the account then simply ranks on its real numbers.
+
 ## When an account runs out
 
 Several sessions on one account share its limit, and the last few percent can go in minutes, so
@@ -484,7 +509,7 @@ from the model.
 |---|---|
 | 0 | done; for `run`, the session's own exit code is passed through |
 | 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check |
-| 2 | a usage error: an unknown command or account id, `setup` or `join` without a terminal |
+| 2 | a usage error: an unknown command or account id, `setup` or `join` without a terminal, `full-reset` on an account whose current week is not known |
 | 75 | no account can take work and there is no terminal to ask (or you chose not to wait) |
 | 126, 127 | Claude Code could not be started (126) or was not found (127) |
 | 128 + N | the session died of signal N |

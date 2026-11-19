@@ -24,6 +24,8 @@ class Provider(Protocol):
     resumes_at_reset: bool   # the tool resumes a session its limit stopped once the limit resets
     remote_control: str | None   # what setup offers to turn on in every session (a name and
                                  # what it does, for its question); None: the tool has nothing
+    full_reset: str | None   # how users use a full reset the provider granted an account (both
+                             # its limits refilled now), for messages; None: it grants none
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.

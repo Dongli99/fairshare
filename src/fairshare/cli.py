@@ -1,5 +1,5 @@
-"""fairshare CLI: status | capture | run (the default) | prefer | pickup | handoff | transcript |
-trust | worker | checkpoint | watch | setup | join | leave | uninstall | doctor."""
+"""fairshare CLI: status | capture | run (the default) | prefer | full-reset | pickup | handoff |
+transcript | trust | worker | checkpoint | watch | setup | join | leave | uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -186,11 +186,27 @@ def _survey() -> Survey:
             ranked.append(a)
         else:
             twins.append((a, seen[key].id))
-    verdicts = spread(rank(ranked, snaps, now, tuning), _running(store.sessions(), now),
-                      CLOSE_SCORE)
+    verdicts = spread(rank(ranked, snaps, now, tuning, extra=_planned(now)),
+                      _running(store.sessions(), now), CLOSE_SCORE)
     if pref := store.preference(now):
         verdicts = prefer(verdicts, pref[0])
     return Survey(verdicts, out, twins, notes, failed, snaps, tuning, now, pref, usage, expires)
+
+
+FULL_RESET_PCT = 100.0   # of the week, refilled by a planned full reset (decision 29)
+
+
+def _planned(now: float) -> dict[str, float]:
+    """The planned refills of the accounts' weeks, for `rank`: each active full reset."""
+    return dict.fromkeys(store.active_full_resets(now), FULL_RESET_PCT)
+
+
+def _plan_note(acct_id: str, plans: dict[str, float], now: float) -> list[str]:
+    """status's line for an account's active full reset, if it has one."""
+    if acct_id not in plans:
+        return []
+    return [f"full reset planned: +{FULL_RESET_PCT:.0f}% until it is used or the week resets "
+            f"({_clock(plans[acct_id], now)}); `fairshare full-reset {acct_id} --cancel` drops it"]
 
 
 def _in(h: float | None) -> str:
@@ -354,6 +370,7 @@ def cmd_status(_a) -> int:
         print(_preference_note(s))
     probes, expiring = _probe_lines(s), _expiry_lines(s.expires, s.now)
     recs, top = store.sessions(), _top(s.verdicts) if s.verdicts else None
+    plans = store.active_full_resets(s.now)
     for i, v in enumerate(s.verdicts):
         mark, aid = (">" if v is top else " "), v.account.id
         flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
@@ -361,18 +378,21 @@ def cmd_status(_a) -> int:
             flag = f"  [preferred until {_clock(s.preference[1], s.now)}]"
         print(f"{mark} {aid:<12} {v.account.plan.name:<14} score {v.score:6.2f}  "
               f"{v.reason}{_age(s, aid)}{flag}")
-        for note in [*s.notes.get(aid, []), *([probes[aid]] if aid in probes else []),
+        for note in [*s.notes.get(aid, []), *_plan_note(aid, plans, s.now),
+                     *([probes[aid]] if aid in probes else []),
                      *_spent_models(aid, s.snaps.get(aid), s.tuning, s.now),
                      *([expiring[aid]] if aid in expiring else []),
                      *_sessions_block(aid, recs, s.now)]:
             print(f"    {note}")
     for a, why in s.out:
         print(f"  {a.id:<12} {a.plan.name if a.plan else '-':<14} left out: {why}")
-        for note in [*s.notes.get(a.id, []), *_sessions_block(a.id, recs, s.now)]:
+        for note in [*s.notes.get(a.id, []), *_plan_note(a.id, plans, s.now),
+                     *_sessions_block(a.id, recs, s.now)]:
             print(f"    {note}")
     for a, rep in s.twins:
         print(f"  {a.id:<12} {a.plan.name:<14} same login as {rep}")
-        for note in [*([expiring[a.id]] if a.id in expiring else []),
+        for note in [*_plan_note(a.id, plans, s.now),
+                     *([expiring[a.id]] if a.id in expiring else []),
                      *_sessions_block(a.id, recs, s.now)]:
             print(f"    {note}")
     return 0
@@ -416,9 +436,11 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
     keeps its shape. A per-model week shows only once hot, named by its model (`Fable 96%`). A
     session's first redraws carry no usage yet, so the saved snapshot stands in, marked with
     when it was taken; so are numbers older than `refresh_minutes` (an idle session redraws
-    them unchanged)."""
+    them unchanged). A week with a planned full reset still to use says so: `+reset`, or `use
+    reset` once at the first warning level."""
     p = acct.plan
     hours = {p.short_name: p.short_hours, p.long_name: p.long_hours} if p else {}
+    planned = p and acct.id in store.active_full_resets(now)
     known = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > now}
     names = [k for k in hours if k] + [k for k in known if k not in hours and (
         not window_model(k) or known[k].used_pct >= t.short_hot_pct)]
@@ -430,9 +452,13 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
             parts.append(f"{label} -")
             continue
         text = f"{label} {w.used_pct:.0f}%"
+        mark = planned and k == p.long_name and (
+            " use reset" if w.used_pct >= WARN_LEVELS[0] else " +reset")
         if w.used_pct >= t.short_hot_pct:
             colour = SPENT if w.used_pct >= t.long_exhausted_pct else TIGHT
-            text = f"{colour}{text} ({_clock(w.resets_at, now)}){PLAIN}"
+            text = f"{colour}{text} ({_clock(w.resets_at, now)}){mark or ''}{PLAIN}"
+        elif mark:
+            text += mark
         parts.append(text)
     if known and (not live or _stale(snap, t, now)):
         parts.append(f"as of {_clock(snap.captured_at, now)}")
@@ -741,8 +767,9 @@ def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float
     check, no probe), or None; and those snapshots."""
     others = [a for a in accounts if a.plan is not None and a.id != acct.id]
     snaps = {a.id: s for a in others if (s := store.load(a.id))}
-    return next((v for v in spread(rank(others, snaps, now, t), _running(store.sessions(), now),
-                                   CLOSE_SCORE) if v.eligible), None), snaps
+    return next((v for v in spread(rank(others, snaps, now, t, extra=_planned(now)),
+                                   _running(store.sessions(), now), CLOSE_SCORE)
+                 if v.eligible), None), snaps
 
 
 def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
@@ -771,11 +798,24 @@ def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window
             "the user set, what was tried and failed, files touched>\" to continue in a fresh "
             "session on the best account, which reads your note first.")
     return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window (resets "
-            f"{_clock(w.resets_at, now)}).{_heaviest(rec, acct.id, now)} Best other account: "
+            f"{_clock(w.resets_at, now)}).{_heaviest(rec, acct.id, now)}"
+            f"{_reset_planned(acct, now)} Best other account: "
             f"{_best_other(acct, accounts, t, now)}"
             ". If what is left of your work is small, carry on. Otherwise, at the next stopping "
             f"point: {move} Workers you started: "
             f"{workers}; to have them checkpoint: fairshare checkpoint --request all.")
+
+
+def _reset_planned(acct: Account, now: float) -> str:
+    """For a main session's warning: one sentence when the user planned a full reset on the
+    account this week and has not used it; "" otherwise."""
+    prov, p = providers.REGISTRY.get(acct.provider), acct.plan
+    if acct.id not in store.active_full_resets(now) or not (prov and prov.full_reset):
+        return ""
+    limits = " and ".join(_span(h) for h in (p.short_hours, p.long_hours) if h)
+    return (f" The user planned a full reset on {acct.id} this week: tell the user now that it "
+            f"can be used ({prov.full_reset}), that it refills the {limits} limits and keeps "
+            "the weekly reset day; then, unless the user says they used it, carry on as below.")
 
 
 CHECKPOINT_ASK = ("fairshare: your main session asks for a checkpoint now: finish your current "
@@ -2592,6 +2632,42 @@ def cmd_prefer(a) -> int:
     return 0
 
 
+def cmd_full_reset(a) -> int:
+    """Plan a full reset the provider granted on an account for this week (decision 29):
+    fairshare cannot see held resets, so the user says. The account ranks as if its week had
+    that much more room until the reset is seen used or the week resets."""
+    now = _now()
+    if a.id is None:
+        if a.cancel:
+            store.drop_full_reset()
+        plans = store.active_full_resets(now)
+        for i, week in sorted(plans.items()):
+            print(f"full reset planned on {i} until {_clock(week, now)}")
+        if not plans:
+            print("no full reset planned")
+        return 0
+    accounts = _load()[0]
+    acct = next((x for x in accounts if x.id == a.id), None)
+    if acct is None:
+        _say(f"no account '{a.id}' (configured: {', '.join(x.id for x in accounts)})")
+        return 2
+    if a.cancel:
+        store.drop_full_reset(a.id)
+        print(f"no full reset planned on {a.id}")
+        return 0
+    snap, p = store.load(a.id), acct.plan
+    week = p and snap and snap.windows.get(p.long_name)
+    if not week or week.resets_at <= now:
+        _say(f"no current weekly window known for {a.id}, so nothing to plan against "
+             "(`fairshare status` asks for its usage)")
+        return 2
+    store.plan_full_reset(a.id, week.resets_at)
+    print(f"full reset planned on {a.id}: +{FULL_RESET_PCT:.0f}% until it is used or the week "
+          f"resets ({_clock(week.resets_at, now)}); `fairshare full-reset {a.id} --cancel` "
+          "drops it")
+    return 0
+
+
 def _tilde(p: Path, home: Path) -> str:
     return f"~/{p.relative_to(home)}" if p.is_relative_to(home) and p != home else str(p)
 
@@ -3429,6 +3505,12 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--for", dest="duration", metavar="LENGTH", help="e.g. 30m, 3h, 2d")
     pp.add_argument("--off", action="store_true", help="end the preference now")
     pp.set_defaults(f=cmd_prefer)
+    fp = sub.add_parser("full-reset", help="say you will use a full reset the provider granted "
+                        "on an account this week, so it ranks with that room; with no id, show "
+                        "the plans")
+    fp.add_argument("id", nargs="?")
+    fp.add_argument("--cancel", action="store_true", help="drop the plan (every plan, with no id)")
+    fp.set_defaults(f=cmd_full_reset)
     sub.add_parser("setup", help="choose the hub and join your own folders"
                    ).set_defaults(f=cmd_setup)
     jp = sub.add_parser("join", help="add an account: sign in to it in its own hub folder")

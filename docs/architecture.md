@@ -982,6 +982,33 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     warning (finish the step and checkpoint; its main session decides). The skill's section
     "When fairshare warns you" describes both moves.
 
+29. **A planned full reset counts as room** (`fairshare full-reset`). claude.ai may grant an
+    account a full reset (about one a month, with a use-by date); using it refills the short
+    and the weekly window now and keeps the weekly reset time. Claude Code learns of held
+    resets from an internal claude.ai service, not from `/usage` nor the status line input;
+    calling it would be an undocumented endpoint (rule 3). So the user says which account will
+    use one this week: a **plan**, kept in `full-reset.json` in the state folder (per account,
+    the weekly reset at planning and when it was seen used; written atomically under its own
+    lock). A plan is active while not seen used and before that weekly reset, so it never
+    carries into the next week. Wherever accounts are ranked against each other (the survey,
+    the best other account in warnings and the bar's pickup mark) an active plan passes
+    `extra = 100` to `rank`: the policy counts it as room left in the long window (score with
+    `100 - used + extra`), and a spent window stays spent until the refill shows. A single
+    account's check (`_stranded`, `run -a`) passes none: `extra` changes no eligibility.
+    **Detection.** Within one window usage only rises, and a full reset keeps the reset times.
+    `store.record` compares the stored snapshot with the merged one, under the snapshot's lock:
+    a running window (any, not only the plan's) that fell, or whose reset moved by more than
+    `SAME_WINDOW_S`, marks an active plan used. Only the probe can lower a value (`merge`'s
+    credited-back path, falls over `PROBE_ROUNDING`); a status-line redraw lower than the stored
+    value is stale and changes nothing, so the probe that follows the stale snapshot is what
+    notices. `merge` stays pure. **Why a fall ends the bonus.** A credit-back for another
+    reason then ends the plan early: the account ranks on its real numbers, never above them.
+    The other error, a bonus kept after the refill, would count the same room twice. The
+    adapter owns how the reset is used, for the warning's words (`full_reset`; None: the
+    provider grants none, and the warning says nothing). Not handled: a plan on one of two
+    folders sharing a login applies to that folder's id only, and the survey ranks the
+    freshest of the two.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -1169,6 +1196,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (a background and an interactive session) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
 | Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
+| Using a full reset: `/limit-reset` in a session on the account, or claude.ai's usage page; it refills the 5-hour and weekly limits and keeps the weekly reset day (only named to the agent, never run or read) | `full_reset` | the warning names a way that no longer works; ranking and detection are unaffected | told by the owner, 2026-11-19; not checked by fairshare |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
 
 ## Not built yet
