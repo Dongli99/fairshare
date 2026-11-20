@@ -126,6 +126,11 @@ class Detection(unittest.TestCase):
         store.record("a", {"five_hour": Window(2, 30_000)}, 10_500.0)
         self.assertEqual(self.used(), {"a": None, "b": None})
 
+    def test_the_next_short_window_seen_just_before_the_stored_reset_marks_nothing(self):
+        # the stored reset is to the minute: the new window can show up a little before it
+        store.record("a", {"five_hour": Window(6, 9_950 + 18_000)}, 9_950.0, probe=True)
+        self.assertEqual(self.used(), {"a": None, "b": None})
+
     def test_a_used_plan_is_not_marked_again(self):
         store.record("a", {"seven_day": Window(3, 500_000)}, 200.0, probe=True)
         store.record("a", {"five_hour": Window(1, 10_000)}, 300.0, probe=True)

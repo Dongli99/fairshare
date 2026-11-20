@@ -1010,7 +1010,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     **Detection.** Within one window usage only rises, and a full reset keeps the reset times.
     `store.record` compares the stored snapshot with the merged one, under the snapshot's lock:
     a running window (any, not only the plan's) that fell, or whose reset moved by more than
-    `SAME_WINDOW_S`, marks an active plan used. Only the probe can lower a value (`merge`'s
+    `SAME_WINDOW_S`, marks an active plan used; a window within `SAME_WINDOW_S` of its stored
+    reset is left out (its successor can arrive before a reset stored to the minute passes,
+    seen live on 2026-11-20; a real reset still shows in the other window). Only the probe can lower a value (`merge`'s
     credited-back path, falls over `PROBE_ROUNDING`); a status-line redraw lower than the stored
     value is stale and changes nothing, so the probe that follows the stale snapshot is what
     notices. `merge` stays pure. **Why a fall ends the bonus.** A credit-back for another

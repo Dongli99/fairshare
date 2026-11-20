@@ -177,7 +177,9 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
     reset of the account is marked used, in the same locked step, when a running window fell
     (only the probe's credited-back path lowers one) or its reset moved: within a window usage
     only rises and a full reset keeps the reset times. A small credit-back taken for the reset
-    only ends the planned bonus early."""
+    only ends the planned bonus early. A window within SAME_WINDOW_S of its stored reset is no
+    evidence: its successor can arrive while the stored reset, given to the minute, has not
+    passed yet; a real reset still shows in the other window."""
     dest = state_dir() / "snapshots"
     dest.mkdir(parents=True, exist_ok=True)
     with open(dest / f"{account_id}.lock", "w") as lock:
@@ -188,7 +190,7 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
         if old and account_id in active_full_resets(now) and any(
                 (w := snap.windows.get(k)) and (w.used_pct < was.used_pct
                                                 or abs(w.resets_at - was.resets_at) > SAME_WINDOW_S)
-                for k, was in old.windows.items() if was.resets_at > now):
+                for k, was in old.windows.items() if was.resets_at > now + SAME_WINDOW_S):
             _change_full_resets(lambda d: {**d, account_id: {**d[account_id], "used_at": now}}
                                 if account_id in d else d)
     return snap
