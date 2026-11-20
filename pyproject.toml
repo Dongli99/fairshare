@@ -30,6 +30,7 @@ classifiers = [
 Homepage = "https://github.com/Dongli99/fairshare"
 Issues = "https://github.com/Dongli99/fairshare/issues"
 Documentation = "https://github.com/Dongli99/fairshare/blob/main/docs/usage.md"
+Changelog = "https://github.com/Dongli99/fairshare/releases"
 
 [project.scripts]
 fairshare = "fairshare.cli:main"

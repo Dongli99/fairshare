@@ -70,6 +70,9 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
   over (a *switch*).
 - A *worker* is a background session the main session starts for big work; near a limit, the
   main session decides what its workers do.
+- `fairshare full-reset ID` plans a full reset claude.ai granted that account for this week:
+  it ranks with twice its week's room until the reset is used, and the status bar says when to
+  use it. fairshare cannot see which resets you hold, so you plan them.
 - `fairshare doctor` checks the setup; `fairshare doctor --fix` repairs what it can.
   `fairshare -v` prints the installed version.
 
@@ -94,6 +97,8 @@ used. Capacity is the plan's size (Pro = 1).
   running.
 - An account whose week or short window is spent ranks below every usable account, however soon
   it resets: it cannot take work until then.
+- A planned full reset (`fairshare full-reset`) counts as 100% more weekly room until fairshare
+  sees it used or the week resets.
 
 Usage comes from Claude Code's own local `/usage` command, asked for every account at each
 launch (no model call, nothing spent), and from its status line during a session. The rule is
@@ -121,6 +126,7 @@ into your own folders. They all stay until you delete them. The hub's accounts s
 - [docs/usage.md](https://github.com/Dongli99/fairshare/blob/main/docs/usage.md): every command, message, setting and exit code.
 - [docs/terms-and-limits.md](https://github.com/Dongli99/fairshare/blob/main/docs/terms-and-limits.md): what fairshare never does.
 - [docs/architecture.md](https://github.com/Dongli99/fairshare/blob/main/docs/architecture.md): the design decisions, seams and known limits.
+- [Releases](https://github.com/Dongli99/fairshare/releases): what changed in each version.
 
 ## Prior art
 
