@@ -166,21 +166,44 @@ class Warning(Work):
         p.start()
         self.addCleanup(p.stop)
 
-    SENTENCE = (" The user planned a full reset on a this week: tell the user now that it can be "
-                "used (`/limit-reset` in a session on that account, or claude.ai's usage page), "
-                "that it refills the 5h and 7d limits and keeps the weekly reset day; then, unless "
-                "the user says they used it, carry on as below. Best other account: ")
+    CARRY_ON = ("The user planned a full reset on a and uses it once the limit stops work, so "
+                "this is not a stop: keep working on this account until the limit stops you; the "
+                "user then refills it and the stopped sessions continue here. No checkpoint, "
+                "handoff or pickup.")
 
-    def test_the_sentence_with_a_plan_and_not_without(self):
+    def test_a_week_at_90_with_a_plan_says_work_to_the_limit(self):
+        self.snap("a", five=(10, 3), seven=(91, 50))
+        said = self.said()
+        self.assertIn("Best other account: b", said)               # no plan: the usual move
+        self.assertNotIn("full reset", said)
+        self.snap("a", five=(10, 3), seven=(96, 50))
+        store.plan_full_reset("a", NOW + 50 * H)
+        said = self.said()
+        self.assertTrue(said.startswith("fairshare: account a is at 96% of its 7d window "))
+        self.assertTrue(said.endswith(self.CARRY_ON), said)
+        self.assertNotIn("Best other account", said)
+
+    def test_a_short_window_crossing_on_a_full_week_says_the_same(self):
+        self.snap("a", five=(10, 3), seven=(92, 50))
+        store.plan_full_reset("a", NOW + 50 * H)
+        self.said()                                                 # the week's crossing
+        self.snap("a", five=(91, 3), seven=(92, 50))
+        self.assertIn("91% of its 5h window (resets 11:00). " + self.CARRY_ON, self.said())
+
+    def test_a_worker_works_to_the_limit_too(self):
+        self.snap("a", five=(10, 3), seven=(91, 50))
+        store.plan_full_reset("a", NOW + 50 * H)
+        test_hooks.Speaking.worker(self)
+        said = self.said()
+        self.assertTrue(said.endswith(self.CARRY_ON), said)
+        self.assertNotIn("checkpoint \"", said)
+
+    def test_a_week_below_90_keeps_the_reset_and_moves(self):
         self.snap("a", five=(91, 3), seven=(10, 50))
+        store.plan_full_reset("a", NOW + 50 * H)
         said = self.said()
         self.assertNotIn("full reset", said)
         self.assertIn("(resets 11:00). Best other account: b ", said)
-        self.snap("a", five=(96, 3), seven=(10, 50))
-        store.plan_full_reset("a", NOW + 50 * H)
-        said = self.said()
-        self.assertIn("(resets 11:00)." + self.SENTENCE + "b (5h 10% · 7d 40%); b before c",
-                      said)
 
     def test_a_planned_reset_elsewhere_makes_that_account_the_best_other(self):
         self.snap("a", five=(91, 3), seven=(10, 50))

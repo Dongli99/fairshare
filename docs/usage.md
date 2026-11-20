@@ -182,8 +182,11 @@ replaces it. An account whose current week fairshare has not seen yet cannot be 
 (`fairshare status` asks for its usage).
 
 The status bar marks the week: `7d 20% +reset`, and `7d 92% (Sun 10:00) use reset` once the week
-is at 90% or more. A warning to a main session on that account also says the reset is planned,
-so the agent tells you to use it now.
+is at 90% or more. From then on a warning on that account (to a main session or a worker) says
+not to move: keep working there until the limit stops the session, then you use the reset and the
+stopped sessions continue on the same account. The refill is worth most on a spent week; moving
+at 90% would leave the last tenth unused (on Pro, about a whole 5-hour window). A 5-hour
+crossing while the week is below 90% warns as usual and keeps the reset for a fuller week.
 
 The plan ends when fairshare sees the reset used: a usage probe that finds the 5-hour or the
 weekly window lower than before under the same reset (the status bar's own lower numbers are

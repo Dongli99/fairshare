@@ -45,6 +45,8 @@ fairshare's choice of account (here, in `status` and in `fairshare worker`) come
 goes before the next one. The percentages leave out when each window resets and any planned full
 reset, so follow the choice; override it (`--account`) only when the job needs more room than
 the chosen account has left now, which its reason states.
+- The warning says the user planned a full reset and to keep working to the limit: do that, on
+  this account (and so do your workers); no checkpoint, handoff or pickup.
 - Little work left: carry on.
 - Otherwise, at the next stopping point, `fairshare checkpoint --request all` (your workers
   checkpoint), then do the move the warning names; the setting `warning_move` picks it

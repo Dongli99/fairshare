@@ -1019,7 +1019,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     reason then ends the plan early: the account ranks on its real numbers, never above them.
     The other error, a bonus kept after the refill, would count the same room twice. The
     adapter owns how the reset is used, for the warning's words (`full_reset`; None: the
-    provider grants none, and the warning says nothing). Not handled: a plan on one of two
+    provider grants none, and the warning says nothing). **The warning on a planned account**
+    (`_reset_due`: an active plan and the week at the first warning level or above, the bar's
+    `use reset`) tells every session on it, worker or main, to work on to the limit, with no
+    move: the ranking already put the account first for its refill, and a warning that said
+    move contradicted it (seen live on 2026-11-20). Below that level a crossing warns as usual
+    and says nothing of the plan: spending the refill on a half-used week wastes it. Not handled: a plan on one of two
     folders sharing a login applies to that folder's id only, and the survey ranks the
     freshest of the two.
 

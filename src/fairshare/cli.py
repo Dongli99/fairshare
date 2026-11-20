@@ -792,6 +792,12 @@ def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window
     p = acct.plan
     hours = p.short_hours if k == p.short_name else p.long_hours
     window = _span(hours) if hours else k
+    if _reset_due(acct, now):
+        return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window "
+                f"(resets {_clock(w.resets_at, now)}). The user planned a full reset on "
+                f"{acct.id} and uses it once the limit stops work, so this is not a stop: keep "
+                "working on this account until the limit stops you; the user then refills it "
+                "and the stopped sessions continue here. No checkpoint, handoff or pickup.")
     if rec.role == ROLE_WORKER:
         return (f"fairshare: this account is at {w.used_pct:.0f}% of its {window} window. You are "
                 'a worker: finish your current step, then run fairshare checkpoint "<what is '
@@ -805,23 +811,22 @@ def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window
             "session on the best account, which reads your note first.")
     return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window (resets "
             f"{_clock(w.resets_at, now)}).{_heaviest(rec, acct.id, now)}"
-            f"{_reset_planned(acct, now)} Best other account: "
+            " Best other account: "
             f"{_best_other(acct, accounts, t, now)}"
             ". If what is left of your work is small, carry on. Otherwise, at the next stopping "
             f"point: {move} Workers you started: "
             f"{workers}; to have them checkpoint: fairshare checkpoint --request all.")
 
 
-def _reset_planned(acct: Account, now: float) -> str:
-    """For a main session's warning: one sentence when the user planned a full reset on the
-    account this week and has not used it; "" otherwise."""
-    prov, p = providers.REGISTRY.get(acct.provider), acct.plan
-    if acct.id not in store.active_full_resets(now) or not (prov and prov.full_reset):
-        return ""
-    limits = " and ".join(_span(h) for h in (p.short_hours, p.long_hours) if h)
-    return (f" The user planned a full reset on {acct.id} this week: tell the user now that it "
-            f"can be used ({prov.full_reset}), that it refills the {limits} limits and keeps "
-            "the weekly reset day; then, unless the user says they used it, carry on as below.")
+def _reset_due(acct: Account, now: float) -> bool:
+    """Whether the account's planned full reset is the next thing to happen to it: a plan still
+    to use and a week at the first warning level or above (the bar's `use reset`). Its sessions
+    then work on to the limit: the refill is worth most on a spent week, and moving at 90%
+    would leave the last tenth of it unused (owner, 2026-11-20)."""
+    prov, p, snap = providers.REGISTRY.get(acct.provider), acct.plan, store.load(acct.id)
+    w = snap and p and p.long_name and snap.windows.get(p.long_name)
+    return bool(prov and prov.full_reset and acct.id in store.active_full_resets(now)
+                and w and w.resets_at > now and w.used_pct >= WARN_LEVELS[0])
 
 
 CHECKPOINT_ASK = ("fairshare: your main session asks for a checkpoint now: finish your current "
