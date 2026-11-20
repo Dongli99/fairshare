@@ -41,6 +41,10 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 
 ## When fairshare warns you
 A warning names the account, its percent, when that window resets and the best other account.
+fairshare's choice of account (here, in `status` and in `fairshare worker`) comes with why it
+goes before the next one. The percentages leave out when each window resets and any planned full
+reset, so follow the choice; override it (`--account`) only when the job needs more room than
+the chosen account has left now, which its reason states.
 - Little work left: carry on.
 - Otherwise, at the next stopping point, `fairshare checkpoint --request all` (your workers
   checkpoint), then do the move the warning names; the setting `warning_move` picks it

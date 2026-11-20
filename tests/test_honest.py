@@ -324,7 +324,7 @@ class SameLogin(Fleet):
     def test_status_shows_the_other_folder_as_the_same_login(self):
         _, out, _ = self.go("status")
         self.assertIn("one", [l for l in out.splitlines() if "same login as two" in l][0])
-        self.assertEqual(len([l for l in out.splitlines() if "score" in l]), 2)
+        self.assertEqual(len([l for l in out.splitlines() if "score" in l and not l.startswith("why ")]), 2)
 
     def test_nothing_identifying_is_printed(self):
         for cmd in ("status", "run"):

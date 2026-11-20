@@ -61,8 +61,8 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning,
         why = f"{p.short_name} {short_used:.0f}% used, resets in {_dur(short_in, 1)}"
     else:
         why = f"{p.long_name} {long_used:.0f}% used, resets in {_dur(long_in)}"
-    if extra:
-        why += f", +{extra:.0f}% planned"
+    if extra:   # the refill is not there yet: say what is, for a job bigger than that
+        why += f", +{extra:.0f}% planned ({max(0.0, 100.0 - long_used):.0f}% left until it is used)"
     # A hot short window stops counting once its reset is within the grace period; a spent one
     # counts until it resets.
     usable_in = max(short_in - t.grace_hours if hot else 0.0, short_in if spent else 0.0,
@@ -104,3 +104,19 @@ def prefer(verdicts: list[Verdict], account_id: str) -> list[Verdict]:
     """The user's preferred account first while it is eligible; otherwise the ranking as is."""
     chosen = [v for v in verdicts if v.account.id == account_id and v.eligible]
     return chosen + [v for v in verdicts if v not in chosen]
+
+
+def versus(first: Verdict, others: list[Verdict]) -> str:
+    """Why `first` goes before the next account that can take work, for a reader who sees only
+    percentages: the rule and both reasons. Empty when no other account can take work."""
+    second = next((v for v in others if v.eligible and v is not first), None)
+    if second is None:
+        return ""
+    a, b = first.account.id, second.account.id
+    if first.score >= second.score:
+        rule = (f"score {first.score:.2f} vs {second.score:.2f}: room left per hour until it "
+                "resets, so room that would expire unused is spent first")
+    else:
+        rule = (f"score {first.score:.2f} vs {second.score:.2f}, close enough that the one with "
+                "fewer sessions running, or the preferred one, goes first")
+    return f"{a} before {b} ({rule}); {a}: {first.reason}; {b}: {second.reason}"

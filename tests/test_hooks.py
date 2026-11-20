@@ -72,7 +72,9 @@ class Speaking(Work):
         self.snap("a", five=(91, 3), seven=(10, 50))
         self.assertEqual(self.said(), (
             "fairshare: account a is at 91% of its 5h window (resets 11:00). Best other account: "
-            "b (5h 10% · 7d 40%). If what is left of your work is small, carry on. Otherwise, at "
+            "b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: room left per hour until it "
+            "resets, so room that would expire unused is spent first); b: seven_day 40% used, "
+            "resets in 50h; c: seven_day 50% used, resets in 50h. If what is left of your work is small, carry on. Otherwise, at "
             'the next stopping point: run fairshare handoff "<what was done, what is next, open '
             'decisions, constraints the user set, what was tried and failed, files touched>" to '
             "continue in a fresh session on the best account, which reads your note first. "
@@ -95,7 +97,9 @@ class Speaking(Work):
         self.snap("a", five=(91, 3), seven=(10, 50))
         self.assertEqual(self.said(), (
             "fairshare: account a is at 91% of its 5h window (resets 11:00). Best other account: "
-            "b (5h 10% · 7d 40%). If what is left of your work is small, carry on. Otherwise, at "
+            "b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: room left per hour until it "
+            "resets, so room that would expire unused is spent first); b: seven_day 40% used, "
+            "resets in 50h; c: seven_day 50% used, resets in 50h. If what is left of your work is small, carry on. Otherwise, at "
             'the next stopping point: write a checkpoint (fairshare checkpoint "<where you '
             'stand>") and run fairshare pickup to continue on the best account. Workers you '
             "started: none; to have them checkpoint: fairshare checkpoint --request all."))

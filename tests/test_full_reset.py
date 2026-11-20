@@ -75,6 +75,8 @@ class Command(Fleet):
         self.assertEqual(out[1], "    full reset planned: +100% until it is used or the week "
                                  "resets (Sun 10:00); `fairshare full-reset b --cancel` drops it")
         self.assertNotIn("full reset", "\n".join(l for l in out if " a " in l))
+        self.assertTrue(out[-1].startswith("why b: b before a (score "), out)
+        self.assertIn("+100% planned (20% left until it is used); a: ", out[-1])
         self.go("run")
         self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/b"))
 
@@ -172,7 +174,7 @@ class Warning(Work):
         self.snap("a", five=(96, 3), seven=(10, 50))
         store.plan_full_reset("a", NOW + 50 * H)
         said = self.said()
-        self.assertIn("(resets 11:00)." + self.SENTENCE + "b (5h 10% · 7d 40%). If what is left",
+        self.assertIn("(resets 11:00)." + self.SENTENCE + "b (5h 10% · 7d 40%); b before c",
                       said)
 
     def test_a_planned_reset_elsewhere_makes_that_account_the_best_other(self):

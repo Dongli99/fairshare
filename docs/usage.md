@@ -93,7 +93,11 @@ For a shorter name, make your own alias for `fairshare`.
 
 When two accounts are within 10% of each other, a new session goes to the one with fewer
 sessions running, so sessions started together spread out. `fairshare status` marks with `>` the
-account the next session would start on.
+account the next session would start on, and its last line says why that account goes before the
+next one: both scores, the rule, and both accounts' reasons (`why a: a before b (score 1.18 vs
+0.42: ...)`). Percentages alone can point the other way: room that resets sooner is spent first,
+and a planned full reset counts as room (its row says how much is left until the reset is used).
+The warning's best other account and `fairshare worker` say the same.
 
 If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `handoff` and `join` say
 so first and stop, before any sign-in check or usage probe.
@@ -356,7 +360,8 @@ When the session's account crosses 90%, and again 95%, of a window (once each pe
 session; a new window starts over), fairshare adds one line to the session's context at its next
 step (Claude Code's `PostToolUse` and `UserPromptSubmit` hooks, which fairshare wires in the
 hub). A main session reads, for example: `fairshare: account a is at 91% of its 5h window
-(resets 11:00). Best other account: b (5h 10% · 7d 40%). If what is left of your work is small,
+(resets 11:00). Best other account: b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: ...);
+b: seven_day 40% used, resets in 50h; c: ... If what is left of your work is small,
 carry on. Otherwise, at the next stopping point: run fairshare handoff "<what was done, what is
 next, ...>" to continue in a fresh session on the best account, which reads your note first.
 Workers you started: ...`. That is the default move, `warning_move = "handoff"`: the fresh

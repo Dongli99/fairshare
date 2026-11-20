@@ -35,7 +35,7 @@ from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, NOTE_THINKING, NOTE_WR
                     Tuning, Window, Worker,
                     load_accounts, load_plan, window_model, with_account, with_hub,
                     without_account)
-from .policy import HOUR, Verdict, prefer, rank, spread
+from .policy import HOUR, Verdict, prefer, rank, spread, versus
 
 
 def _load():
@@ -395,6 +395,8 @@ def cmd_status(_a) -> int:
                      *([expiring[a.id]] if a.id in expiring else []),
                      *_sessions_block(a.id, recs, s.now)]:
             print(f"    {note}")
+    if top and top.eligible and (why := versus(top, s.verdicts)):
+        print(f"why {top.account.id}: {why}")
     return 0
 
 
@@ -762,21 +764,25 @@ def _short_state(acct: Account, snap: Snapshot | None, now: float) -> str:
 
 
 def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float
-                 ) -> tuple[Verdict | None, dict[str, Snapshot]]:
+                 ) -> tuple[Verdict | None, dict[str, Snapshot], list[Verdict]]:
     """The best other account that can take work, by the local snapshots alone (no sign-in
-    check, no probe), or None; and those snapshots."""
+    check, no probe), or None; those snapshots; and the other accounts ranked."""
     others = [a for a in accounts if a.plan is not None and a.id != acct.id]
     snaps = {a.id: s for a in others if (s := store.load(a.id))}
-    return next((v for v in spread(rank(others, snaps, now, t, extra=_planned(now)),
-                                   _running(store.sessions(), now), CLOSE_SCORE)
-                 if v.eligible), None), snaps
+    ranked = spread(rank(others, snaps, now, t, extra=_planned(now)),
+                    _running(store.sessions(), now), CLOSE_SCORE)
+    return next((v for v in ranked if v.eligible), None), snaps, ranked
 
 
 def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
-    """The best other account by the local snapshots alone, with its windows in a few words."""
-    v, snaps = _best_usable(acct, accounts, t, now)
-    return (f"{v.account.id} ({_short_state(v.account, snaps.get(v.account.id), now)})" if v
-            else "none can take work now")
+    """The best other account by the local snapshots alone, with its windows in a few words and
+    why it goes before the next one."""
+    v, snaps, ranked = _best_usable(acct, accounts, t, now)
+    if v is None:
+        return "none can take work now"
+    why = versus(v, ranked)
+    return (f"{v.account.id} ({_short_state(v.account, snaps.get(v.account.id), now)})"
+            + (f"; {why}" if why else ""))
 
 
 def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window, int],
@@ -2309,7 +2315,8 @@ def cmd_worker(a) -> int:
         if not candidates:
             _say(f"{_no_model_line(a.model)}; name another with --model; no worker started")
             return 1
-        why = {v.account.id: f" ({v.reason})" for v in s.verdicts}
+        why = {v.account.id: f": {line}" if (line := versus(v, s.verdicts)) else f" ({v.reason})"
+               for v in s.verdicts}
     acct = _start_here(candidates, here, accounts, hub)
     if acct is None:
         _say(f"{', '.join(c.id for c in candidates)} cannot work in {here}: "

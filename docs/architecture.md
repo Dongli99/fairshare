@@ -1021,6 +1021,17 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     folders sharing a login applies to that folder's id only, and the survey ranks the
     freshest of the two.
 
+30. **A choice of account says why** (`policy.versus`). An agent that saw `74%` on the chosen
+    account and `43%` on the next overrode the choice: the score spends first the room that
+    expires soonest and counts a planned refill, and neither shows in percentages. Wherever an
+    agent or a person sees a choice (`status`'s last line, the warning's best other account,
+    `fairshare worker`), `versus` adds the next account that can take work, both scores, the
+    rule in one clause and both reasons; when `spread` or `prefer` put a lower score first, it
+    says so. A planned refill's reason also says what is left until it is used: the score
+    counts the refill on purpose (decision 29), so a job bigger than what is there now is the
+    one honest reason to choose another account, and the skill says to override only then.
+    Pure, no new field: it reads the verdicts `rank` already returns.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
