@@ -583,7 +583,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       (decision 21; nothing can ask), with the account's clean environment and no BROWSER (a
       background session would not receive it, and uses the system browser), its output passed
       through (it names the attach command). `--fork-session` only when the session is not
-      marked stranded: it may still run, and fairshare stops no session it did not start. Then
+      marked stranded and its account still lists it running, or the list cannot be had: it may
+      still run, and fairshare stops no session it did not start (one stopped by hand resumes
+      in place, keeping its id and whatever per-session state hangs on it). Then
       the running sessions are looked up by that name (up to 10 s). The ids already live under
       that name are listed before the start and never taken (an earlier pickup or handoff of the
       same session, or a worker picked up before, may still run under it); a new id under it is a

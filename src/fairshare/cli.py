@@ -1328,10 +1328,15 @@ def _resumed(rec: SessionRecord, copy: bool = False, name: str | None = None):
 
 def _may_run(rec: SessionRecord) -> bool:
     """Whether a pickup of `rec` continues a copy under a new id rather than the session in
-    place: when it was not stopped by its limit it may still run, fairshare stops no session it
-    did not start, and two processes on one session would interleave its transcript. Said in
-    one line when true."""
+    place: when it was not stopped by its limit and its account still lists it running (or the
+    list cannot be had), as fairshare stops no session it did not start and two processes on
+    one session would interleave its transcript. One stopped by hand resumes in place, keeping
+    its id. Said in one line when true."""
     if rec.stranded_at is not None:
+        return False
+    acct = next((x for x in _load()[0] if x.id == rec.account), None)
+    live = acct and providers.get(acct.provider).list_sessions(acct)
+    if live is not None and acct and all(x.id != rec.id for x in live):
         return False
     _say(f"{rec.id[:8]} was not stopped by its limit and may still be running; continuing a copy "
          "under a new id (the original is left as it is)")

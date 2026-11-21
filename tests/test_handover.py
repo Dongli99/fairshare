@@ -280,6 +280,7 @@ class CommandPickup(Handover):
 
     def test_foreground_of_a_running_session_continues_a_copy(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        (self.log / "live").write_text(f"{SID}\n")                   # listed: still running
         code, _, err = self.go("pickup", SID[:8], tty=True)
         self.assertEqual(code, 0, err)
         cmd, env = self.launched.call_args.args[:2]
@@ -289,6 +290,34 @@ class CommandPickup(Handover):
         self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}:copy")
         rec = store.session(SID)                                 # left as it is
         self.assertEqual((rec.account, rec.stranded_at, rec.moved_to), ("a", None, None))
+
+    def test_foreground_of_a_session_stopped_by_hand_resumes_in_place(self):
+        self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        code, _, err = self.go("pickup", SID[:8], tty=True)        # its account lists it not
+        self.assertEqual(code, 0, err)
+        cmd, env = self.launched.call_args.args[:2]
+        self.assertEqual(cmd[5:7], ["--resume", SID])
+        self.assertNotIn("--fork-session", cmd)
+        self.assertNotIn("may still be running", err)
+        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}")
+
+    def test_background_of_a_session_stopped_by_hand_resumes_in_place(self):
+        self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        code, out, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 0, err)
+        args = self.bg_args("b")
+        self.assertEqual(args[3:5], ["--resume", SID])
+        self.assertNotIn("--fork-session", args)
+        self.assertNotIn("may still be running", err)
+        self.assertEqual([(r.id, r.account) for r in store.sessions()], [(SID, "b")])
+
+    def test_without_its_accounts_list_a_session_not_stopped_by_its_limit_is_copied(self):
+        self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        with mock.patch.object(claude, "list_sessions", lambda acct: None):
+            code, _, err = self.go("pickup", SID[:8], tty=True)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.launched.call_args.args[0][5:8], ["--resume", SID, "--fork-session"])
+        self.assertIn("may still be running", err)
 
     def test_foreground_of_a_stranded_session_resumes_in_place(self):
         self.record(model="claude-opus-5-5", effort="high")
@@ -314,6 +343,7 @@ class CommandPickup(Handover):
 
     def test_background_of_a_running_session_forks_with_a_copied_record(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        (self.log / "live").write_text(f"{SID}\n")                   # listed: still running
         store.update_session(SID, lambda old: SessionRecord(
             **{**vars(old), "role": ROLE_WORKER, "parent": "p-1"}))
         code, out, err = self.go("pickup", SID, "--bg")
@@ -330,7 +360,7 @@ class CommandPickup(Handover):
 
     def test_a_second_pickup_of_the_same_session_links_the_new_copy_never_the_earlier(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
-        (self.log / "live").write_text("s-earlier pickup-0a1b2c3d\n")   # an earlier pickup, live
+        (self.log / "live").write_text(f"s-earlier pickup-0a1b2c3d\n{SID}\n")  # an earlier pickup
         code, out, err = self.go("pickup", SID, "--bg")
         self.assertEqual(code, 0, err)
         new = "s-pickup-0a1b2c3d"

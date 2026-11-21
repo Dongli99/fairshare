@@ -291,10 +291,13 @@ the session is marked as stopped, and:
   attach to it; background sessions open links in the system browser).
 - **From a terminal**, `fairshare pickup <id>` (the session id or its first characters) resumes a
   recorded session in the foreground, in its folder; `--bg` does it in the background. Either
-  way, a session that was not stopped by its limit (it may still be running, and fairshare never
-  stops a session it did not start) is continued as a copy under a new id (`--fork-session`), so
-  two processes never write one transcript. The original stays as it was, with its account, its
-  workers and its line in `fairshare status`.
+  way, a session that was not stopped by its limit and that Claude Code still lists as running
+  (or when that list cannot be read) is continued as a copy under a new id (`--fork-session`):
+  fairshare never stops a session it did not start, and two processes never write one
+  transcript. The original stays as it was, with its account, its workers and its line in
+  `fairshare status`. To continue a running session under its own id, stop it first (`claude
+  stop <id>`, run through `fairshare run -a <account>`): a session no longer listed is resumed
+  in place.
 
 Moving a session to another account reads its whole context once on that account, uncached: that
 is the price of keeping its reasoning. For a lean start use a handoff. Each account is its own
@@ -411,6 +414,15 @@ run the commands yourself, from inside a session:
   resumes it on the best account, in the background, under its own name, with its model and
   effort. To move the main session itself: `fairshare pickup` (the same session) or `fairshare
   handoff "<note>"` (a fresh one).
+- A worker that fails on its environment rather than its limit (every lookup of a system
+  service refused, say, while your own shell on the same account works): Claude Code runs all
+  background sessions of an account under one shared process, which keeps ready copies of itself
+  for the next start, so a broken one passes the fault to every later worker and background
+  pickup on that account. fairshare sees only limits and cannot tell. Recover by hand: stop the
+  worker (`fairshare run -a <account> stop <id>`), stop that shared process when no other
+  background session of the account needs it (`fairshare run -a <account> daemon stop --any`),
+  then `fairshare pickup <id> --bg` from a shell that works: the stopped worker resumes in place,
+  under a fresh shared process.
 
 ## Warnings
 

@@ -289,6 +289,7 @@ class Copy(Continuation):
     def setUp(self):
         super().setUp()
         store.update_session(SID, lambda old: SessionRecord(**{**vars(old), "stranded_at": None}))
+        (self.log / "live").write_text(f"{SID}\n")                   # still running
 
     def original_whole(self, copy):
         new, old = store.session(copy), store.session(SID)
