@@ -82,6 +82,9 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 - Inside a session, `! fairshare pickup` moves it now, `! fairshare handoff` starts a fresh
   session from a written note, and `! fairshare` starts a fresh session with nothing carried
   over (a *switch*).
+- From a terminal, `fairshare pickup` lists your recent sessions and continues the one you pick,
+  the same session under its own id; `fairshare fork` continues a copy instead, and the original
+  goes on.
 - A *worker* is a background session the main session starts for big work; near a limit, the
   main session decides what its workers do.
 - `fairshare full-reset ID` plans a full reset claude.ai granted that account for this week:

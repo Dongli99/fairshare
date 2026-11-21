@@ -29,6 +29,9 @@ class Provider(Protocol):
     subcommands: tuple[str, ...]  # the tool's own subcommands (`<command> <subcommand>`), which
                                   # start no session: `run -a` hands them straight to the tool
     rc_files: tuple[str, ...]     # the shell files under HOME read for the user's aliases
+    resume_bare: bool  # a background resume of a session on its own account continues it in
+                       # place only with no argument but the prompt (it keeps its own name, model
+                       # and effort); any other makes a copy
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.
@@ -73,11 +76,16 @@ class Provider(Protocol):
         """Whether the per-model week the usage report names `week` limits `model` (an id, an
         alias or a display name)."""
 
-    def background(self, account: Account, name: str, prompt: str, extra: list[str] = ()
+    def background(self, account: Account, name: str | None, prompt: str, extra: list[str] = ()
                    ) -> tuple[list[str], dict[str, str]]:
         """The command and the clean environment (as `launch`) that start a session of
-        `account` with no terminal, named `name`, with `extra` arguments (resume_args,
-        model_args), whose first message is `prompt`."""
+        `account` with no terminal, named `name` (None: no name argument), with `extra`
+        arguments (resume_args, model_args), whose first message is `prompt`."""
+
+    def copy_note(self, output: str) -> str | None:
+        """The provider's line saying a resume started a copy under a new id instead of
+        continuing the session in place, found in what a background start wrote to stderr;
+        None when there is none."""
 
     def note_command(self, account: Account, session_id: str, extra: list[str], prompt: str
                      ) -> tuple[list[str], dict[str, str]]:
@@ -94,15 +102,27 @@ class Provider(Protocol):
         """The answer's text in that command's final output line; None for an error or no
         text."""
 
-    def list_sessions(self, account: Account) -> list[LiveSession] | None:
+    def list_sessions(self, account: Account, ended: bool = False) -> list[LiveSession] | None:
         """The provider's sessions running now (asked through `account`'s folder), with their
-        names and whether each is busy; None when it could not say. Never raises."""
+        names, whether each is busy, its kind (open in a terminal, or in the background) and its
+        process; `ended`: the background sessions that ended too. None when it could not say.
+        Never raises."""
+
+    def stop_session(self, account: Account, session_id: str) -> bool:
+        """Stop the background session `session_id` through `account`'s folder (its conversation
+        is kept); whether the provider said it did. Never raises."""
 
     def transcript_text(self, path: Path) -> list[tuple[str, str]] | None:
         """A session transcript's main conversation, oldest first, as (role, text) pairs:
         "user" | "assistant", or "command" and "output" for a command the user ran in the
         session (its output as printed). Words only. [] when it has none; None when it cannot
         be read."""
+
+    def last_prompt(self, path: Path, skip: tuple[str, ...] = ()) -> str | None:
+        """The last message a person typed in the transcript at `path` (not the tool's own
+        injected texts, a command the user ran, or a text beginning with one of `skip`), read
+        from the file's end only; None when none is found or it cannot be read. Never
+        raises."""
 
     def launch(self, account: Account) -> tuple[list[str], dict[str, str]]:
         """The command and the complete environment that start this provider as `account`: the

@@ -1,6 +1,6 @@
-"""fairshare CLI: status | capture | run (the default) | prefer | full-reset | pickup | handoff |
-transcript | trust | worker | checkpoint | watch | setup | join | leave | aliases | uninstall |
-doctor."""
+"""fairshare CLI: status | capture | run (the default) | prefer | full-reset | pickup | fork |
+handoff | transcript | trust | worker | checkpoint | watch | setup | join | leave | aliases |
+uninstall | doctor."""
 from __future__ import annotations
 
 import argparse
@@ -31,10 +31,10 @@ from pathlib import Path
 from . import browser
 from . import hub as hub_mod
 from . import __version__, providers, session, shell, store
-from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, NOTE_THINKING, NOTE_WRITING,
-                    ROLE_WORKER, USAGE_MODEL_TURN, Account, Alias,
-                    AccountStatus, ConfigError, Request, SessionRecord, SessionSeen, Snapshot,
-                    Tuning, Window, Worker,
+from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, KIND_BACKGROUND, KIND_INTERACTIVE,
+                    NOTE_THINKING, NOTE_WRITING, ROLE_WORKER, USAGE_MODEL_TURN, Account, Alias,
+                    AccountStatus, ConfigError, LiveSession, Request, SessionRecord, SessionSeen,
+                    Snapshot, Tuning, Window, Worker,
                     load_accounts, load_plan, window_model, with_account, with_hub,
                     without_account)
 from .policy import HOUR, Verdict, prefer, rank, spread, versus
@@ -650,12 +650,12 @@ def _launcher() -> int | None:
 
 CONTINUES_ENV = "FAIRSHARE_CONTINUES"   # set by the launcher for a resume or a handoff's fresh
                                         # session: "<its pid>:<old id>"
-COPY = ":copy"     # after the old id in CONTINUES_ENV: the resume is a copy (`_may_run`)
+COPY = ":copy"     # after the old id in CONTINUES_ENV: the resume is a copy (`cmd_fork`)
 
 
 def _continuation(seen: SessionSeen, acct: Account, now: float) -> None:
     """Called before a session is recorded from inside it: when the launcher resumed a session
-    and it goes on under a new id (another account: decision 23, or a copy: `_may_run`), or
+    and it goes on under a new id (another account: decision 23, or a copy: `cmd_fork`), or
     started a handoff's fresh session in its place, link the two (`store.link_session`; a copy
     as a copy). Only when CONTINUES_ENV names one of this process's ancestors (a value leaked
     into a nested session never links a stranger), its old id is not `seen`'s, and `seen` has
@@ -675,6 +675,7 @@ def _continuation(seen: SessionSeen, acct: Account, now: float) -> None:
 # the best account; start a fresh one that reads the checkpoint (written, or to be written by
 # the launcher first); start a fresh one with nothing (a switch).
 PICKUP, HANDOFF, HANDOFF_NOTE, SWITCH = "pickup", "handoff", "handoff-note", "switch"
+FORK = "fork"   # never sent to a launcher: a copy under a new id, started by `fairshare fork`
 STOP = "stop"   # the launcher's own: the same limit stopped the session again; end, saying how
                 # to resume it later (`_pickup_request`)
 
@@ -1259,6 +1260,9 @@ def _pause(s: Survey, top: Verdict) -> Verdict | None:
     return eligible[int(key) - 1] if key and key.isdigit() else top
 
 
+PICKUP_LEAD = "This session continues session "
+
+
 def _pickup_prompt(rec: SessionRecord, now: float, handed: bool = False) -> str:
     """The first prompt of the session that continues `rec`. Provider-neutral. `first` is the
     one place a step that comes before the rest goes. `handed`: `rec` handed over with nothing
@@ -1274,7 +1278,7 @@ def _pickup_prompt(rec: SessionRecord, now: float, handed: bool = False) -> str:
     first = [f"Read its checkpoint note {note} first; it is the session's own account of where "
              "it stood."] if note and note.is_file() else []
     return " ".join([
-        f"This session continues session {rec.id}, {why}. Its folder: {rec.cwd}.", *first,
+        f"{PICKUP_LEAD}{rec.id}, {why}. Its folder: {rec.cwd}.", *first,
         f"Run `fairshare transcript {rec.id} --tail 40` to see where it "
         f"{'left off' if handed else 'stopped'}; read the full "
         f"transcript at {rec.transcript} only if something is unclear. Then continue the work. "
@@ -1285,6 +1289,10 @@ MOVED_PROMPT = ("fairshare moved this session from account {old} to account {new
                 "{why}. Continue where you left off.")
 RESTARTED_PROMPT = ("fairshare restarted this session on account {new} because {why}; it is still "
                     "the best account. Continue where you left off.")
+FORKED_PROMPT = ("fairshare forked this session, as asked: it is a copy of session {old} under a "
+                 "new id, on account {new}, and the original goes on by itself. Do not take up "
+                 "its work unasked: say in one line that you are the copy, then wait for what to "
+                 "do.")
 
 
 def _near_limit(acct_id: str, now: float) -> bool:
@@ -1314,33 +1322,17 @@ def _resumed(rec: SessionRecord, copy: bool = False, name: str | None = None):
     passes `continues` with them), named `name` when given. Building them, just before the
     start, clears its stranded mark and wait; the account stays: the first capture writes it
     under the same id, and a new id (another account) is linked to this one (`_continuation`).
-    `copy`: a copy under a new id instead (the provider's fork argument), and the record is left
-    as it is."""
+    `copy`: a copy under a new id instead (the provider's fork argument, `FORKED_PROMPT`), and
+    the record is left as it is."""
     def build(acct: Account) -> list[str]:
-        prompt = _moved_prompt(rec, acct.id)
+        prompt = FORKED_PROMPT.format(old=rec.id, new=acct.id) if copy \
+            else _moved_prompt(rec, acct.id)
         if not copy:
             store.update_session(rec.id, lambda old: old and replace(
                 old, stranded_at=None, waiting_until=None))
         prov = providers.get(acct.provider)
         return [*(prov.name_args(name) if name else ()), *prov.resume_args(rec.id, copy), prompt]
     return build
-
-
-def _may_run(rec: SessionRecord) -> bool:
-    """Whether a pickup of `rec` continues a copy under a new id rather than the session in
-    place: when it was not stopped by its limit and its account still lists it running (or the
-    list cannot be had), as fairshare stops no session it did not start and two processes on
-    one session would interleave its transcript. One stopped by hand resumes in place, keeping
-    its id. Said in one line when true."""
-    if rec.stranded_at is not None:
-        return False
-    acct = next((x for x in _load()[0] if x.id == rec.account), None)
-    live = acct and providers.get(acct.provider).list_sessions(acct)
-    if live is not None and acct and all(x.id != rec.id for x in live):
-        return False
-    _say(f"{rec.id[:8]} was not stopped by its limit and may still be running; continuing a copy "
-         "under a new id (the original is left as it is)")
-    return True
 
 
 def _worker_of(session_id: str) -> Worker | None:
@@ -1709,65 +1701,336 @@ def _none_can_work(s: Survey) -> bool:
 
 def cmd_pickup(a) -> int:
     """Continue a session on the best account (or `-a`), resumed under its own id with its
-    model and effort (`--model`, `--effort` override them). Inside a session with no SESSION:
-    this one; its launcher, when it has one, stops it and resumes it (a manual request: no check
-    that the account is out), otherwise it resumes in the background. A SESSION (full id or
-    unique prefix) from a terminal outside a session resumes in the foreground in its folder;
-    inside a session or with --bg, in the background. Without `-a`, when no account can take
-    work now, it says so (with the soonest) and does nothing, before any launcher is asked.
-    fairshare never stops a session it did not start."""
+    model and effort (`--model`, `--effort` override them); never a copy (that is `fork`).
+    Inside a session with no SESSION: this one, which its launcher stops and resumes (a manual
+    request: no check that the account is out); without a launcher it refuses, as nothing can
+    stop it. A SESSION (full id or unique prefix), or one picked from the list (`_pick`) from a
+    terminal outside a session, resumes in the foreground in its folder; inside a session or
+    with --bg, in the background. One its account still lists running is resumed only once it
+    stops (`_stopped`). Without `-a`, when no account can take work now, it says so (with the
+    soonest) and does nothing, before any launcher is asked or session stopped."""
     prov = _provider()
     if _no_tool():
         return 1
     if _unknown_account(a.account):
         return 2
     here = prov.current_session()
-    if a.session is None:
-        if here is None:
-            _say("not inside a session; name one: fairshare pickup SESSION")
-            return 2
+    if a.session is None and here:
         if (rec := store.session(here)) is None:
             _say(f"no record of this session ({here}) yet; it appears once its status line ran")
             return 1
-        req = Request(rec.id, True, prov.session_pid(), PICKUP, a.model, a.effort, a.account)
         if launcher := _launcher():
             if not a.account and _none_can_work(_survey()):
                 return 1
-            _request(launcher, req)
+            _request(launcher, Request(rec.id, True, prov.session_pid(), PICKUP, a.model,
+                                       a.effort, a.account))
             print("the launcher will stop this session and continue on the best account")
             return 0
-        return _pickup_background(rec, req)
-    if (rec := _find_session(a.session)) is None:
-        return 2
+        _say("this session was not started by fairshare, so nothing can stop it to resume it "
+             "under its own id; for a fresh session that reads your note: fairshare handoff "
+             "\"<note>\"; for a copy of this one in the background: fairshare fork")
+        return 1
+    if isinstance(rec := _target(a.session, PICKUP), int):
+        return rec
     req = Request(rec.id, True, None, PICKUP, a.model, a.effort, a.account)
     if here or a.bg or not _interactive():
         return _pickup_background(rec, req)
-    if not (rec.cwd and os.path.isdir(rec.cwd)):
-        _say(f"the session's folder {rec.cwd} is gone; not picked up")
+    if not _ready(rec, req):
         return 1
-    if not a.account and _none_can_work(_survey()):
+    if isinstance(req := _stopped(rec, req), int):
+        return req
+    os.chdir(rec.cwd)
+    return _start(rec, req, _resumed(rec, name=req.name), moving=rec.account, continues=rec.id)
+
+
+def cmd_fork(a) -> int:
+    """Continue a copy of a session under a new id on the best account (or `-a`), with its model
+    and effort (`--model`, `--effort` override them); the original is left as it is, running or
+    not, with its account, workers and line in status, and is never stopped. Inside a session
+    with no SESSION: a copy of this one, in the background (it cannot take this terminal). A
+    SESSION, or one picked from the list from a terminal outside a session, forks in the
+    foreground in its folder; inside a session or with --bg, in the background."""
+    prov = _provider()
+    if _no_tool():
+        return 1
+    if _unknown_account(a.account):
+        return 2
+    here = prov.current_session()
+    if a.session is None and here:
+        if (rec := store.session(here)) is None:
+            _say(f"no record of this session ({here}) yet; it appears once its status line ran")
+            return 1
+    elif isinstance(rec := _target(a.session, FORK), int):
+        return rec
+    req = Request(rec.id, True, None, FORK, a.model, a.effort, a.account)
+    if here or a.bg or not _interactive():
+        return _pickup_background(rec, req)
+    if not _ready(rec, req):
         return 1
     os.chdir(rec.cwd)
-    copy = _may_run(rec)
-    return _start(rec, req, _resumed(rec, copy, _running_name(rec)), moving=rec.account,
-                  continues=rec.id + (COPY if copy else ""))
+    return _start(rec, req, _resumed(rec, True, _fork_name(rec, _own_listing(rec)[1])),
+                  continues=rec.id + COPY)
 
 
-def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) -> int:
+def _ready(rec: SessionRecord, req: Request) -> bool:
+    """Whether a session can start in place of `rec` in the foreground: its folder is there, and
+    (without `-a`) some account can take work. Each refusal said."""
+    if not (rec.cwd and os.path.isdir(rec.cwd)):
+        _say(f"the session's folder {rec.cwd} is gone; nothing done")
+        return False
+    return bool(req.account) or not _none_can_work(_survey())
+
+
+STOP_WAIT = 5.0        # seconds a pickup waits for a session it stopped to leave the list
+
+
+def _running_as(session_id: str, live: list[LiveSession]) -> LiveSession | None:
+    """The session as a listing shows it running: listed, but not as a background session with
+    no process (the provider still lists one whose process ended)."""
+    return next((x for x in live if x.id == session_id
+                 and not (x.kind == KIND_BACKGROUND and x.pid is None)), None)
+
+
+def _own_listing(rec: SessionRecord) -> tuple[Account | None, list[LiveSession] | None]:
+    """`rec`'s account and the sessions running as listed through it (a background session is
+    listed only through its own account); None when the list cannot be had."""
+    acct = next((x for x in _load()[0] if x.id == rec.account), None)
+    return acct, providers.get(acct.provider).list_sessions(acct) if acct else None
+
+
+def _own_worker(rec: SessionRecord) -> Worker | None:
+    """The worker `rec` is, when the session this command runs in is that worker's main session
+    (following continuations both ways: either may have gone on under a new id)."""
+    here = _provider().current_session()
+    w = _worker_of(rec.id)
+    return w if w and here and store.latest(w.parent) == store.latest(here) else None
+
+
+def _stopped(rec: SessionRecord, req: Request) -> Request | int:
+    """Before a pickup outside the launcher: `req` when `rec` does not run (its account does not
+    list it running), else what is done about it. A background session is stopped (the
+    provider's stop, through its account): without asking when it is a worker of the session
+    this runs in (fairshare started it, and its main session manages it), else from a terminal
+    when the user says yes; when it has left the list within STOP_WAIT seconds, `req` carrying
+    its listed name, which the resume keeps. One open in a terminal is never stopped. Anyone
+    else with no terminal, or no list, stops nothing. Each refusal is said, naming the ways
+    out, and is exit 1."""
+    acct, live = _own_listing(rec)
+    x = _running_as(rec.id, live) if live is not None else None
+    if live is not None and x is None:
+        return req
+    sid, fork = rec.id[:8], f"fairshare fork {rec.id[:8]}"
+    if x and x.kind == KIND_BACKGROUND and (w := _own_worker(rec)):
+        if x.busy and rec.stranded_at is None:
+            _say(f"stopping worker {w.name} ({sid}) in the middle of a turn: that turn is lost "
+                 "(its conversation is kept)")
+        return _stop(rec, req, acct, x)
+    if x and x.kind == KIND_INTERACTIVE:
+        _say(f"{sid} is open in a terminal; not picked up. Exit it there, then pick it up (it "
+             f"resumes in place); or `{fork}` continues a copy and leaves it running")
+        return 1
+    if x is None or x.kind != KIND_BACKGROUND or not _interactive():
+        why = "may still be running (its account's list of running sessions cannot be had)" \
+            if x is None else "is still running"
+        _say(f"{sid} {why}; not picked up. If it is yours, stop it first (fairshare run -a "
+             f"{rec.account} stop {rec.id}), then pick it up; or `{fork}` continues a copy and "
+             "leaves it running")
+        return 1
+    if x.busy:
+        _say(f"{sid} is in the middle of a turn: stopping it loses that turn (its conversation "
+             "is kept)")
+    try:
+        print(f"fairshare: {sid} is still running in the background. Stop it and continue it "
+              "here? [Y/n] ", end="", file=sys.stderr, flush=True)
+        yes = input().strip().lower() in ("", "y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        yes = False
+    if not yes:
+        _say(f"nothing done; `{fork}` continues a copy and leaves it running")
+        return 1
+    return _stop(rec, req, acct, x)
+
+
+def _stop(rec: SessionRecord, req: Request, acct: Account, x: LiveSession) -> Request | int:
+    """Stop the background session `rec` (listed as `x`) through its account and wait up to
+    STOP_WAIT seconds for it to leave the list: `req` carrying its listed name; exit 1, said,
+    when the stop fails or it stays."""
+    sid = rec.id[:8]
+    prov = providers.get(acct.provider)
+    if not prov.stop_session(acct, rec.id):
+        _say(f"{prov.tool} did not stop {sid}; nothing done")
+        return 1
+    end = _now() + STOP_WAIT
+    while (live := prov.list_sessions(acct)) is None or _running_as(rec.id, live):
+        if _now() >= end:
+            _say(f"{sid} is still listed running {STOP_WAIT:.0f} s after it was stopped; "
+                 "nothing done")
+            return 1
+        _sleep(JOIN_POLL)
+    _say(f"stopped {sid}")
+    return replace(req, name=req.name or x.name)
+
+
+FORKED = re.compile(r"(.*)-f(\d+)")   # a name that carries a fork number
+
+
+def _fork_name(rec: SessionRecord, live: list[LiveSession] | None) -> str:
+    """What a fork of `rec` is named: its listed name with the next fork number not listed
+    running (`x` -> `x-f2`, `x-f2` -> `x-f3`; the provider gives no two running sessions one
+    name, and a background start is joined by its name); unlisted, `fork-<first 8 of its id>`,
+    or that with a fork number when an earlier fork still runs under it."""
+    taken = {x.name for x in live or () if x.name}
+    own = next((x.name for x in live or () if x.id == rec.id and x.name), None)
+    if own is None and (own := f"fork-{rec.id[:8]}") not in taken:
+        return own
+    m = FORKED.fullmatch(own)
+    base, n = (m[1], int(m[2])) if m else (own, 1)
+    while f"{base}-f{n + 1}" in taken:
+        n += 1
+    return f"{base}-f{n + 1}"
+
+
+# --- The session list: bare `pickup` or `fork` from a terminal outside a session.
+
+LIST_ROWS = 8          # the session list shows at most this many
+PROMPT_SHOWN = 50      # characters of a session's last prompt it shows
+
+
+def _target(text: str | None, verb: str) -> SessionRecord | int:
+    """The session a pickup or fork acts on: the one `text` names (`_find_session`), or with no
+    text the one picked from the list (`_pick`); the exit code when there is none."""
+    if text is not None:
+        return _find_session(text) or 2
+    return _pick(verb)
+
+
+def _offered(recs: list[SessionRecord], here: Path) -> list[SessionRecord]:
+    """The sessions the list offers, in its order, at most LIST_ROWS: main sessions only (a
+    worker is managed by its main session), each at the end of its chain; those whose folder is
+    `here` or inside it first, then each group stopped by their limit first, then the most
+    recently seen."""
+    ids = {r.id for r in recs}
+
+    def inside(r: SessionRecord) -> bool:
+        p = Path(r.cwd).resolve() if r.cwd else None
+        return p is not None and (p == here or here in p.parents)
+    ends = [r for r in recs if r.role != ROLE_WORKER and not (r.moved_to and r.moved_to in ids)]
+    return sorted(ends, key=lambda r: (not inside(r), r.stranded_at is None, -r.seen, r.id)
+                  )[:LIST_ROWS]
+
+
+def _row_state(rec: SessionRecord, live: list[LiveSession] | None, now: float,
+               pickup: bool) -> str:
+    """A list row's state: at its limit (with the reset when known) or waiting for its reset,
+    then running (in the background, or in a terminal) or stopped. For a pickup, a running row
+    says what picking it does."""
+    parts = []
+    if rec.waiting_until is not None and rec.waiting_until > now:
+        parts.append(f"waiting for its reset at {_clock(rec.waiting_until, now)}")
+    elif rec.stranded_at is not None:
+        until = rec.limits.get(rec.account)
+        parts.append("at its limit" + (f", resets {_clock(until, now)}"
+                                       if until is not None and until > now else ""))
+    x = _running_as(rec.id, live) if live is not None else None
+    if live is None:
+        parts.append("may be running (no list)")
+    elif x and x.kind == KIND_INTERACTIVE:
+        parts.append("open in a terminal" if pickup else "running in a terminal")
+    elif x:
+        parts.append("running in the background" + (", asks to stop it" if pickup else ""))
+    elif not parts:
+        parts.append("stopped")
+    return " · ".join(parts)
+
+
+def _quoted(text: str | None) -> str:
+    """A last prompt on one line, at most PROMPT_SHOWN characters, quoted; "" for none."""
+    if not text:
+        return ""
+    line = " ".join(text.split())
+    return '"' + (line if len(line) <= PROMPT_SHOWN else line[:PROMPT_SHOWN - 1] + "…") + '"'
+
+
+def _session_rows(recs: list[SessionRecord], live: dict[str, list | None],
+                  prompts: dict[str, str | None], now: float, pickup: bool) -> list[str]:
+    """The list's lines, numbered from 1: id start, folder, account, state, when last seen and
+    the last prompt, in aligned columns."""
+    cells = [[str(n), r.id[:8], _about(r)[1], r.account,
+              _row_state(r, live.get(r.account), now, pickup), f"seen {_clock(r.seen, now)}"]
+             for n, r in enumerate(recs, 1)]
+    widths = [max(len(c[i]) for c in cells) for i in range(len(cells[0]))] if cells else []
+    return [("  " + "  ".join(c.rjust(widths[0]) if i == 0 else c.ljust(widths[i])
+                              for i, c in enumerate(row)) + f"  {_quoted(prompts.get(r.id))}"
+             ).rstrip() for row, r in zip(cells, recs)]
+
+
+def _own_prompts() -> tuple[str, ...]:
+    """The fixed leading text of every prompt fairshare itself sends a session (a resume's,
+    a fork's, a handoff's and a worker's first prompt, the handoff note's turn), which the
+    list's last prompt skips: matched by the template's text up to its first value, never by a
+    bare "fairshare"."""
+    return tuple(t.split("{", 1)[0] for t in (MOVED_PROMPT, RESTARTED_PROMPT, FORKED_PROMPT,
+                                              PICKUP_LEAD, WORKER_LINE, HANDOFF_NOTE_ASK))
+
+
+LIST_FOOTER = ("workers are not listed (their main session manages them); fairshare pickup <id> "
+               "and fairshare fork <id> still take one by id")
+
+
+def _pick(verb: str) -> SessionRecord | int:
+    """The session chosen from the list of recorded sessions (`_offered`, whose folder is
+    still there), each row's state from one listing per account and its last prompt from the
+    end of its transcript (shown only here, never kept). On a terminal: asked by number, Enter
+    for the first; end of input or Ctrl-C does nothing. Without one: the list on stderr and
+    exit 2."""
+    accounts = _load()[0]
+    now = _now()
+    recs = _offered([r for r in store.sessions() if r.cwd and os.path.isdir(r.cwd)],
+                       Path(os.getcwd()).resolve())
+    if not recs:
+        _say(f"no recorded session to {verb}")
+        return 2
+    live = _listings({r.account for r in recs}, accounts)
+    provs = {a.id: providers.get(a.provider) for a in accounts}
+    own = _own_prompts()
+    prompts = {r.id: (provs.get(r.account) or _provider()).last_prompt(Path(r.transcript), own)
+               for r in recs if r.transcript}
+    for line in _session_rows(recs, live, prompts, now, verb == PICKUP):
+        print(line, file=sys.stderr)
+    _say(LIST_FOOTER)
+    if not _interactive():
+        _say(f"no terminal to ask which; name one: fairshare {verb} SESSION")
+        return 2
+    while True:
+        try:
+            answer = input(f"{'Pick up' if verb == PICKUP else 'Fork'} which? [1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            _say("nothing done")
+            return 1
+        if not answer:
+            return recs[0]
+        if answer.isdigit() and 1 <= int(answer) <= len(recs):
+            return recs[int(answer) - 1]
+
+
+def _pickup_background(rec: SessionRecord, req: Request) -> int:
     """Continue `rec` with no terminal, in its folder, on the request's account or the top
     eligible one that has its model (`_carry`) and trusts that folder or can get its trust by
-    copy (nothing can ask); the tool's own output passes through. It resumes the session under
-    its own id, or, when it was not stopped by its limit (it may still run, and fairshare stops
-    no session it did not start), a copy under a new id with the record copied. `fresh`: a new
-    session with the pickup prompt instead (a handoff), joined by name and linked in this one's
-    place, as it was told to stop."""
+    copy (nothing can ask); the tool's own output passes through. By the request's kind: a
+    pickup resumes the session under its own id (once it does not run: `_stopped`); a fork
+    continues a copy under a new id with the record copied, the original left as it is; a
+    handoff starts a new session with the pickup prompt, joined by name and linked in this
+    one's place, as it was told to stop."""
+    fresh, fork = req.kind == HANDOFF, req.kind == FORK
     if not (rec.cwd and os.path.isdir(rec.cwd)):
-        _say(f"the session's folder {rec.cwd} is gone; not picked up")
+        _say(f"the session's folder {rec.cwd} is gone; nothing done")
         return 1
     s = _survey()
     if not req.account and _none_can_work(s):
         return 1
-    if not fresh and _can_work(s, rec.account):
+    if req.kind == PICKUP and _can_work(s, rec.account):
         _say(f"note: {rec.account} can still take work; the session is picked up as asked")
     here = Path(rec.cwd).resolve()
     accounts, _, hub = _load()
@@ -1785,18 +2048,30 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
     if acct is None:
         _say("no account can take it in the background: "
              + (f"eligible: {', '.join(v.account.id for v in eligible)}, none of which trusts "
-                f"{here} ({_why_untrusted(here, accounts)}); or use `fairshare pickup "
-                f"{rec.id}` from a terminal" if eligible else "none is eligible now"))
+                f"{here} ({_why_untrusted(here, accounts)}); or use `fairshare "
+                f"{'fork' if fork else 'pickup'} {rec.id}` from a terminal" if eligible
+                else "none is eligible now"))
         return 1
+    prov, w = providers.get(acct.provider), _worker_of(rec.id)
+    bare = req.kind == PICKUP and acct.id == rec.account and prov.resume_bare \
+        and _ran_in_background(rec, acct, w)
+    if bare and (req.model or req.effort):
+        flags = " ".join(f"--{k} {x}" for k, x in (("model", req.model), ("effort", req.effort))
+                         if x)
+        _say(f"{rec.id[:8]} resumes in the background on its own account {acct.id} only as it "
+             f"was, with its own model and effort, so {flags} cannot apply in place; nothing "
+             f"done. For a copy with them: fairshare fork {rec.id[:8]} {flags}")
+        return 1
+    if req.kind == PICKUP and isinstance(req := _stopped(rec, req), int):
+        return req
     v = next((v for v in eligible if v.account.id == acct.id), None)
     _say(f"handing off {rec.id[:8]} to a fresh session on {acct.id}, in the background" if fresh
-         else f"picking up {rec.id} on {acct.id}" + (f" ({v.reason})" if v else "")
-         + ", in the background")
-    prov, w = providers.get(acct.provider), _worker_of(rec.id)
-    name = (req.name if fresh else None) or (w.name if w else None) or _running_name(rec) \
-        or f"pickup-{rec.id[:8]}"
-    extra = prov.model_args(model, effort)
-    before = _live_named(acct, name)
+         else f"{'forking' if fork else 'picking up'} {rec.id} on {acct.id}"
+         + (f" ({v.reason})" if v else "") + ", in the background")
+    name = req.name if fresh else _fork_name(rec, _own_listing(rec)[1]) if fork \
+        else (w.name if w else None) or req.name or (None if bare else f"pickup-{rec.id[:8]}")
+    extra = [] if bare else prov.model_args(model, effort)
+    before = _live_named(acct, name) if name else None
     if fresh:
         if code := _start_background(acct, name, _pickup_prompt(rec, s.now, handed=True),
                                      rec.cwd, extra):
@@ -1804,22 +2079,43 @@ def _pickup_background(rec: SessionRecord, req: Request, fresh: bool = False) ->
         if new := _named_session(acct, name, before):
             _copied(rec, new, acct, model, effort, w, False)
         return 0
-    fork = _may_run(rec)
-    if code := _start_background(acct, name, _moved_prompt(rec, acct.id), rec.cwd,
-                                 [*prov.resume_args(rec.id, fork), *extra]):
+    prompt = FORKED_PROMPT.format(old=rec.id, new=acct.id) if fork \
+        else _moved_prompt(rec, acct.id)
+    errors: list[str] = []
+    if code := _start_background(acct, None if bare else name, prompt, rec.cwd,
+                                 [*prov.resume_args(rec.id, fork), *extra], errors):
         return code
+    note = None if fork else prov.copy_note("".join(errors))
     new = _named_session(acct, name, before)
     if new == rec.id:                       # it went on under its own id
         new = None
-    if new is None and not fork:
+    if fork:
+        if new is None:
+            print(f"the copy runs as {name}; its session id is not known yet")
+        else:
+            _copied(rec, new, acct, model, effort, None, True)
+            print(f"continued as session {new} on {acct.id}")
+        return 0
+    if new is None and note is None:        # in place (a new id on another account is a move)
         store.move_session(rec.id, acct.id)
-    elif new is None:
-        print(f"the copy's session id is not known yet ({name}); fairshare finds it by name later"
-              if w else f"the copy runs as {name}; its session id is not known yet")
-    else:
-        _copied(rec, new, acct, model, effort, w, fork)
-        print(f"continued as session {new} on {acct.id}")
+        return 0
+    if note or acct.id == rec.account:
+        _say(f"{prov.tool} did not continue {rec.id[:8]} in place but started a copy under a new "
+             f"id{f' ({note})' if note else ''}")
+    if new is None:
+        print("the copy's session id is not known yet")
+        return 0
+    _copied(rec, new, acct, model, effort, w, False)
+    print(f"continued as session {new} on {acct.id}")
     return 0
+
+
+def _ran_in_background(rec: SessionRecord, acct: Account, w: Worker | None) -> bool:
+    """Whether `rec` is known to be a background session of `acct` (its own account): a worker,
+    or listed with that kind among the account's sessions, ended ones included. A list that
+    cannot be had: not known."""
+    return bool(w) or any(x.id == rec.id and x.kind == KIND_BACKGROUND for x in
+                          providers.get(acct.provider).list_sessions(acct, ended=True) or ())
 
 
 def _live_named(acct: Account, name: str) -> set[str] | None:
@@ -1916,13 +2212,6 @@ def _kept_name(req: Request, rec: SessionRecord) -> Request:
     return replace(req, name=_live_name(rec)) if req.kind == PICKUP and not req.name else req
 
 
-def _running_name(rec: SessionRecord) -> str | None:
-    """The name for a pickup that starts while `rec` may still run: its listed name with the
-    next handoff number (the provider gives no two running sessions one name, and a background
-    start is joined by its name); None when it is not listed."""
-    return _handed_name(name) if (name := _live_name(rec)) else None
-
-
 def cmd_handoff(a) -> int:
     """Hand the current session over to a fresh session that reads its checkpoint first. With
     NOTE: the note is appended, then the launcher stops this session and starts the fresh one
@@ -1950,7 +2239,7 @@ def cmd_handoff(a) -> int:
     if a.note:
         print(_write_checkpoint(rec.id, a.note))
         if launcher is None:
-            if code := _pickup_background(rec, req, fresh=True):
+            if code := _pickup_background(rec, req):
                 return code
             print("this session keeps running: stop here and leave the work to the new session")
             return 0
@@ -2162,11 +2451,12 @@ def _background_env(env: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in env.items() if k not in (LAUNCHER_ENV, browser.ENV)}
 
 
-def _start_background(acct: Account, name: str, prompt: str, cwd: str,
-                      extra: list[str] = ()) -> int:
+def _start_background(acct: Account, name: str | None, prompt: str, cwd: str,
+                      extra: list[str] = (), errors: list[str] | None = None) -> int:
     """The start check on the account's hub folder, then a session with no terminal named
-    `name`, in `cwd`, with `extra` arguments (a resume, a model), whose first message is
-    `prompt`; the tool's own output passes through."""
+    `name` (None: none given), in `cwd`, with `extra` arguments (a resume, a model), whose
+    first message is `prompt`; the tool's own output passes through. `errors`: what it wrote to
+    stderr is also kept there (passed through once it ends)."""
     prov = providers.get(acct.provider)
     hub = acct.config_dir.parent.parent
     if not hub_mod.present(hub, acct.id):
@@ -2180,11 +2470,15 @@ def _start_background(acct: Account, name: str, prompt: str, cwd: str,
         return 1
     cmd, env = prov.background(acct, name, prompt, list(extra))
     try:
-        return subprocess.run(cmd, env=_background_env(env), cwd=cwd,
-                              stdin=subprocess.DEVNULL).returncode
+        r = subprocess.run(cmd, env=_background_env(env), cwd=cwd, stdin=subprocess.DEVNULL,
+                           **({} if errors is None else {"stderr": subprocess.PIPE, "text": True}))
     except OSError as e:
         _say(f"cannot start {cmd[0]}: {e.strerror}")
         return 127 if isinstance(e, FileNotFoundError) else 126
+    if errors is not None and r.stderr:
+        errors.append(r.stderr)
+        print(r.stderr, end="", file=sys.stderr, flush=True)
+    return r.returncode
 
 
 # --- Folder trust without a terminal: copy, never create (decision 21).
@@ -3830,12 +4124,18 @@ def main(argv: list[str] | None = None) -> int:
     al.set_defaults(f=cmd_aliases)
     sub.add_parser("uninstall", help="say how to remove fairshare; changes nothing"
                    ).set_defaults(f=cmd_uninstall)
-    kp = sub.add_parser("pickup", help="continue a session on the best account (inside a "
-                        "session: this one)")
-    kp.add_argument("session", nargs="?", metavar="SESSION", help="a session id or its start")
-    kp.add_argument("--bg", action="store_true", help="in the background, with no terminal")
-    _carry_flags(kp)
-    kp.set_defaults(f=cmd_pickup)
+    kp = sub.add_parser("pickup", help="continue the same session, under its own id, on the "
+                        "best account (inside a session: this one; from a terminal with no "
+                        "SESSION: pick from a list); never a copy")
+    fk = sub.add_parser("fork", help="continue a copy of a session under a new id, on the best "
+                        "account; the original goes on untouched (inside a session: this one, in "
+                        "the background; from a terminal with no SESSION: pick from a list)")
+    for verb, f in ((kp, cmd_pickup), (fk, cmd_fork)):
+        verb.add_argument("session", nargs="?", metavar="SESSION",
+                          help="a session id or its start")
+        verb.add_argument("--bg", action="store_true", help="in the background, with no terminal")
+        _carry_flags(verb)
+        verb.set_defaults(f=f)
     hq = sub.add_parser("handoff", help="inside a session: a checkpoint, then a fresh session "
                         "that reads it first, named after this one with the next -hN (with no "
                         "NOTE, the launcher has the session write it)")

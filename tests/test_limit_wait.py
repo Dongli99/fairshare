@@ -175,7 +175,7 @@ class Guard(Live):
 class ManualPickup(Live):
     def test_with_a_spent_it_picks_b(self):
         self.record()
-        code, out, err = self.inside("pickup")                       # no launcher: background
+        code, out, err = self.go("pickup", SID, "--bg")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("b")[:5], ["--bg", "--name", "pickup-0a1b2c3d", "--resume",
                                                  SID])
@@ -198,7 +198,7 @@ class ManualPickup(Live):
         self.assertTrue(err.endswith(line), err)
         self.assertIsNone(store.take_request(launcher.pid))          # the launcher not asked
         self.assertIsNone(launcher.poll())                           # nor signalled
-        code, _, err = self.inside("pickup")                         # in the background
+        code, _, err = self.go("pickup", SID, "--bg")                # in the background
         self.assertEqual((code, self.bg_args("a"), self.bg_args("b"), self.bg_args("c")),
                          (1, [], [], []))
         self.assertTrue(err.endswith(line), err)

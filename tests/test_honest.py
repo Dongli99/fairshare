@@ -45,7 +45,8 @@ fi
 printf '%s\\n' "$@" > "$FAKE_LOG/args-$name"
 env > "$FAKE_LOG/env-$name"
 [ -n "$FAKE_SLEEP" ] && exec sleep "$FAKE_SLEEP"
-case "$1" in      # a sign-in check is answered; a session (no such command) is quiet
+case "$1" in      # a sign-in check is answered, the running sessions are none; a session (no
+  agents) echo "[]"; exit 0 ;;    # such command) is quiet
   auth|whoami) [ -f "$FAKE_AUTH/$name.json" ] || exit 1
     cat "$FAKE_AUTH/$name.json"; exit "$(cat "$FAKE_AUTH/$name.exit" 2>/dev/null || echo 0)" ;;
   *) exit 0 ;;

@@ -282,9 +282,9 @@ class Readers(Continuation):
 
 
 class Copy(Continuation):
-    """A copy of a session that may still run (the foreground pickup through FAIRSHARE_CONTINUES
-    with `:copy`, the background pickup's fork) links to the original without taking its place:
-    the original keeps its account, workers and line in status."""
+    """A copy of a session that may still run (the foreground fork through FAIRSHARE_CONTINUES
+    with `:copy`, the background fork) links to the original without taking its place: the
+    original keeps its account, workers and line in status."""
 
     def setUp(self):
         super().setUp()
@@ -313,12 +313,19 @@ class Copy(Continuation):
         self.assertEqual(store.total_cost(store.session(NEW).costs), 0.5)   # its own series
 
     def test_the_background_fork_is_linked_as_a_copy(self):
-        code, out, err = self.go("pickup", SID, "--bg")
+        code, out, err = self.go("fork", SID, "--bg")
         self.assertEqual(code, 0, err)
-        copy = "s-pickup-0a1b2c3d"
+        copy = "s-fork-0a1b2c3d"
         self.assertIn(f"continued as session {copy} on b", out)
-        self.assertIn(f"{SID[:8]} was not stopped by its limit and may still be running", err)
         self.original_whole(copy)
+        self.assertFalse((self.log / "stops").exists())
+
+    def test_a_pickup_of_it_from_no_terminal_is_refused_and_stops_nothing(self):
+        code, out, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 1)
+        self.assertIn(f"{SID[:8]} is still running; not picked up", err)
+        self.assertEqual((self.bg_args("b"), (self.log / "stops").exists()), ([], False))
+        self.assertEqual(store.session(SID).account, "a")
 
 
 class StoppedCopy(Continuation):

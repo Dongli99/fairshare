@@ -574,31 +574,29 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       launcher when it has one, else in the background. SESSION is a full id or a unique prefix
       of a recorded one (unknown or ambiguous: exit 2, listing the matches). From a terminal
       outside a session it runs in the foreground in the recorded folder (a gone folder is
-      refused), with `--fork-session` under the same rule as below (`_may_run`, one line says
-      so; the link comes through `FAIRSHARE_CONTINUES` with `:copy`); inside a session or with
+      refused); inside a session or with
       `--bg`, in the background: `claude --bg --name
-      <name> --resume <id> [--fork-session] --model M --effort E <moved prompt>` (a worker keeps
-      its own name; any other session its listed name with the next handoff number, since
-      the old one may still hold it and Claude Code gives no two running sessions one name (a
-      background start is joined by its name), else `pickup-<first 8>` when it is not listed;
+      <name> --resume <id> --model M --effort E <moved prompt>` (a worker keeps
+      its own name, else the name it was listed under before a stop (decision 32), else
+      `pickup-<first 8>`; on the session's own account, only `claude --bg --resume <id> <moved
+      prompt>` (decision 32);
       a handoff's fresh session takes the name the handoff gave it, below; the launcher's
       pickup reads the name while its child runs and resumes under it after the stop,
       2026-11-19) in the recorded folder, on the top eligible account that has the model and trusts that folder or can get its trust by copy
       (decision 21; nothing can ask), with the account's clean environment and no BROWSER (a
       background session would not receive it, and uses the system browser), its output passed
-      through (it names the attach command). `--fork-session` only when the session is not
-      marked stranded and its account still lists it running, or the list cannot be had: it may
-      still run, and fairshare stops no session it did not start (one stopped by hand resumes
-      in place, keeping its id and whatever per-session state hangs on it). Then
+      through (it names the attach command). A session that may still run is never copied by a
+      pickup (until 2026-11-21 it was continued with `--fork-session`; decision 32 replaced
+      that with `fairshare fork`). Then
       the running sessions are looked up by that name (up to 10 s). The ids already live under
       that name are listed before the start and never taken (an earlier pickup or handoff of the
       same session, or a worker picked up before, may still run under it); a new id under it is a
-      copy (the fork, or the tool's own copy with a `note:` line), linked to the old one
+      resume on another account, or the tool's own copy (said, with its `note:` line when one
+      is seen, decision 32), linked to the old one
       (`store.link_session`, decision 23), and a worker's name joins it; otherwise the old record
-      is moved. A fork is linked as a copy: it carries `continues`, model, effort and its own
-      cost series, and the original keeps its account, its workers and its line in `status`
-      (no `moved_to`); the tool's own copy of a stranded session takes its place as a resume
-      under a new id does.
+      is moved. A fork (decision 32) is linked as a copy: it carries `continues`, model, effort
+      and its own cost series, and the original keeps its account, its workers and its line in
+      `status` (no `moved_to`).
       None eligible and able: exit 1, naming which were eligible and why trust could not be
       had. None eligible at all (without `-a`), in every form of the command: `no account can
       take work now; the soonest is <id>, usable at <clock>; nothing done`, exit 1, before any
@@ -857,8 +855,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
         checkpoint note is copied (never moved) when the new id has none. An old record already
         moved, or missing, is not linked (a nested session under the same launcher never takes
         the place). Never raises. The background copy (`_copied`) uses the same function. A
-        copy of a session that may still run (`_may_run`: the background fork, or a foreground
-        pickup, whose value ends in `:copy`) is linked with `copy=True`: the new record is
+        fork (decision 32: the background fork, or a foreground one, whose value ends in
+        `:copy`) is linked with `copy=True`: the new record is
         written the same way, and the old one, its workers and its line in `status` are left as
         they are (no `moved_to`).
       - **Telling a worker.** A worker learns its parent once, in its first prompt; its session
@@ -1099,6 +1097,80 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       Without `-a` it is refused with one line naming `-a`: a subcommand is about one account's
       folder, and the best account's answer would look right and be about an arbitrary one.
 
+32. **`pickup` never copies; `fork` copies** (2026-11-21; replaces decision 19's
+    `--fork-session` for a session that may still run, and its `_may_run`). A pickup continued a
+    copy under a new id whenever the session might still run, said in one line. An agent picked
+    up its own stopped worker, got a copy, and its per-session tooling (which tracks files by
+    session id) took the worker's own work for another writer's. Narrowing the copy to "its
+    account still lists it running" was not enough: a command that silently does something
+    other than what it names is the fault. Now each command does what it says or says why not:
+    - **`fairshare pickup` is the same session under the same id.** The launcher's path is
+      unchanged (it stops its own child and resumes it). Outside the launcher, "running" means
+      listed by the session's own account (one `list_sessions`): an interactive session is
+      listed by every account, a background one only by its own; a background item listed with
+      no process (`pid: null`, observed on 2.1.330: `claude logs` said the session may have
+      ended; `--all` lists ended ones the same way) is not running. Not running: resumed in
+      place. A background session, from a terminal: `<id8> is still running in the background.
+      Stop it and continue it here? [Y/n]`, after a line saying the turn in progress is lost
+      when it is busy; yes stops it (`Provider.stop_session`: `claude stop <id>` on its
+      account's folder), waits up to 5 s for it to leave the list, and resumes it in place under
+      the name it was listed under; a failed stop, or one still listed, does nothing. A
+      worker picked up by its own main session (`Worker.parent`, both ids followed to the end
+      of their chains, as a handoff or a pickup under a new id goes on) is stopped without
+      asking: fairshare started it, its main session manages it, and the request is the
+      consent; a busy one gets one line that its turn is lost, a stranded one nothing extra
+      (round 2, 2026-11-21). An
+      interactive session is never stopped (`exit it there, then pick it up`). No terminal, or
+      no list: refused, naming both ways out (`fairshare run -a <account> stop <id>`, then
+      pickup; or `fairshare fork <id>`). Inside a session not started by fairshare, bare pickup
+      is refused (it is running, it is asking): `fairshare handoff "<note>"` or `fairshare
+      fork`. Every refusal, and a no, is exit 1 (`usage.md`, Exit codes), and nothing is
+      stopped before an account that can take it was found. A stranded session is no exception:
+      left waiting for its reset (decision 25) it still runs.
+    - **A background resume on the session's own account passes nothing but the prompt**
+      (`Provider.resume_bare`), when the session is known to be a background one: a worker, or
+      listed with `kind: background` among its own account's sessions, ended ones included
+      (`list_sessions(ended=True)`: `agents --json --all`, one extra call on this path only; a
+      list that cannot be had is not known). Claude Code 2.1.330's background dispatch
+      continues a session that has saved background state in place only when at most one
+      positional follows; any flag (`--name`, `--model`, `--effort`) starts a copy, reason
+      "own-options" (read in its code, 2026-11-21). So that resume is `claude --bg --resume
+      <id> <prompt>` and keeps the session's saved name, model and effort, and an explicit
+      `--model`/`--effort` there is refused, naming `fairshare fork <id> --model ...`. Any
+      other session keeps the name, model and effort arguments, explicit ones allowed. On another account the flags pass, and
+      the new id is a move (decision 23). When the tool still starts a copy by itself (its
+      reasons: running, open-elsewhere, handle-taken, unverified, unreadable, restricted), the
+      command says so, with the tool's `note:` line from stderr (`Provider.copy_note`), and
+      links it as before; it never claims the session continued in place. The foreground
+      `--resume` has no such rule (it refuses a session running in the background).
+    - **`fairshare fork` is a copy on purpose.** Same forms as pickup (`[SESSION] [-a ID] [--bg]
+      [--model M] [--effort E]`); inside a session with no SESSION, a copy of this session in
+      the background (it cannot take this terminal; never through the launcher). It never stops
+      anything and works whether the original runs or not: `--fork-session`, `:copy` on
+      `FAIRSHARE_CONTINUES`, `_copied(..., fork=True)`; the original keeps its account,
+      workers and line in `status`, and a worker's fork does not take the worker's name or
+      record. Its name has its own family: the original's listed name with the next fork number
+      not listed running (`x-f2`, `x-f3`; `-hN` stays the handoff's), or `fork-<id8>` when it
+      is not listed (the provider gives no two running sessions one name, and a background
+      start is joined by its name). Its first prompt is its own (`FORKED_PROMPT`): it is a copy,
+      the original goes on, so it says so and waits rather than redo the original's work.
+    - **The list.** Bare `pickup` or `fork` from a terminal outside a session lists at most 8
+      main sessions (workers are their main session's to manage), each at the end of its chain,
+      whose folder is still there: the current folder (or inside it) first, then stopped at
+      their limit first, then most recently seen. A row: number, id start, folder, account,
+      state (at its limit with the reset, waiting for its reset, running in the background or in
+      a terminal, stopped; in pickup's list what picking a running one does), last seen, and
+      the last prompt a person typed, shortened. That prompt is a provider fact
+      (`Provider.last_prompt`), read from the transcript's last 256 KB (once 2 MB when nothing
+      is there), never the whole file: injected texts (records marked `isMeta` or
+      `isCompactSummary`, `promptSource: "system"`, a text led by a tag of the tool's own) and
+      `!` commands are skipped, and so are fairshare's own prompts (`_own_prompts`: each
+      template's fixed text up to its first value, never a bare "fairshare", which a person may
+      type). It is shown only in that terminal, never logged or stored.
+      Running states come from one listing per account. Enter takes row 1; a number picks; junk
+      asks again; end of input or Ctrl-C does nothing (exit 1); then exactly the SESSION
+      form's path. No terminal: the list on stderr and exit 2.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -1278,12 +1350,15 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | `--bg --name <name> <prompt>` (a session with no terminal, which prints how to attach; no prompt: an idle session), `--resume <id>`; `--bg` passes no environment but the folder variable; `--name` names a foreground session too | `BG_ARGS`, `NAME_ARGS`, `RESUME_ARGS`, `background`, `name_args`, `resume_args` | background pickup and `worker` fail with the tool's own message; the countdown's cancel hint is wrong | 2.1.322, 2026-11-11 (a marker variable set for `claude --bg --name X` was absent from the session; only `CLAUDE_CONFIG_DIR` arrived; the process comes from the tool's own pool) |
 | Transcript layout (internal, per version): one JSON record per line; `type` `user`/`assistant` with `isSidechain` false; `message.content` a string or blocks of which `text` ones are words | `T_*`, `transcript_text` | `fairshare transcript` prints the path and "layout not understood" (exit 1); the pickup prompt also names the full transcript path | 2.1.322, 2026-11-11 (synthetic fixture `tests/fixtures/claude-2.1.322/transcript.jsonl`) |
 | `!` commands in the transcript: user messages `<bash-input>…</bash-input>`, then `<bash-stdout>…</bash-stdout>` / `<bash-stderr>…</bash-stderr>` | `T_BANG_INPUT`, `T_BANG_OUTPUT`, `transcript_text` | they show raw, as plain user messages | 2.1.322, 2026-11-11 (a real transcript through `fairshare transcript`) |
-| `claude agents --json` (live sessions with `pid`, `sessionId`, `cwd`, `kind`, `name`, `startedAt`, `status` `busy`/`idle`; ended sessions not listed without `--all`; no account) | `AGENTS_ARGS`, `AGENT_ID`, `AGENT_NAME`, `AGENT_STATUS`, `AGENT_BUSY`, `AGENT_IDLE`, `list_sessions` | a worker is never joined (it hears no request, warnings treat it as a main session) and `watch` reports no ended or idle workers | 2.1.322, 2026-11-11 (a `--bg --name` session appeared with its `sessionId` within 4 s); top-level shape not recorded (a list, or an object holding one, accepted). 2.1.327, 2026-11-18: a background session is listed only through the account it runs on, so each worker is looked for in its own account's listing |
+| What a person typed, for the session list's last prompt: user records not marked `isMeta` or `isCompactSummary`, not `promptSource: "system"`, whose text is not led by a tag of the tool's own (`<task-notification>`, `<command-name>`, `<local-command-stdout>`, `<bash-input>`); typed ones carry `promptSource: "typed"` or `"queued"` | `T_META`, `T_PROMPT_SOURCE`, `T_SYSTEM_SOURCE`, `T_INJECTED`, `TAIL_BYTES`, `last_prompt` | the list shows an injected text, or a blank column | 2.1.330, 2026-11-21 (flags and leading tags counted in real transcripts, contents not read) |
+| `claude agents --json` (live sessions with `pid`, `sessionId`, `cwd`, `kind`, `name`, `startedAt`, `status` `busy`/`idle`; ended sessions not listed without `--all`; no account) | `AGENTS_ARGS`, `AGENT_ID`, `AGENT_NAME`, `AGENT_STATUS`, `AGENT_BUSY`, `AGENT_IDLE`, `AGENT_KIND`, `AGENT_PID`, `list_sessions` | a worker is never joined (it hears no request, warnings treat it as a main session) and `watch` reports no ended or idle workers; a pickup cannot tell a running session (it refuses) | 2.1.322, 2026-11-11 (a `--bg --name` session appeared with its `sessionId` within 4 s); top-level shape not recorded (a list, or an object holding one, accepted). 2.1.327, 2026-11-18: a background session is listed only through the account it runs on, so each worker is looked for in its own account's listing. 2.1.330, 2026-11-21: `kind` `interactive` (listed by every account) or `background`; a background item with `pid: null` ran no process (decision 32) |
+| `claude agents --json --all` (ended background sessions too, `kind` `background`, no pid) | `AGENTS_ALL_ARGS`, `list_sessions(ended=True)` | a stopped background session is not known as one: its pickup on its own account passes the flags, and Claude Code copies | `--help` and a live listing, 2.1.330, 2026-11-21 |
+| `claude stop <id>` (stops a background session; its conversation is kept) | `STOP_ARGS`, `stop_session` | a pickup that asked to stop it says the stop failed and does nothing | `stop --help`, 2.1.330, 2026-11-21; not run live |
 | Skill format: a folder holding `SKILL.md`, front matter between `---` lines with `name` and `description` (all optional; `description` recommended; description text truncated at 1,536 characters in the listing); user skills in `<config>/skills/<name>/` | `SKILLS_DIR`, `SKILL_FILE`, `SKILL_NAME`, `SKILL_SOURCE`, `SKILL_FENCE`, `SKILL_NAME_KEY`, `skill`, `own_skill` | the skill does not load; doctor still checks the file | documented: code.claude.com/docs/en/skills, read 2026-11-11 (no date on the page); loading in a real session: not yet checked live |
 | statusLine payload `model.id`, `model.display_name`, `effort.level` (absent when the model takes no effort level; the level actually run when the set one is unsupported) | `CAPTURE_MODEL`, `CAPTURE_MODEL_ID`, `CAPTURE_MODEL_NAME`, `CAPTURE_EFFORT`, `CAPTURE_EFFORT_LEVEL`, `session_of` | no model recorded: sessions started in place of another take the default model | documented: /statusline, read 2026-11-12 |
 | statusLine payload `cost.total_cost_usd` (an estimate at list price, not a bill; resets to 0 on `/clear`) | `CAPTURE_COST`, `CAPTURE_COST_TOTAL`, `session_of` | no spend: `status` shows `-`, no heaviest clause, no worker cost | documented: /statusline, read 2026-11-12 |
 | A resume on another account (another organization) continues the chat under a new id and drops the earlier thinking with a notice; on the same account it keeps the id; model and effort carry over both ways | none in the adapter: `FAIRSHARE_CONTINUES` (`cli.CONTINUES_ENV`), `store.link_session` | either way works: an id that stays is recorded as itself (the first capture writes the account), a new one is linked to the old (decision 23) | observed: 2.1.322, 2026-11-12 (live; agent-view docs: a resume "either continues that session under the same ID, or starts a copy under a new ID") |
-| `--resume <id>` (any project's session; the same id), `--fork-session` (a copy under a new id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line) | `RESUME_ARGS`, `FORK_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `resume_args`, `model_args`, `background` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
+| `--resume <id>` (any project's session; the same id), `--fork-session` (a copy under a new id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line on stderr; with saved background state, a copy whenever more than the prompt follows, 2.1.330) | `RESUME_ARGS`, `FORK_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `RESUME_BARE`, `COPY_NOTE`, `resume_args`, `model_args`, `background`, `copy_note` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
 | Print-mode resume for the handoff note: `-p --output-format stream-json --verbose --include-partial-messages --tools "" --resume <id>`; one JSON object per line: `system`/`thinking_tokens`, `stream_event` with `content_block_start` (`thinking`, `text`) and `content_block_delta` (`thinking_delta`, `text_delta` with `delta.text`); the final line's `result` (and `is_error`) | `NOTE_ARGS`, the `NOTE_*` spellings, `note_command`, `note_event`, `note_text` | lines that stop parsing: the spinner, the clock and the last phase stay; no result line: the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools; `--include-partial-messages` requires `--print` and `--output-format stream-json`, its example passes `--verbose`), /sessions ("Access conversations from scripts"), read 2026-11-12. Run live on 2.1.322, 2026-11-12: an Opus turn at medium effort (thinking block, then 37 text deltas, then `result`; recorded as `tests/fixtures/claude-2.1.322/note-stream.jsonl`) and a Haiku turn at low effort (no thinking block) |
 | The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (a background and an interactive session) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |

@@ -154,8 +154,8 @@ next one: both scores, the rule, and both accounts' reasons (`why a: a before b 
 and a planned full reset counts as room (its row says how much is left until the reset is used).
 The warning's best other account and `fairshare worker` say the same.
 
-If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `handoff` and `join` say
-so first and stop, before any sign-in check or usage probe.
+If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `fork`, `handoff` and `join`
+say so first and stop, before any sign-in check or usage probe.
 
 **The launch pause.** When the choice is close (the chosen account is nearly spent, the next one
 is within 10% of it, or a warning was printed), `fairshare` pauses for a moment on a terminal:
@@ -285,19 +285,12 @@ the session is marked as stopped, and:
   Typing `! fairshare pickup` in the session asks its launcher to move it now (no check that the
   account is out, no wait for the reset: you asked), to the best account that can take work. When
   none can, it says `fairshare: no account can take work now; the soonest is play, usable at
-  16:10; nothing done` and leaves the session as it is. In a session not started by `fairshare`, it
-  resumes the session in the background instead (`claude --bg --resume`, on the best account that
-  trusts the folder or can get that trust copied from another account; Claude Code prints how to
-  attach to it; background sessions open links in the system browser).
-- **From a terminal**, `fairshare pickup <id>` (the session id or its first characters) resumes a
-  recorded session in the foreground, in its folder; `--bg` does it in the background. Either
-  way, a session that was not stopped by its limit and that Claude Code still lists as running
-  (or when that list cannot be read) is continued as a copy under a new id (`--fork-session`):
-  fairshare never stops a session it did not start, and two processes never write one
-  transcript. The original stays as it was, with its account, its workers and its line in
-  `fairshare status`. To continue a running session under its own id, stop it first (`claude
-  stop <id>`, run through `fairshare run -a <account>`): a session no longer listed is resumed
-  in place.
+  16:10; nothing done` and leaves the session as it is. In a session not started by `fairshare`
+  nothing can stop the session, so it refuses and names the two ways that work: `fairshare
+  handoff "<note>"` (a fresh session that reads your note) or `fairshare fork` (a copy of this
+  session in the background).
+- **From a terminal**, `fairshare pickup` resumes a recorded session, see
+  [Pickup and fork](#pickup-and-fork).
 
 Moving a session to another account reads its whole context once on that account, uncached: that
 is the price of keeping its reasoning. For a lean start use a handoff. Each account is its own
@@ -307,13 +300,14 @@ earlier thinking with a notice. Resumed on the same account it keeps its id and 
 
 ## Pickup, handoff, switch
 
-Three ways to continue in another session, each with `--model M`, `--effort E` (override the
+Four ways to continue in another session, each with `--model M`, `--effort E` (override the
 session's latest, which carry over otherwise) and `-a ID` (that account, skipping the ranking;
 the folder trust check still applies):
 
 | command | what starts |
 |---|---|
 | `fairshare pickup` | the same session, resumed on the best account, with its whole context |
+| `fairshare fork` | a copy of the session under a new id, with its whole context; the original goes on |
 | `fairshare handoff ["<note>"]` | a fresh session that first reads a handoff note: what was done, what is next, open decisions, files touched |
 | `fairshare` (bare, inside a session) | a fresh session with nothing carried but the folder, the model and the effort (a switch) |
 
@@ -337,11 +331,10 @@ moved into another (a worktree, say). It is named after the old session, as Clau
 keeps the worker's name. A switch takes nothing over.
 
 A pickup keeps the session's name: the launcher reads it while the session still runs and gives
-it to the resumed one once the old one has stopped. Claude Code gives no two running sessions one
-name, so a pickup that starts while the old session still runs (in the background, or a copy of
-a session that was not stopped by its limit) takes the next number instead, `fairshare-6a-h2`; a
-background pickup of a session Claude Code no longer lists is named `pickup-<first 8 of its id>`.
-A worker keeps its own name.
+it to the resumed one once the old one has stopped; a pickup that stops a background session
+first (below) does the same. A background pickup of a session Claude Code no longer lists is
+named `pickup-<first 8 of its id>`, and on the session's own account it passes no name at all
+(see below). A worker keeps its own name.
 
 **Handoff with no note** (`! fairshare handoff`, you, in the session) has the launcher stop the
 session, resume it headless for one turn that writes the note (no tools), then start the fresh
@@ -374,6 +367,76 @@ its default model or quit; without a terminal it refuses, naming `--model`.
 by default), words only: no tool calls, tool output or thinking. A `!` command you typed shows as
 `user ran: <command>` and its output as `output:`, at most 20 lines. A record with no transcript
 says `no transcript recorded for <id>`.
+
+### Pickup and fork
+
+`fairshare pickup` continues **the same session, under its own id**; it never makes a copy.
+`fairshare fork` continues **a copy under a new id**, on purpose, and leaves the original as it
+is. Both take `[SESSION] [-a ID] [--bg] [--model M] [--effort E]`; SESSION is the session id or
+its first characters.
+
+- **From a terminal**, `fairshare pickup <id>` resumes the session in the foreground, in its
+  folder; `--bg` does it in the background (`claude --bg --resume`, on the best account that
+  trusts the folder or can get that trust copied from another account; Claude Code prints how
+  to attach to it; background sessions open links in the system browser). Inside another
+  session, or with no terminal, it runs in the background.
+- **A session that may still run** (its account lists it running) is never resumed alongside
+  itself, since two processes would write one transcript:
+  - a background session, from a terminal: `fairshare: 0a1b2c3d is still running in the
+    background. Stop it and continue it here? [Y/n]`. When it is in the middle of a turn, a line
+    says first that the turn is lost (its conversation is kept). Yes stops it (as `fairshare run
+    -a <account> stop <id>` would), waits a few seconds until Claude Code no longer lists it,
+    then resumes it in place under its name. A stop that fails, or a session still listed, does
+    nothing. No does nothing and names `fairshare fork <id>`.
+  - a session open in a terminal is never stopped: `0a1b2c3d is open in a terminal; not picked
+    up. Exit it there, then pick it up (it resumes in place); or `fairshare fork 0a1b2c3d`
+    continues a copy and leaves it running`.
+  - with no terminal (an agent, a script), or when Claude Code's list cannot be read, nothing is
+    stopped: `0a1b2c3d is still running; not picked up. If it is yours, stop it first
+    (fairshare run -a work stop <id>), then pick it up; or `fairshare fork 0a1b2c3d` continues a
+    copy and leaves it running`.
+  - **your own worker**, picked up by its main session (or the session that main session went on
+    as, after a handoff or a pickup): stopped without asking, since fairshare started it and its
+    main session manages it, then resumed in place. A worker in the middle of a turn gets one
+    line saying that turn is lost (its conversation is kept); one stopped by its limit loses
+    nothing. A stop that fails, or a worker still listed, does nothing, as above.
+  A session stopped by its limit is no exception: left waiting for its reset, it still runs.
+  Nothing is stopped when no account can take the session.
+- **On the session's own account, a background pickup of a background session passes only the
+  resume and its prompt.** Claude Code keeps a background session's own saved name, model and
+  effort, and starts a copy if anything else is passed. A session counts as a background one
+  when it is a worker, or when Claude Code lists it with that kind among the account's sessions,
+  ended ones included (`agents --json --all`); any other keeps its name, model and effort
+  passed as before. For a background one, `--model` or `--effort` there is refused, naming
+  `fairshare fork <id> --model ...`; on another account they apply (the session goes on under a new id
+  there, linked to the old one). If Claude Code still starts a copy for its own reasons (the
+  session runs elsewhere, its saved state cannot be read), fairshare says so, with Claude
+  Code's `note:` line, and links the copy; it never claims the session continued in place.
+- **`fairshare fork`** works whether the original runs or not and never stops it. The copy
+  starts in the original's folder, is told it is a copy and that the original goes on, and is
+  named after the original's listed name with the next fork number (`fairshare-6a-f2`, then
+  `-f3`), or `fork-<first 8 of its id>` when the original is not listed. The original keeps its
+  account, its workers and its line in `fairshare status`. Inside a session, bare `fairshare
+  fork` copies that session, in the background.
+- **The list.** Bare `fairshare pickup` or `fairshare fork` from a terminal, outside a session,
+  lists up to 8 recorded main sessions whose folder is still there: those in the current folder
+  first, then stopped by their limit first, then the most recently seen:
+
+  ```
+    1  0a1b2c3d  api   a  at its limit, resets 10:30                  seen 07:01      "Fix the date parser so that a missing year takes …"
+    2  9f8e7d6c  api   b  running in the background, asks to stop it  seen 07:58      "Now add a test for December to January."
+    3  5e6f7a8b  docs  c  open in a terminal                          seen 07:50      "Review the changelog"
+    4  1f2e3d4c  docs  a  stopped                                     seen Wed 16:00  "Rewrite the install section"
+  fairshare: workers are not listed (their main session manages them); fairshare pickup <id> and fairshare fork <id> still take one by id
+  Pick up which? [1]:
+  ```
+
+  The last column is the last message you typed in that session (from the end of its
+  transcript, shown only here; the prompts fairshare itself sends, such as "fairshare moved this
+  session …", are skipped). In pickup's list a running row says what picking it does
+  (`asks to stop it`, or `open in a terminal`). Enter takes the first row, a number picks one,
+  anything else asks again; end of input or Ctrl-C does nothing. Without a terminal the list
+  goes to stderr, nothing is asked, and the exit code is 2.
 
 ## Workers
 
@@ -411,9 +474,10 @@ run the commands yourself, from inside a session:
   between sessions go by name); without one, the id alone. A pickup under the same id says
   nothing.
 - A worker stopped by its limit: wait for its reset, or `fairshare pickup <its session id>`
-  resumes it on the best account, in the background, under its own name, with its model and
-  effort. To move the main session itself: `fairshare pickup` (the same session) or `fairshare
-  handoff "<note>"` (a fresh one).
+  from its main session stops it (left waiting for its reset it still runs) and resumes it on
+  the best account, in the background, under its own id and name, with its model and effort. `fairshare fork <id>` is a copy instead, and the worker goes on. To move the main
+  session itself: `fairshare pickup` (the same session) or `fairshare handoff "<note>"` (a
+  fresh one).
 - A worker that fails on its environment rather than its limit (every lookup of a system
   service refused, say, while your own shell on the same account works): Claude Code runs all
   background sessions of an account under one shared process, which keeps ready copies of itself
@@ -596,8 +660,8 @@ from the model.
 | code | when |
 |---|---|
 | 0 | done; for `run`, the session's own exit code is passed through (for `run -a ID <subcommand>`, Claude Code's) |
-| 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check |
-| 2 | a usage error: an unknown command or account id, `setup` or `join` without a terminal, `full-reset` on an account whose current week is not known, one of Claude Code's own subcommands without `-a` |
+| 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check; a `pickup` refused because the session may still run (or you said no to stopping it, or the stop failed), or nothing picked from the list |
+| 2 | a usage error: an unknown command, account or session id, bare `pickup` or `fork` with no terminal to ask (the list goes to stderr) or no session to list, `setup` or `join` without a terminal, `full-reset` on an account whose current week is not known, one of Claude Code's own subcommands without `-a` |
 | 75 | no account can take work and there is no terminal to ask (or you chose not to wait) |
 | 126, 127 | Claude Code could not be started (126) or was not found (127) |
 | 128 + N | the session died of signal N |

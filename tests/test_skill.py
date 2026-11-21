@@ -21,6 +21,7 @@ class Shipped(Base):
         self.assertTrue(claude.own_skill(text))
         for words in ("fairshare worker", "fairshare watch", "fairshare checkpoint",
                       "--request", "fairshare trust", "fairshare pickup <its session id>",
+                      "fairshare fork <session id>", "stop <its session id>", "only your own",
                       "subagent"):
             self.assertIn(words, text)
 

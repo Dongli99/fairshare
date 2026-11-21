@@ -201,6 +201,12 @@ class LiveSession:
     id: str
     name: str | None
     busy: bool | None                 # None: the provider did not say
+    kind: str | None = None           # KIND_INTERACTIVE | KIND_BACKGROUND; None: not said
+    pid: int | None = None            # its process; None: none listed (for a background
+                                      # session: it runs no process now)
+
+
+KIND_INTERACTIVE, KIND_BACKGROUND = "interactive", "background"   # open in a terminal | not
 
 
 NOTE_THINKING, NOTE_WRITING = "thinking", "writing"

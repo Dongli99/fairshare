@@ -36,8 +36,13 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 - `fairshare checkpoint --show <worker name>` prints a worker's note.
 - A worker stopped by its limit: watch says when that limit resets, and Claude Code resumes the
   worker by itself then, with its whole context. If that is soon, let it wait; otherwise
-  `fairshare pickup <its session id>` continues it on the best account now, in the background.
-- To stop a worker, use your own tools (`claude stop`, or a message to it).
+  `fairshare pickup <its session id>` stops it and continues the same session, under its own
+  id, on the best account now, in the background. pickup never copies, and stops only your own
+  workers: any other session that still runs, stop it first
+  (`fairshare run -a <its account> stop <its session id>`), then pick it up.
+- `fairshare fork <session id>` is a copy on purpose, under a new id; the original goes on.
+- To stop a worker, use your own tools (`fairshare run -a <account> stop <id>`, or a message
+  to it).
 
 ## When fairshare warns you
 A warning names the account, its percent, when that window resets and the best other account.
@@ -61,7 +66,8 @@ the chosen account has left now, which its reason states.
     `"$(cat <file>)"`.
   - **pickup**: `fairshare checkpoint "<where you stand>"`, then `fairshare pickup`. This same
     session continues on the best account with its whole context (on another account that
-    context is read again once, uncached).
+    context is read again once, uncached). In a session not started by fairshare nothing can
+    stop this one, so pickup refuses: hand off instead.
 
 ## Checkpoints
 - `fairshare checkpoint "<what is done, what is next>"` appends to this session's note.

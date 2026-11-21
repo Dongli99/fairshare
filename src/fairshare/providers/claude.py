@@ -20,8 +20,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import store
-from ..model import (EFFORT_NONE, NOTE_THINKING, NOTE_WRITING, USAGE_MODEL_TURN, USAGE_NO_ANSWER,
-                     USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT, Account, AccountStatus, Alias,
+from ..model import (EFFORT_NONE, KIND_BACKGROUND, KIND_INTERACTIVE, NOTE_THINKING, NOTE_WRITING,
+                     USAGE_MODEL_TURN, USAGE_NO_ANSWER, USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT,
+                     Account, AccountStatus, Alias,
                      Candidate, Capture, LiveSession, NoteEvent, SessionSeen, Window, model_window,
                      plan_for, window_names)
 
@@ -73,6 +74,19 @@ usage_timeout = USAGE_TIMEOUT
 # session's model and effort level (CLI reference, read 2026-11-12).
 BG_ARGS, NAME_ARGS, RESUME_ARGS, FORK_ARGS = ("--bg",), ("--name",), ("--resume",), \
     ("--fork-session",)
+# A background resume (`--bg --resume <id>`) of a session that has saved background state (one
+# that ran in the background, on that account) continues it in place only when at most one
+# positional (the prompt) follows: any other argument (`--name`, `--model`, `--effort`) starts a
+# copy, reason "own-options" ("background session X keeps its own saved options, so the flags
+# you passed started a copy as Y"); without them it keeps its saved name, model and effort. It
+# also starts a copy by itself when the session runs ("running", "open-elsewhere") or its saved
+# state is taken, unverified, unreadable or restricted, and says so on stderr in one `note:` line
+# naming the copy's short id. Read in 2.1.330's own code (the background dispatch), 2026-11-21.
+# The foreground `--resume <id>` has no such rule: it refuses a session running in the background
+# (`claude stop` first, or `--fork-session`) and otherwise continues it with the flags given.
+RESUME_BARE = True
+resume_bare = RESUME_BARE
+COPY_NOTE = re.compile(r"^note: .*\bstarted a (?:restricted )?copy\b.*$", re.M)
 MODEL_ARGS, EFFORT_ARGS = ("--model",), ("--effort",)
 # The handoff note: one headless turn of a stopped session, resumed with the arguments above,
 # in print mode with streamed JSON output and no tools (`--tools ""` disables every built-in
@@ -108,6 +122,22 @@ RESUMES_AT_RESET = True
 resumes_at_reset = RESUMES_AT_RESET
 AGENT_ID, AGENT_NAME, AGENT_STATUS, AGENT_BUSY, AGENT_IDLE = (
     "sessionId", "name", "status", "busy", "idle")
+# `agents --json` items also carry `kind` ("interactive": open in a terminal, listed through every
+# account; "background": listed only through its own) and `pid` (2.1.330, 2026-11-21). A
+# background item listed with `pid: null` (and `status: null`, `state: "blocked"`) ran no process:
+# `claude logs <id>` answered "session not found — it may have already ended", while a live one's
+# printed its screen; `--all` lists ended ones (`done`, `stopped`) the same way, with no pid.
+AGENT_KIND, AGENT_PID = "kind", "pid"
+# `agents --json --all` also lists the sessions that ended (`state` `done`, `stopped`; no pid),
+# background ones with `kind: "background"`, through their own account only (2.1.330,
+# 2026-11-21: `--help` "With --json: also include completed background sessions", and the live
+# listing): how fairshare knows a stopped session ran in the background.
+AGENTS_ALL_ARGS = ("--all",)
+AGENT_KINDS = {"interactive": KIND_INTERACTIVE, "background": KIND_BACKGROUND}
+# `claude stop <id>` stops a background session; its conversation is kept (`stop --help`,
+# 2.1.330). Run on the session's own account's folder, as `fairshare run -a ID stop` runs it.
+STOP_ARGS = ("stop",)
+STOP_TIMEOUT = 15.0                          # seconds
 
 # Environment variables.
 CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"         # picks the account's folder
@@ -352,12 +382,20 @@ def uses_week(model: str, week: str) -> bool:
     return bool(words) and all(w in model.lower() for w in words)
 
 
-def background(account: Account, name: str, prompt: str, extra: list[str] = ()
+def background(account: Account, name: str | None, prompt: str, extra: list[str] = ()
                ) -> tuple[list[str], dict[str, str]]:
     """The command and environment that start a session of `account` with no terminal, named
-    `name`, with `extra` arguments (a resume, a model) and `prompt` as its first message."""
-    return ([real_binary(), *BG_ARGS, *name_args(name), *extra, prompt],
+    `name` (None: no name argument), with `extra` arguments (a resume, a model) and `prompt` as
+    its first message."""
+    return ([real_binary(), *BG_ARGS, *(name_args(name) if name else ()), *extra, prompt],
             clean_env(account.config_dir))
+
+
+def copy_note(output: str) -> str | None:
+    """The tool's `note:` line saying a resume started a copy instead (COPY_NOTE), from what a
+    background start wrote to stderr; None when there is none."""
+    m = COPY_NOTE.search(output)
+    return m.group(0).strip() if m else None
 
 
 def note_command(account: Account, session_id: str, extra: list[str], prompt: str
@@ -405,12 +443,14 @@ def note_text(out: str) -> str | None:
         else text.strip() or None
 
 
-def list_sessions(account: Account) -> list[LiveSession] | None:
+def list_sessions(account: Account, ended: bool = False) -> list[LiveSession] | None:
     """The sessions running now, as the tool lists them through `account`'s folder: a
-    background session only through the account it runs on (2.1.327, 2026-11-18); None when
-    the list could not be had."""
+    background session only through the account it runs on (2.1.327, 2026-11-18); `ended`: the
+    background sessions that ended too (AGENTS_ALL_ARGS). None when the list could not be
+    had."""
     try:
-        r = subprocess.run([real_binary(), *AGENTS_ARGS], env=clean_env(account.config_dir),
+        r = subprocess.run([real_binary(), *AGENTS_ARGS, *(AGENTS_ALL_ARGS if ended else ())],
+                           env=clean_env(account.config_dir),
                            stdin=subprocess.DEVNULL, capture_output=True, text=True,
                            timeout=PROBE_TIMEOUT)
         raw = json.loads(r.stdout)
@@ -422,8 +462,22 @@ def list_sessions(account: Account) -> list[LiveSession] | None:
         return None
     status = {AGENT_BUSY: True, AGENT_IDLE: False}
     return [LiveSession(i[AGENT_ID], i.get(AGENT_NAME) if isinstance(i.get(AGENT_NAME), str)
-                        else None, status.get(i.get(AGENT_STATUS)))
+                        else None, status.get(i.get(AGENT_STATUS)),
+                        AGENT_KINDS.get(i.get(AGENT_KIND)),
+                        i.get(AGENT_PID) if type(i.get(AGENT_PID)) is int else None)
             for i in raw if isinstance(i, dict) and isinstance(i.get(AGENT_ID), str)]
+
+
+def stop_session(account: Account, session_id: str) -> bool:
+    """Stop the background session `session_id` through `account`'s folder; whether the tool
+    said it did (exit 0). Never raises."""
+    try:
+        r = subprocess.run([real_binary(), *STOP_ARGS, session_id],
+                           env=clean_env(account.config_dir), stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=STOP_TIMEOUT)
+    except (SystemExit, OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
 
 
 # The transcript (`transcript_path`, internal and per version: one JSON record per line; fixture
@@ -438,6 +492,16 @@ T_BLOCK_TYPE, T_TEXT_BLOCK, T_TEXT = "type", "text", "text"
 # and its output another, `<bash-stdout>...</bash-stdout>` with `<bash-stderr>...</bash-stderr>`
 # (2.1.322, planner, 2026-11-11). They become the roles "command" and "output".
 T_BANG_INPUT, T_BANG_OUTPUT = "bash-input", ("bash-stdout", "bash-stderr")
+# What a person typed, for the last prompt: a user message that is none of these. Records the tool
+# adds itself are marked `isMeta` or `isCompactSummary` (the summary that continues a compacted
+# session), or have `promptSource: "system"` (a background task's notice); texts it injects begin
+# with a tag of its own (`<task-notification>`, `<command-name>`, `<local-command-stdout>`, a `!`
+# command's `<bash-input>`). Seen in transcripts of 2.1.330, 2026-11-21; a typed prompt has
+# `promptSource: "typed"`, one typed while the session worked `"queued"`.
+T_META, T_PROMPT_SOURCE, T_SYSTEM_SOURCE = ("isMeta", "isCompactSummary"), "promptSource", "system"
+T_INJECTED = re.compile(r"<[a-z][a-z-]*>")
+TAIL_BYTES = 256 * 1024      # the last prompt is looked for in this much of a transcript's end,
+TAIL_WIDER = 8               # then once in this many times as much
 
 
 def _tagged(text: str, tag: str) -> str | None:
@@ -466,6 +530,21 @@ def _text_of(content: object) -> str | None:
     return None
 
 
+def _messages(lines: list[str]):
+    """The main conversation's records among transcript lines, oldest first, as (record, role,
+    its words stripped): only messages with words, never side chains or other records."""
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or r.get(T_TYPE) not in T_ROLES \
+                or r.get(T_SIDECHAIN) is not False or not isinstance(r.get(T_MESSAGE), dict):
+            continue
+        if (text := _text_of(r[T_MESSAGE].get(T_CONTENT))) and text.strip():
+            yield r, T_ROLES[r[T_TYPE]], text.strip()
+
+
 def transcript_text(path: Path) -> list[tuple[str, str]] | None:
     """The main conversation of a transcript, oldest first, as (role, text) pairs with role
     "user" or "assistant", or "command" and "output" for a `!` command the user ran: only
@@ -476,22 +555,49 @@ def transcript_text(path: Path) -> list[tuple[str, str]] | None:
     except (OSError, UnicodeDecodeError):
         return None
     out = []
-    for line in lines:
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(r, dict) or r.get(T_TYPE) not in T_ROLES \
-                or r.get(T_SIDECHAIN) is not False or not isinstance(r.get(T_MESSAGE), dict):
-            continue
-        if (text := _text_of(r[T_MESSAGE].get(T_CONTENT))) and text.strip():
-            role = T_ROLES[r[T_TYPE]]
-            bang = _bang(text.strip()) if role == "user" else None
-            if bang is None:
-                out.append((role, text.strip()))
-            elif bang[1]:
-                out.append(bang)
+    for _, role, text in _messages(lines):
+        bang = _bang(text) if role == "user" else None
+        if bang is None:
+            out.append((role, text))
+        elif bang[1]:
+            out.append(bang)
     return out
+
+
+def _tail(path: Path, size: int) -> tuple[list[str], bool]:
+    """The whole lines in the last `size` bytes of `path` (a cut first line dropped), and whether
+    that is the whole file. Raises OSError."""
+    with path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        start = max(0, f.tell() - size)
+        f.seek(start)
+        data = f.read()
+    if start:
+        data = data[data.find(b"\n") + 1:] if b"\n" in data else b""
+    return data.decode("utf-8", errors="replace").splitlines(), start == 0
+
+
+def last_prompt(path: Path, skip: tuple[str, ...] = ()) -> str | None:
+    """The last message a person typed in a transcript's main conversation, read from its end
+    only (TAIL_BYTES, widened once): never the tool's own records or injected texts, a `!`
+    command, or a text that begins with one of `skip`. None when there is none there or the
+    file cannot be read. Never raises."""
+    size = TAIL_BYTES
+    for _ in range(2):
+        try:
+            lines, whole = _tail(path, size)
+        except OSError:
+            return None
+        found = None
+        for r, role, text in _messages(lines):
+            if role == "user" and not any(r.get(k) for k in T_META) \
+                    and r.get(T_PROMPT_SOURCE) != T_SYSTEM_SOURCE and not T_INJECTED.match(text) \
+                    and not text.startswith(skip):
+                found = text
+        if found is not None or whole:
+            return found
+        size *= TAIL_WIDER
+    return None
 
 
 def hook_session(hook: str, raw: object) -> SessionSeen | None:

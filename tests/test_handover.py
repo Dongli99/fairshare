@@ -32,27 +32,58 @@ from test_session import WAIT
 WRAPPER = """#!/bin/sh
 # A background start records its arguments and folder and goes live under its name: as the
 # session it resumes (in place), or as s-<name> (a fork, or a fresh session). `agents --json`
-# lists the live ones. A headless turn (`-p` with `--resume`) logs its arguments and answers
-# $FAKE_NOTE (after $FAKE_NOTE_SLEEP seconds, exiting $FAKE_NOTE_EXIT).
+# lists the live ones: lines `<id> <name> [<kind> [<pid> [<status>]]]` (background, 100, busy by
+# default; `null` for none); with `--all`, also those of $FAKE_LOG/ended. `stop <id>` logs the
+# id to $FAKE_LOG/stops and moves it from the list to the ended ones, unless $FAKE_STOP_EXIT
+# (its exit code) or $FAKE_STOP_STAYS is set. A headless turn
+# (`-p` with `--resume`) logs its arguments and answers $FAKE_NOTE (after $FAKE_NOTE_SLEEP
+# seconds, exiting $FAKE_NOTE_EXIT).
 name=$(basename "$CLAUDE_CONFIG_DIR")
 if [ "$1" = "agents" ]; then
   printf '['; sep=
-  [ -f "$FAKE_LOG/live" ] && while read id n; do
-    printf '%s{"sessionId": "%s", "name": "%s", "status": "busy"}' "$sep" "$id" "$n"; sep=,
-  done < "$FAKE_LOG/live"
+  files="$FAKE_LOG/live"; [ "$3" = "--all" ] && files="$files $FAKE_LOG/ended"
+  for f in $files; do
+    [ -f "$f" ] && while read id n kind pid st; do
+      [ "${st:-busy}" = null ] && st=null || st="\\"${st:-busy}\\""
+      printf '%s{"sessionId": "%s", "name": "%s", "kind": "%s", "pid": %s, "status": %s}' \\
+        "$sep" "$id" "$n" "${kind:-background}" "${pid:-100}" "$st"; sep=,
+    done < "$f"
+  done
   printf ']\\n'; exit 0
+fi
+if [ "$1" = "stop" ]; then
+  echo "$2" >> "$FAKE_LOG/stops"
+  [ -n "$FAKE_STOP_EXIT" ] && exit "$FAKE_STOP_EXIT"
+  if [ -z "$FAKE_STOP_STAYS" ] && [ -f "$FAKE_LOG/live" ]; then
+    awk -v id="$2" '$1 == id {print $1, $2, $3, "null", "null"}' "$FAKE_LOG/live" \\
+      >> "$FAKE_LOG/ended"
+    awk -v id="$2" '$1 != id' "$FAKE_LOG/live" > "$FAKE_LOG/live.new"
+    mv "$FAKE_LOG/live.new" "$FAKE_LOG/live"
+  fi
+  exit 0
 fi
 if [ "$1" = "--bg" ]; then
   pwd -P > "$FAKE_LOG/cwd-$name"
   printf '%s\\n' "$@" > "$FAKE_LOG/bg-$name"
-  live="s-$3"; fork=; prev=
+  n=saved; [ "$2" = "--name" ] && n=$3     # no --name: the session's saved one
+  live="s-$n"; fork=; prev=
   for x; do
     [ "$prev" = "--resume" ] && resumed=$x
     [ "$x" = "--fork-session" ] && fork=1
     prev=$x
   done
-  [ -n "$resumed" ] && [ -z "$fork" ] && [ -z "$FAKE_COPY" ] && live=$resumed
-  echo "$live $3" >> "$FAKE_LOG/live"
+  copy=$FAKE_COPY
+  if [ -n "$resumed" ] && [ "$resumed" = "$FAKE_BG_STATE" ] && [ $# -gt 4 ]; then
+    copy=1                                 # saved background state: flags make a copy
+    s8=$(echo "$resumed" | cut -c1-8)
+    printf '%s %s %s\\n' "note: background session $s8 keeps its own saved options, so the" \\
+      "flags you passed started a copy as cafe0001. Without flags, the same command" \\
+      "continues $s8 itself." >&2
+  elif [ -n "$FAKE_COPY_NOTE" ]; then
+    echo "$FAKE_COPY_NOTE" >&2
+  fi
+  [ -n "$resumed" ] && [ -z "$fork" ] && [ -z "$copy" ] && live=$resumed
+  echo "$live $n" >> "$FAKE_LOG/live"
 fi
 note=
 for x; do [ "$x" = "--resume" ] && note=1; done
@@ -278,18 +309,19 @@ class CommandPickup(Handover):
         self.assertEqual(cmd[1:6], ["--model", "claude-opus-5-5", "--effort", "max", "--resume"])
         self.assertEqual(store.session(SID).account, "a")     # until its first capture
 
-    def test_foreground_of_a_running_session_continues_a_copy(self):
+    def test_foreground_fork_of_a_running_session_continues_a_copy(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
         (self.log / "live").write_text(f"{SID}\n")                   # listed: still running
-        code, _, err = self.go("pickup", SID[:8], tty=True)
+        code, _, err = self.go("fork", SID[:8], tty=True)
         self.assertEqual(code, 0, err)
         cmd, env = self.launched.call_args.args[:2]
-        self.assertEqual(cmd[5:8], ["--resume", SID, "--fork-session"])
-        self.assertIn(f"{SID[:8]} was not stopped by its limit and may still be running; "
-                      "continuing a copy under a new id (the original is left as it is)", err)
+        self.assertEqual(cmd[5:10], ["--name", "fork-0a1b2c3d", "--resume", SID,
+                                     "--fork-session"])
+        self.assertEqual(cmd[-1], cli.FORKED_PROMPT.format(old=SID, new="b"))
         self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}:copy")
         rec = store.session(SID)                                 # left as it is
         self.assertEqual((rec.account, rec.stranded_at, rec.moved_to), ("a", None, None))
+        self.assertFalse((self.log / "stops").exists())          # never stopped
 
     def test_foreground_of_a_session_stopped_by_hand_resumes_in_place(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
@@ -311,13 +343,20 @@ class CommandPickup(Handover):
         self.assertNotIn("may still be running", err)
         self.assertEqual([(r.id, r.account) for r in store.sessions()], [(SID, "b")])
 
-    def test_without_its_accounts_list_a_session_not_stopped_by_its_limit_is_copied(self):
+    def test_without_its_accounts_list_pickup_refuses_and_fork_copies(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
         with mock.patch.object(claude, "list_sessions", lambda acct: None):
             code, _, err = self.go("pickup", SID[:8], tty=True)
+            self.assertEqual(code, 1)
+            self.launched.assert_not_called()
+            self.assertIn(f"{SID[:8]} may still be running (its account's list of running "
+                          "sessions cannot be had); not picked up. If it is yours, stop it first "
+                          f"(fairshare run -a a stop {SID}), then pick it up; or `fairshare fork "
+                          f"{SID[:8]}` continues a copy and leaves it running", err)
+            code, _, err = self.go("fork", SID[:8], tty=True)
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.launched.call_args.args[0][5:8], ["--resume", SID, "--fork-session"])
-        self.assertIn("may still be running", err)
+        self.assertEqual(self.launched.call_args.args[0][7:10], ["--resume", SID,
+                                                                 "--fork-session"])
 
     def test_foreground_of_a_stranded_session_resumes_in_place(self):
         self.record(model="claude-opus-5-5", effort="high")
@@ -332,7 +371,7 @@ class CommandPickup(Handover):
 
     def test_background_of_a_stranded_session_resumes_in_place(self):
         self.record(model="claude-opus-5-5", effort="high")
-        code, out, err = self.inside("pickup")
+        code, out, err = self.go("pickup", SID, "--bg")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("b"), ["--bg", "--name", "pickup-0a1b2c3d", "--resume", SID,
                                              "--model", "claude-opus-5-5", "--effort", "high",
@@ -341,16 +380,19 @@ class CommandPickup(Handover):
         self.assertEqual([(r.id, r.account, r.stranded_at) for r in store.sessions()],
                          [(SID, "b", None)])
 
-    def test_background_of_a_running_session_forks_with_a_copied_record(self):
+    def test_background_fork_of_a_running_session_has_a_copied_record(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
         (self.log / "live").write_text(f"{SID}\n")                   # listed: still running
         store.update_session(SID, lambda old: SessionRecord(
             **{**vars(old), "role": ROLE_WORKER, "parent": "p-1"}))
-        code, out, err = self.go("pickup", SID, "--bg")
+        code, out, err = self.go("fork", SID, "--bg")
         self.assertEqual(code, 0, err)
         args = self.bg_args("b")
-        self.assertEqual(args[3:6], ["--resume", SID, "--fork-session"])
-        new = "s-pickup-0a1b2c3d"
+        self.assertEqual(args[:6], ["--bg", "--name", "fork-0a1b2c3d", "--resume", SID,
+                                    "--fork-session"])
+        self.assertEqual(args[-1], cli.FORKED_PROMPT.format(old=SID, new="b"))
+        self.assertIn(f"forking {SID} on b", err)
+        new = "s-fork-0a1b2c3d"
         self.assertIn(f"continued as session {new} on b", out)
         old, copy = store.session(SID), store.session(new)
         self.assertEqual((old.account, old.role), ("a", ROLE_WORKER))           # left as it was
@@ -359,9 +401,10 @@ class CommandPickup(Handover):
                                       str(self.work)))
 
     def test_a_second_pickup_of_the_same_session_links_the_new_copy_never_the_earlier(self):
-        self.record(stranded=None, model="claude-opus-5-5", effort="high")
-        (self.log / "live").write_text(f"s-earlier pickup-0a1b2c3d\n{SID}\n")  # an earlier pickup
-        code, out, err = self.go("pickup", SID, "--bg")
+        self.record(model="claude-opus-5-5", effort="high")
+        (self.log / "live").write_text("s-earlier pickup-0a1b2c3d\n")  # an earlier pickup
+        with mock.patch.dict(os.environ, {"FAKE_COPY": "1"}):          # the tool copies
+            code, out, err = self.go("pickup", SID, "--bg")
         self.assertEqual(code, 0, err)
         new = "s-pickup-0a1b2c3d"
         self.assertIn(f"continued as session {new} on b", out)
@@ -404,6 +447,7 @@ class CommandPickup(Handover):
         self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "w-1", "--resume", "s-w",
                                                  "--model"])
         self.assertEqual(self.bg_args("b")[6:], ["haiku", MOVED.format(new="b", why=LIMIT)])
+        (self.log / "live").unlink()                             # that resume stopped
         store.move_session("s-w", "a")
         store.update_session("s-w", lambda old: SessionRecord(
             **{**vars(old), "stranded_at": NOW - 30, "model": "claude-opus-5-5",
@@ -550,22 +594,22 @@ class Handoff(Handover):
         args, _ = self.started_args()
         self.assertEqual(args[:2], ["--resume", SID])
 
-    def test_a_background_copy_of_a_running_session_takes_the_next_number(self):
+    def test_a_background_fork_of_a_running_session_takes_the_next_fork_number(self):
         self.record(stranded=None)
         (self.log / "live").write_text(f"{SID} fairshare-6a\n")    # still running: its name is held
-        code, out, err = self.go("pickup", SID, "--bg")
+        code, out, err = self.go("fork", SID, "--bg")
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "fairshare-6a-h2", "--resume",
+        self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "fairshare-6a-f2", "--resume",
                                                  SID, "--fork-session"])
-        self.assertIn("continued as session s-fairshare-6a-h2 on b", out)
+        self.assertIn("continued as session s-fairshare-6a-f2 on b", out)
 
-    def test_a_foreground_copy_of_a_running_session_takes_the_next_number(self):
+    def test_a_foreground_fork_of_a_running_session_takes_the_next_fork_number(self):
         self.record(stranded=None)
-        (self.log / "live").write_text(f"{SID} fairshare-6a\n")
-        code, _, err = self.go("pickup", SID[:8], tty=True)
+        (self.log / "live").write_text(f"{SID} fairshare-6a\nother fairshare-6a-f2\n")
+        code, _, err = self.go("fork", SID[:8], tty=True)
         self.assertEqual(code, 0, err)
         cmd = self.launched.call_args.args[0]
-        self.assertEqual(cmd[cmd.index("--name") + 1], "fairshare-6a-h2")
+        self.assertEqual(cmd[cmd.index("--name") + 1], "fairshare-6a-f3")   # -f2 still runs
         self.assertIn("--fork-session", cmd)
 
     def test_the_launcher_has_the_note_written_on_the_sessions_own_account(self):

@@ -806,10 +806,22 @@ class PickupCommand(Stranded):
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
         self.assertEqual(store.take_request(launcher.pid), Request(SID, True, 777))
 
-    def test_inside_a_session_without_one_it_starts_in_the_background(self):
+    def test_inside_a_session_without_one_it_refuses_naming_handoff_and_fork(self):
         self.record()
         self.trust("b")
-        code, _, err = self.pickup(env={"CLAUDE_CODE_SESSION_ID": SID})
+        code, out, err = self.pickup(env={"CLAUDE_CODE_SESSION_ID": SID})
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, "fairshare: this session was not started by fairshare, so nothing "
+                              "can stop it to resume it under its own id; for a fresh session "
+                              "that reads your note: fairshare handoff \"<note>\"; for a copy "
+                              "of this one in the background: fairshare fork\n")
+        self.assertEqual((self.bg_args("b"), self.fg), ([], []))
+        self.assertEqual(store.session(SID).account, "a")
+
+    def test_inside_another_session_it_starts_in_the_background(self):
+        self.record()
+        self.trust("b")
+        code, _, err = self.pickup(SID[:8], env={"CLAUDE_CODE_SESSION_ID": "s-other"})
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("b"), ["--bg", "--name", "pickup-0a1b2c3d", "--resume",
                                              SID, "fairshare moved this session from account a "
