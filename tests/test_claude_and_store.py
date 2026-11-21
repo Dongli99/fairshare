@@ -78,6 +78,36 @@ class WrongTypes(unittest.TestCase):
             self.assertIsNone(store.load("claude"), text)
 
 
+class UsageLog(unittest.TestCase):
+    """Each new snapshot is appended to the account's usage log with the cost its sessions drew
+    since the one before; a redraw that changes nothing writes no line."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        env = mock.patch.dict(os.environ, {"FAIRSHARE_STATE": d.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.log = Path(d.name) / "usage" / "a.jsonl"
+        recs = [mock.Mock(account="a", costs=[[[100.0, 0.0], [150.0, 1.5], [250.0, 4.0]]]),
+                mock.Mock(account="a", costs=[]),                     # no cost data
+                mock.Mock(account="b", costs=[[[100.0, 0.0], [150.0, 9.0]]])]
+        p = mock.patch.object(store, "sessions", lambda: recs)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def lines(self):
+        return [json.loads(x) for x in self.log.read_text().splitlines()]
+
+    def test_lines_carry_the_windows_and_the_cost_since_the_last(self):
+        store.record("a", {"seven_day": Window(40.0, 900.0)}, 120.0)
+        store.record("a", {"seven_day": Window(40.0, 900.0)}, 200.0)      # unchanged: no line
+        store.record("a", {"seven_day": Window(42.0, 900.0)}, 260.0)
+        self.assertEqual(self.lines(), [
+            {"t": 120.0, "spent": None, "windows": {"seven_day": [40.0, 900.0]}},
+            {"t": 260.0, "spent": 4.0, "windows": {"seven_day": [42.0, 900.0]}}])
+
+
 class StaleRedraw(unittest.TestCase):
     """An idle session redraws its statusLine with old values; they must not roll usage back."""
     OLD = Snapshot(100.0, {"five_hour": Window(40, 10_000), "seven_day": Window(60, 500_000)})

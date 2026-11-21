@@ -187,6 +187,8 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
         old = load(account_id)
         snap = merge(old, fresh, now, probe)
         save(account_id, snap)
+        if old is None or snap.captured_at != old.captured_at:
+            _log_usage(account_id, snap, old)
         if old and account_id in active_full_resets(now) and any(
                 (w := snap.windows.get(k)) and (w.used_pct < was.used_pct
                                                 or abs(w.resets_at - was.resets_at) > SAME_WINDOW_S)
@@ -194,6 +196,24 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
             _change_full_resets(lambda d: {**d, account_id: {**d[account_id], "used_at": now}}
                                 if account_id in d else d)
     return snap
+
+
+def _log_usage(account_id: str, snap: Snapshot, old: Snapshot | None) -> None:
+    """Append the new snapshot to the account's usage log (`usage/<id>.jsonl`), with the cost
+    its sessions drew since the one before (`spent`, None for the first): the data for learning
+    what a percent of each window costs. Cost points last only COST_KEEP_S, so the cost is
+    taken now. Called under the account's lock, so lines stay in order. A failed write loses
+    one line, nothing else."""
+    spent = None if old is None else sum(
+        x for r in sessions() if r.account == account_id
+        and (x := spend(r.costs, old.captured_at, snap.captured_at)))
+    line = {"t": snap.captured_at, "spent": spent,
+            "windows": {k: [w.used_pct, w.resets_at] for k, w in snap.windows.items()}}
+    with contextlib.suppress(OSError):
+        dest = state_dir() / "usage"
+        dest.mkdir(parents=True, exist_ok=True)
+        with open(dest / f"{account_id}.jsonl", "a") as f:
+            f.write(json.dumps(line) + "\n")
 
 
 def claim_probe(account_id: str, now: float, max_age: float) -> bool:

@@ -1,7 +1,7 @@
 # Architecture
 
 ```
-statusLine / provider output ──► providers/<p>.parse_capture ──► store (snapshot per account)
+statusLine / provider output ──► providers/<p>.parse_capture ──► store (snapshot per account; each change logged to usage/<id>.jsonl)
 providers/<p>.read_usage (status, run: every account, in parallel) ──►┤ (same merge)
                                                                    │
 accounts.toml ──► model.load_accounts ───────────────┐             ▼
@@ -1232,7 +1232,9 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 ## Not built yet
 
 OpenAI/Codex adapter · packaging for Homebrew · sizes, a "still needed" ledger and burn rate
-(decision 24 records the data they need).
+(decision 24 records the data they need) · room in dollars: what a percent of each window costs,
+fitted per account from `usage/<id>.jsonl` (each new snapshot's windows, with the dollars its
+sessions drew since the one before), before anything relies on it.
 
 Before a second provider lands, these Claude-only spots must move behind the provider seam
 (none affects a Claude-only user today):
