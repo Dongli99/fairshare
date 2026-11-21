@@ -28,11 +28,13 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 ## While workers live
 - Keep `fairshare watch` running as a background command. It exits when something concerns you
   (your account near its limit, a worker's checkpoint, a worker stopped by its limit, a worker
-  that ended its turn and waits, ended or idle) and prints one line per event. Act on them, then
-  start `fairshare watch` again. A worker that ended its turn waits for you: read its last
-  message with the `fairshare transcript` command the line gives, then answer it, give it its
-  next step, or let it be. If the line says it left background tasks running, it wakes by
-  itself when one ends.
+  that ended its turn and waits, one waiting for an answer, ended or idle) and prints one line
+  per event. Act on them, then start `fairshare watch` again. A worker that ended its turn waits
+  for you: read its last message with the `fairshare transcript` command the line gives, then
+  answer it, give it its next step, or let it be. If the line says it left background tasks
+  running, it wakes by itself when one ends.
+- A worker waiting for an answer (a question or a permission prompt) is stuck until a person
+  answers it there; you cannot. Tell the user at once, with the `attach` command the line gives.
 - `fairshare checkpoint --show <worker name>` prints a worker's note.
 - A worker stopped by its limit: watch says when that limit resets, and Claude Code resumes the
   worker by itself then, with its whole context. If that is soon, let it wait; otherwise

@@ -129,6 +129,31 @@ class Watch(Work):
             self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 went idle\n")
             self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
 
+    def test_a_worker_waiting_for_an_answer_is_said_once_per_wait(self):
+        """A question or a permission prompt holds a worker in the middle of a turn: said with
+        the command that opens it, even after a turn end its hook stamped, once per wait."""
+        sid = self.worker()
+        self.stopped(sid, NOW - 60)                        # an earlier turn ended
+        self.assertIn("ended its turn", self.watch("--timeout", "5")[1])
+        listed = [claude.LiveSession(sid, "w-1", None, waiting=True)]
+        line = (f"worker w-1 is waiting for an answer (a question or a permission prompt) that "
+                f"only a person can give: fairshare run -a b attach {sid[:8]}\n")
+        with mock.patch.object(claude, "list_sessions", lambda acct: listed):
+            self.assertEqual(self.watch("--timeout", "5")[1], line)
+            self.assertEqual(self.watch("--timeout", "20")[1], "nothing happened\n")
+            listed[0] = claude.LiveSession(sid, "w-1", True)          # answered, working again
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+            listed[0] = claude.LiveSession(sid, "w-1", None, waiting=True)   # a new prompt
+            self.assertEqual(self.watch("--timeout", "5")[1], line)
+
+    def test_the_listing_reads_waiting(self):
+        raw = [{"sessionId": "s-1", "name": "w", "status": "waiting", "kind": "background",
+                "pid": 7}, {"sessionId": "s-2", "status": "busy"}]
+        with mock.patch.object(claude.subprocess, "run", lambda *a, **k: mock.Mock(
+                stdout=json.dumps(raw))):
+            got = claude.list_sessions(cli._load()[0][0])
+        self.assertEqual([(s.waiting, s.busy) for s in got], [(True, None), (False, True)])
+
     def test_each_worker_in_its_own_accounts_listing(self):
         """A background session is listed only through the account it runs on: a worker on
         another account than the first one's is neither ended at once nor missed at its end."""

@@ -458,7 +458,10 @@ run the commands yourself, from inside a session:
   itself then, and `fairshare pickup <id>` to move it now), a worker ended its turn and is
   waiting (`worker fs-watch-stops ended its turn and is waiting: fairshare transcript 5e55105e --tail 1`;
   when it left background tasks running, the line says how many: it wakes again when one ends),
-  or a worker ended or went idle. A worker's turn end comes from its own `Stop` hook, which
+  a worker waits for an answer only a person can give (a question or a permission prompt, in the
+  middle of a turn: `worker fs-parser is waiting for an answer (a question or a permission
+  prompt) that only a person can give: fairshare run -a b attach 5e55105e`; said once each time
+  it starts waiting; the skill has the main session tell you), or a worker ended or went idle. A worker's turn end comes from its own `Stop` hook, which
   fairshare wires in the hub: Claude Code's list of sessions can call a worker busy for hours
   after it stopped. The main session keeps it running as a background command and starts it
   again after each event; `--timeout SECONDS` gives up with `nothing happened`.

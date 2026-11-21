@@ -122,6 +122,11 @@ RESUMES_AT_RESET = True
 resumes_at_reset = RESUMES_AT_RESET
 AGENT_ID, AGENT_NAME, AGENT_STATUS, AGENT_BUSY, AGENT_IDLE = (
     "sessionId", "name", "status", "busy", "idle")
+# `status: "waiting"`: the session waits for input. Claude Code's own agents view files such a
+# session under "blocked" ("Sessions that have a question or need your decision land here",
+# counted as "awaiting input"; 2.1.330). Seen live 2026-11-21 on a background worker held by a
+# permission prompt.
+AGENT_WAITING = "waiting"
 # `agents --json` items also carry `kind` ("interactive": open in a terminal, listed through every
 # account; "background": listed only through its own) and `pid` (2.1.330, 2026-11-21). A
 # background item listed with `pid: null` (and `status: null`, `state: "blocked"`) ran no process:
@@ -464,7 +469,8 @@ def list_sessions(account: Account, ended: bool = False) -> list[LiveSession] | 
     return [LiveSession(i[AGENT_ID], i.get(AGENT_NAME) if isinstance(i.get(AGENT_NAME), str)
                         else None, status.get(i.get(AGENT_STATUS)),
                         AGENT_KINDS.get(i.get(AGENT_KIND)),
-                        i.get(AGENT_PID) if type(i.get(AGENT_PID)) is int else None)
+                        i.get(AGENT_PID) if type(i.get(AGENT_PID)) is int else None,
+                        i.get(AGENT_STATUS) == AGENT_WAITING)
             for i in raw if isinstance(i, dict) and isinstance(i.get(AGENT_ID), str)]
 
 

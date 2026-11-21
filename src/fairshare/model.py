@@ -204,6 +204,8 @@ class LiveSession:
     kind: str | None = None           # KIND_INTERACTIVE | KIND_BACKGROUND; None: not said
     pid: int | None = None            # its process; None: none listed (for a background
                                       # session: it runs no process now)
+    waiting: bool = False             # it waits for a person's answer (a question or a
+                                      # permission prompt) and does nothing until it has one
 
 
 KIND_INTERACTIVE, KIND_BACKGROUND = "interactive", "background"   # open in a terminal | not

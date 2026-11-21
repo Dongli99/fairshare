@@ -2851,8 +2851,10 @@ WORKER_GRACE_S = 60.0   # a worker missing from the listing this soon after its 
 
 def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
     """From the running sessions: each worker of `here` that ended (no longer listed, once
-    WORKER_GRACE_S has passed since its start) or went idle after it was seen busy, once each;
-    pending joins are retried first. A worker is looked for in the listing of the account its
+    WORKER_GRACE_S has passed since its start), went idle after it was seen busy, or waits for a
+    person's answer (a question or a permission prompt: said once each time it starts waiting,
+    with the command that opens it, even after a turn end its hook stamped, as a prompt comes in
+    the middle of a turn), once each; pending joins are retried first. A worker is looked for in the listing of the account its
     session runs on, and only when that listing came. Busy and idle are not read for a worker
     whose turn ends its own hook stamps (`_watch_local` says those): the listing can say busy
     for hours after a turn ended."""
@@ -2865,16 +2867,16 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
             if w.session]
     mine = [(w, r.account if r else w.account, bool(r and r.stopped)) for w, r in mine]
     live = _listings({x for _, x, _ in mine}, accounts)
-    state = {x: {s.id: s.busy for s in ls} for x, ls in live.items() if ls is not None}
-    mine = [(w, state[x], stamps) for w, x, stamps in mine if x in state]
+    state = {x: {s.id: s for s in ls} for x, ls in live.items() if ls is not None}
+    mine = [(w, x, state[x], stamps) for w, x, stamps in mine if x in state]
     events, ended_now = [], []
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:
             return None
         seen, said = dict(old.reported), []
-        for w, state, stamps in mine:
-            ended, busy = f"ended:{w.session}", f"busy:{w.session}"
+        for w, acct, state, stamps in mine:
+            ended, busy, wait = f"ended:{w.session}", f"busy:{w.session}", f"waiting:{w.session}"
             if w.session not in state:
                 if now - w.started < WORKER_GRACE_S:
                     continue
@@ -2884,11 +2886,18 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
                     said.append(f"worker {w.name} ended")
                 continue
             seen.pop(ended, None)
+            if not state[w.session].waiting:
+                seen.pop(wait, None)
+            elif not seen.get(wait):
+                seen[wait] = 1
+                said.append(f"worker {w.name} is waiting for an answer (a question or a "
+                            f"permission prompt) that only a person can give: fairshare run -a "
+                            f"{acct} attach {w.session[:8]}")
             if stamps:
                 continue
-            if state[w.session]:
+            if state[w.session].busy:
                 seen[busy] = 1
-            elif state[w.session] is False and seen.pop(busy, None):
+            elif state[w.session].busy is False and seen.pop(busy, None):
                 said.append(f"worker {w.name} went idle")
         events.extend(said)
         return replace(old, reported=seen) if seen != old.reported else None
