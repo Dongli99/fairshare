@@ -1,9 +1,11 @@
 """fairshare CLI: status | capture | run (the default) | prefer | full-reset | pickup | handoff |
-transcript | trust | worker | checkpoint | watch | setup | join | leave | uninstall | doctor."""
+transcript | trust | worker | checkpoint | watch | setup | join | leave | aliases | uninstall |
+doctor."""
 from __future__ import annotations
 
 import argparse
 import contextlib
+import difflib
 import json
 import os
 import re
@@ -28,9 +30,9 @@ from pathlib import Path
 
 from . import browser
 from . import hub as hub_mod
-from . import __version__, providers, session, store
+from . import __version__, providers, session, shell, store
 from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, NOTE_THINKING, NOTE_WRITING,
-                    ROLE_WORKER, USAGE_MODEL_TURN, Account,
+                    ROLE_WORKER, USAGE_MODEL_TURN, Account, Alias,
                     AccountStatus, ConfigError, Request, SessionRecord, SessionSeen, Snapshot,
                     Tuning, Window, Worker,
                     load_accounts, load_plan, window_model, with_account, with_hub,
@@ -1545,9 +1547,32 @@ def _no_tool(then: str = "try again") -> bool:
 def cmd_run(a) -> int:
     if _no_tool():
         return 1
+    if a.args[:1] and a.args[0] in _provider().subcommands:
+        return _pass_through(a.account, a.args)
     if a.account:
         return _run_account(a.account, a.args)
     return _route(a.args, pause=True)
+
+
+def _pass_through(account_id: str | None, args: list[str]) -> int:
+    """`run -a ID <subcommand> ...`: the provider's own subcommand (`Provider.subcommands`), run
+    on that account's hub folder as a per-account alias ran it before the hub. No launcher: no
+    sign-in check, ranking, warning or session record; the arguments, stdout and the exit status
+    are the provider's. Without an account it refuses: a subcommand is about one account's folder,
+    and the best account's answer would look right and be about an arbitrary one."""
+    prov = _provider()
+    if account_id is None:
+        _say(f"`{prov.command} {args[0]}` is about one account's folder; name the account: "
+             f"fairshare run -a ID {shlex.join(args)}")
+        return 2
+    accounts, _, hub = _load()
+    acct = next((x for x in accounts if x.id == account_id), None)
+    if acct is None:
+        _say(f"no account '{account_id}' (configured: {', '.join(x.id for x in accounts)})")
+        return 2
+    _require_hub(hub)
+    cmd, env = providers.get(acct.provider).launch(acct)
+    return session.run_child([*cmd, *args], env)
 
 
 def _route(args, moving: str | None = None, pause: bool = False, model: str | None = None,
@@ -3079,17 +3104,27 @@ def _join(account_id: str | None, source: Path | None) -> int:
     if source is not None:
         _copy_state(prov, source, acct, hub)
     plan = (st and st.plan) or prov.default_plan
-    entry = {"id": account_id, "plan": plan, **({"browser": spec} if spec else {})}
+    entry = {"id": account_id, "plan": plan,
+             **({"from": str(source.resolve())} if source else {}),
+             **({"browser": spec} if spec else {})}
     _edit_config(lambda text: with_account(text, entry))
     print(f"joined {account_id} ({plan})")
     return 0
 
 
 def cmd_join(a) -> int:
+    """`_join`, then, for a new account, the offer of its line in fairshare's block of aliases
+    (when the joined folder has an alias, or a block exists)."""
     if _no_tool():
         return 1
     try:
-        return _join(a.id, Path(a.source).expanduser() if a.source else None)
+        before = {x.id for x in _load()[0]}
+        if code := _join(a.id, Path(a.source).expanduser() if a.source else None):
+            return code
+        accounts, _, hub = _load()
+        for acct in [x for x in accounts if x.id not in before]:
+            _offer_aliases(accounts, hub, only=acct.id)
+        return 0
     except EOFError:
         return _needs_terminal("join")
 
@@ -3172,6 +3207,7 @@ def _setup() -> int:
     for prov in providers.REGISTRY.values():         # each join did this; also with none picked
         _wire_hub(prov, hub, installed)
         _offer_remote_control(prov, hub)
+    _offer_aliases(_load()[0], hub)
     if failed:
         _say(f"not joined: {', '.join(failed)}")
     prov = _provider()
@@ -3223,6 +3259,195 @@ def _offer_setup() -> int:
     return 2
 
 
+# --- The user's aliases (decision 31): fairshare's one block in their shell files.
+
+def _alias_account(al: Alias, accounts: list[Account], hub: Path) -> Account | None:
+    """The account an alias of the user's now stands for: the one joined from the folder it
+    names; for an account joined before join recorded its folder, the one named like the alias.
+    None for an alias to a folder in the hub, or to one never joined."""
+    d = al.config_dir.resolve()
+    if d.is_relative_to(hub.resolve()):
+        return None
+    return (next((a for a in accounts if a.source and a.source.resolve() == d), None)
+            or next((a for a in accounts if a.source is None and a.id == al.name), None))
+
+
+def _plain(al: Alias) -> bool:
+    """Whether the alias runs the provider's tool with nothing but the folder."""
+    return al.tool and not al.prefix and not al.args
+
+
+def _exact(p: Path) -> str | None:
+    """A shell file's text, every byte as it is; None when it cannot be read."""
+    try:
+        return p.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _alias_plan(prov, accounts: list[Account], hub: Path, home: Path, only: str | None = None
+                ) -> tuple[dict[Path, tuple[list[str], list[str]]], list[str]]:
+    """What fairshare's block should hold in each shell file where it would change: per file,
+    its lines and what to say before asking; plus one note per alias left alone. A block keeps
+    its lines, except one for an account no longer configured; it gains a line for each alias of
+    the user's that starts the tool alone on a folder joined into the hub (`only`: that account's
+    aliases alone), in the file where that alias is. With `only` and no such alias, each file that
+    has a block gains a line named after the account, unless that name is taken."""
+    ids = {a.id for a in accounts}
+    found = prov.aliases(home)
+    matched = [(al, acct) for al in found if (acct := _alias_account(al, accounts, hub))
+               and (only is None or acct.id == only)]
+    notes = []
+    for al, acct in matched:
+        if not _plain(al):
+            where = f"alias {al.name} ({_tilde(al.rc, home)}, line {al.line})"
+            notes.append(f"{where} runs something other than {prov.command}: left alone"
+                         if not al.tool else
+                         f"{where} passes more than the folder: left alone; to start {acct.id} "
+                         "through fairshare, write it yourself: "
+                         + shell.alias_line(al.name,
+                                            shell.run_words(acct.id, al.prefix, al.args)))
+    wanted: dict[Path, dict[str, str]] = {}               # file -> alias name -> account id
+    for al, acct in matched:
+        if _plain(al):
+            wanted.setdefault(al.rc, {})[al.name] = acct.id
+    texts = {p: t for rc in prov.rc_files if (t := _exact(p := home / rc)) is not None}
+    if only is not None and not matched:
+        free = (only not in set().union(*map(shell.defined, texts.values()))
+                and shutil.which(only) is None)
+        for path, text in texts.items():
+            if not _has_block(text):
+                continue
+            if free:
+                wanted.setdefault(path, {})[only] = only
+            else:
+                notes.append(f"{_tilde(path, home)}: no alias added for {only}, the name is "
+                             "taken; add one to fairshare's block yourself: "
+                             + shell.alias_line("NAME", shell.run_words(only)))
+    plan = {}
+    for path, text in texts.items():
+        names = dict(wanted.get(path, {}))
+        if not names and not _has_block(text):
+            continue
+        try:
+            current, start = shell.block_lines(text) or [], shell.start_line(text)
+        except ValueError as e:
+            notes.append(f"{_tilde(path, home)}: {e}; not changed")
+            continue
+        lines = []
+        for line in current:
+            name, acct_id = shell.entry(line)
+            if name in names:
+                lines.append(shell.alias_line(name, shell.run_words(names.pop(name))))
+            elif acct_id is None or acct_id in ids:
+                lines.append(line)
+        lines += [shell.alias_line(n, shell.run_words(i)) for n, i in names.items()]
+        mine = [al for al in found if al.rc == path and al.name in shell.names(lines)]
+        if start is not None:
+            notes += [f"alias {al.name} ({_tilde(path, home)}, line {al.line}) comes after "
+                      "fairshare's block, so it still wins: run `fairshare aliases --remove`, "
+                      "then `fairshare aliases`" for al in mine if al.line > start]
+        if shell.with_block(text, lines) == text:
+            continue
+        over = [al for al in mine if start is None or al.line < start]
+        say = [f"It makes {', '.join(sorted(shell.names(lines)))} start {prov.tool} through "
+               "fairshare, on the hub's accounts."]
+        if over:
+            say.append("It overrides your own alias "
+                       + ", ".join(f"{al.name} (line {al.line})" for al in over)
+                       + " above it; your lines stay as they are.")
+        plan[path] = (lines, say)
+    return plan, notes
+
+
+def _has_block(text: str | None) -> bool:
+    """Whether a shell file's text holds fairshare's block (or a broken one)."""
+    try:
+        return text is not None and shell.span(text) is not None
+    except ValueError:
+        return True
+
+
+def _edit_shell_file(path: Path, change, home: Path, say: list[str]) -> bool:
+    """Show the diff `change` (text -> text) makes to the user's shell file `path` (fairshare's
+    lines only: no line of the user's is shown), say `say`, then ask; Enter is yes. Back the file
+    up beside it first. A link (a dotfile manager's), a file that cannot be written, or no
+    terminal: never written; what to paste, or remove, is printed instead. True when written."""
+    name = _tilde(path, home)
+    if (old := _exact(path)) is None:
+        _say(f"{name} cannot be read as text; not changed")
+        return False
+    try:
+        new = change(old)
+    except ValueError as e:
+        _say(f"{name}: {e}; not changed")
+        return False
+    if new == old:
+        return False
+    why = ("is a link (a dotfile manager's?)" if path.is_symlink() else
+           "cannot be written" if not (os.access(path, os.W_OK)
+                                       and os.access(path.parent, os.W_OK)) else
+           None if _interactive() else "needs a yes on a terminal")
+    if why:
+        s = shell.span(new)
+        how = (f"paste this at its end, replacing any block of fairshare's there:\n"
+               f"{new[s[0]:s[1]]}" if s else
+               f"remove the lines from `{shell.START}` to `{shell.END}`.")
+        if not path.is_symlink() and why.startswith("needs"):
+            how = f"run `fairshare aliases{'' if s else ' --remove'}` on a terminal, or {how}"
+        print(f"{name} {why}: not changed. To apply it, {how}".rstrip("\n"))
+        return False
+    print("".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), name, name,
+                                       n=0)).rstrip("\n"))
+    for line in say:
+        print(line)
+    try:
+        if input(f"Change {name}? [Y/n] ").strip().lower()[:1] == "n":
+            print(f"{name} not changed")
+            return False
+    except EOFError:
+        print(f"{name} not changed")
+        return False
+    if _exact(path) != old:
+        _say(f"{name} changed while asking; not changed (run `fairshare aliases` again)")
+        return False
+    backup = store.write_with_backup(path, new)
+    print(f"Wrote {name}" + (f" (backup: {_tilde(backup, home)})" if backup else "")
+          + f"; new shells use it, `source {name}` updates this one")
+    return True
+
+
+def _offer_aliases(accounts: list[Account], hub: Path, only: str | None = None) -> bool:
+    """Say the notes and offer each shell file's block as `_alias_plan` builds it. False when
+    there was nothing to offer."""
+    prov, home = _provider(), Path.home()
+    plan, notes = _alias_plan(prov, accounts, hub, home, only)
+    for note in notes:
+        print(note)
+    for path, (lines, say) in plan.items():
+        _edit_shell_file(path, lambda text, lines=lines: shell.with_block(text, lines), home,
+                         say)
+    return bool(plan)
+
+
+def cmd_aliases(a) -> int:
+    """Offer fairshare's block of aliases in the user's shell files, so their old per-account
+    aliases start the hub's accounts; --remove takes the block out. Both ask, per file, and do
+    nothing when nothing would change."""
+    accounts, _, hub = _load()
+    prov, home = _provider(), Path.home()
+    if a.remove:
+        files = [p for rc in prov.rc_files if _has_block(_exact(p := home / rc))]
+        for path in files:
+            _edit_shell_file(path, shell.without_block, home, [])
+        if not files:
+            print("no fairshare block in your shell files; nothing to remove")
+        return 0
+    if not _offer_aliases(accounts, hub):
+        print("nothing to change in your shell files")
+    return 0
+
+
 def _seeded_files(prov) -> list[str]:
     """The provider's shared files that the first folder copied decides (a later one's are only
     shown as a diff): neither folders nor append-only `.jsonl` logs."""
@@ -3265,6 +3490,10 @@ def cmd_uninstall(_a) -> int:
     if olds := sorted(p.name for p in path.parent.glob(path.name + ".bak-fairshare-*")):
         print(f"  backups of it, beside it: {', '.join(olds)}")
     print(f"State (usage snapshots, session records and checkpoint notes): {store.state_dir()}")
+    for prov in providers.REGISTRY.values():
+        for rc in [rc for rc in prov.rc_files if _has_block(_exact(home / rc))]:
+            print(f"Shell file ~/{rc}: holds fairshare's block of aliases; "
+                  "`fairshare aliases --remove` takes it out (with a backup beside it)")
     if hub is not None:
         shared = hub_mod.shared_dir(hub)
         print(f"Hub: {hub}" + ("" if hub.exists() else " (not created)"))
@@ -3441,6 +3670,9 @@ def _doctor() -> int:
         if not ok:
             failed.append(text)
 
+    def warn(text: str) -> None:
+        print(f"warn  {text}")
+
     for prov in providers.REGISTRY.values():
         found = prov.find_binary() is not None
         check(found, f"{prov.name}: command " + (f"found, version {prov.version() or 'unknown'}"
@@ -3497,6 +3729,24 @@ def _doctor() -> int:
             "current": "current", "missing": "missing (run `fairshare doctor --fix`)",
             "outdated": "outdated (run `fairshare doctor --fix`)",
             "foreign": f"not fairshare's: {where.parent.name}/ holds another skill"}[word])
+    for prov, _mine in _by_provider(accounts):
+        good, home = [], Path.home()
+        for al in prov.aliases(home):
+            if (acct := _alias_account(al, accounts, hub)) is None:
+                continue
+            text = _read(al.rc) or ""
+            try:
+                lines, start = shell.block_lines(text) or [], shell.start_line(text)
+            except ValueError:
+                lines, start = [], None
+            if al.name in shell.names(lines) and start > al.line:
+                good.append(al.name)
+            else:
+                warn(f"{prov.name}: alias {al.name} in {_tilde(al.rc, home)} still starts "
+                     f"{prov.tool} on your own folder, not on {acct.id}'s in the hub "
+                     "(run `fairshare aliases`)")
+        if good:
+            check(True, f"{prov.name}: your aliases {', '.join(good)} start the hub's accounts")
     if not callers and (installed := _installed()):
         callers[(installed,)] = []
     if not callers:
@@ -3569,6 +3819,10 @@ def main(argv: list[str] | None = None) -> int:
     lp.add_argument("id")
     lp.add_argument("--logout", action="store_true", help="also sign that account out")
     lp.set_defaults(f=cmd_leave)
+    al = sub.add_parser("aliases", help="make your own per-account aliases start the hub's "
+                        "accounts: one block at the end of your shell file, shown and asked")
+    al.add_argument("--remove", action="store_true", help="take that block out")
+    al.set_defaults(f=cmd_aliases)
     sub.add_parser("uninstall", help="say how to remove fairshare; changes nothing"
                    ).set_defaults(f=cmd_uninstall)
     kp = sub.add_parser("pickup", help="continue a session on the best account (inside a "
@@ -3638,6 +3892,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_switch(sw.parse_args(argv))
     if not argv or argv[0] == "run":
         return cmd_run(_run_args(p, argv[1:]))
+    if argv[0] not in sub.choices and argv[0] in _provider().subcommands:
+        return cmd_run(_run_args(p, argv))               # refused: it names no account
     if argv[0] not in sub.choices and argv[0] not in ("-h", "--help"):
         _say(f"'{argv[0]}' is not a command; did you mean: fairshare run {shlex.join(argv)}")
         return 2

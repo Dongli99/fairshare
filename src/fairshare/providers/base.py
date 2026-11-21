@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..model import (Account, AccountStatus, Candidate, Capture, LiveSession, NoteEvent,
+from ..model import (Account, AccountStatus, Alias, Candidate, Capture, LiveSession, NoteEvent,
                      SessionSeen, Window)
 
 
@@ -26,6 +26,9 @@ class Provider(Protocol):
                                  # what it does, for its question); None: the tool has nothing
     full_reset: str | None   # how users use a full reset the provider granted an account (both
                              # its limits refilled now), for messages; None: it grants none
+    subcommands: tuple[str, ...]  # the tool's own subcommands (`<command> <subcommand>`), which
+                                  # start no session: `run -a` hands them straight to the tool
+    rc_files: tuple[str, ...]     # the shell files under HOME read for the user's aliases
 
     def parse_capture(self, raw: dict) -> dict[str, Window]:
         """Turn the provider's own usage payload into windows keyed by the plan's window names.
@@ -122,6 +125,10 @@ class Provider(Protocol):
     def passed_session_vars(self) -> list[str]:
         """Inside a running session of this provider: names (never values) of other variables
         that look like session state and that launch() passes through. Empty otherwise."""
+
+    def aliases(self, home: Path) -> list[Alias]:
+        """Every alias line in `rc_files` under `home` that sets the provider's folder variable,
+        in file and line order, with what else it runs (`Alias`). Reads no login."""
 
     def discover(self, home: Path) -> list[Candidate]:
         """The user's own folders under `home`, signed in or not, for setup to show: the

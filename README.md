@@ -58,8 +58,10 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
   `~/.claude` first among them; type numbers to choose the order yourself;
 - it asks once whether to turn on Remote Control for every session (Enter: yes), unless your
   settings already say;
-- it does not touch your shell files: plain `claude` still uses `~/.claude`, outside the hub.
-  Start sessions with `fairshare`.
+- when an alias of yours still starts Claude Code on a folder you joined, it offers one block at
+  the end of that shell file that overrides it (`alias work='fairshare run -a work'`), shown as a
+  diff and asked first; your own lines stay, and `fairshare aliases --remove` undoes it. Plain
+  `claude` still uses `~/.claude`, outside the hub. Start sessions with `fairshare`.
 
 ## Everyday use
 

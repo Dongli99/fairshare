@@ -113,8 +113,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      account table has no `config_dir` (an old one is a `ConfigError` that says to run `setup`),
      and an id must be a plain folder name.
    - **The launcher redirects.** A session on `<id>` runs with the provider's folder variable set
-     to `<hub>/accounts/<id>/`. The user's own folders and aliases keep working untouched;
-     sessions started by an old alias are simply not in the hub.
+     to `<hub>/accounts/<id>/`. The user's own folders keep working untouched. Their old
+     per-account aliases are taken over by fairshare's block in their shell file, after a yes
+     (decision 31, which reverses "sessions started by an old alias are simply not in the hub").
    - **Share list** (`SHARED` in the adapter; a name ending in `/` is a folder). Anything not on
      it stays per account. Every shared folder is created in `shared/` before linking, so the
      provider never makes a local one; a shared file that does not exist yet is linked anyway
@@ -184,7 +185,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
      still gets the config and the hub, one line saying to install it, and no join. setup ends
      with one line: start sessions with `fairshare`; the provider's own command
      (`Provider.command`) still uses its default folder (`Provider.default_dir`), outside the
-     hub. It never edits shell files. A folder qualifies only with its own state file, or as
+     hub. Its only edit to a shell file is the block of decision 31, shown and asked. A folder qualifies only with its own state file, or as
      the provider's default folder with HOME's state file beside it, or when an rc alias names
      it: shared items alone (a folder of shared sessions) do not make an account. fairshare
      never writes the user's folders; each folder's label comes from the provider's own sign-in
@@ -297,6 +298,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     naming that command, and asks nothing (routing still works). Only a
     leading `-a`/`--account` is fairshare's; `run -- -a x` passes `-a x` on. Any other first word
     that is not a command (`fairshare -p hi`) exits 2 with `did you mean: fairshare run -p hi`.
+    A first argument that is one of the provider's own subcommands (`Provider.subcommands`:
+    `agents`, `mcp`, `rm`, `daemon`, ...) starts no session: `run -a <id>` hands it straight to
+    the provider on that account's folder (decision 31), and without `-a` it is refused.
 
     The session is a child process (`session.run_child`), not an `exec`, started with the
     provider's clean environment (decision 10, plus the account's own variable). The scrub is
@@ -334,7 +338,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     1-N = that account · q = quit` counts down (keys read in cbreak mode, the terminal always restored).
     `launch_pause` under `[policy]` (seconds, default 3, 0 = off). `q` exits 0.
 
-13. **`doctor` is read-only; `doctor --fix` repairs.** One line per check, `pass` or `FAIL`, exit 0
+13. **`doctor` is read-only; `doctor --fix` repairs.** One line per check, `pass` or `FAIL` (or
+    `warn`, which does not fail: an old alias decision 31 would take over), exit 0
     when all pass and 1 otherwise: the provider's command is found (with its version, from the
     adapter); `accounts.toml` loads (a config error is one FAIL line with the file's name and the
     reason, never a traceback); the hub is at its configured path (when not, one FAIL line and no
@@ -1039,6 +1044,55 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     one honest reason to choose another account, and the skill says to override only then.
     Pure, no new field: it reads the verdicts `rank` already returns.
 
+31. **fairshare's block of aliases in the user's shell file** (reverses decision 9's "never
+    edits shell files" and "sessions started by an old alias are simply not in the hub";
+    `fairshare aliases`). Setup copies the user's folders into the hub and leaves them, so an
+    alias that set the folder variable (`alias work='CLAUDE_CONFIG_DIR=~/.claude-work claude'`)
+    kept starting the old folder. Its sessions were not in the hub, and worse, its subcommands
+    gave quiet wrong answers: an agent ran `<alias> daemon status` on a folder joined weeks before
+    and was told "not running", with an expired-login warning from the stale folder. Silent
+    divergence is a wrong answer, not noise. The rules:
+    - **One marked block, never the user's own lines.** `# >>> fairshare aliases >>>` …
+      `# <<< fairshare aliases <<<`, appended at the end of the file where the alias was found,
+      so it overrides the old line above it; one line per alias,
+      `alias work='fairshare run -a <id>'`. The old lines stay as they are and the prompt names
+      them as overridden. Undo is removing the block (`fairshare aliases --remove`), which gives
+      back the file byte for byte: the block brings one newline before it, and takes it away
+      again. A block already there is rewritten only between its markers; broken markers (one
+      missing, or two blocks) are refused and nothing is written. No `eval "$(fairshare ...)"`:
+      that would start Python at every shell start. The markers and the line format live in
+      `shell.py` (pure text in, text out); which shell files are read and what an alias line
+      means is the adapter's (`rc_files`, `aliases`).
+    - **Which aliases.** Those that set the folder variable to a folder joined into the hub:
+      `join --from <folder>` now records it as `from` in the account's table (nothing else
+      recorded it, and a name chosen at join may differ from the alias). An alias whose folder is
+      an account's `from` stands for that account; for an account with no `from` (joined before
+      this), an alias named like the account, to a folder outside the hub. Aliases to the hub, or
+      to a folder never joined, and the user's other aliases are left alone. An alias that
+      passes more than the folder (other variables, arguments such as `--model opus`) is left
+      alone too, with one line giving the alias the user could write
+      (`alias wm='fairshare run -a work --model opus'`): kept arguments would hide a subcommand
+      from the test below.
+    - **Consent (rule 3).** The diff of the file, showing fairshare's lines only (no line of the
+      user's, which may hold a secret), what the block overrides, then `Change ~/.zshrc? [Y/n]`
+      (Enter: yes). The file is backed up beside it first (`<file>.bak-fairshare-<time>`) and
+      read again just before writing; changed meanwhile, nothing is written. No terminal: never
+      written; the block and how to apply it are printed. A file that is a link (a dotfile
+      manager's: stow, chezmoi, home-manager) or cannot be written: never written; the block to
+      paste is printed.
+    - **Where.** `setup`, one step after joining, only when a block would change; `fairshare
+      aliases` (and `--remove`), idempotent; `join` of a new account, when its folder has an
+      alias, or when a block exists (then a line named after the account, unless that name is
+      already an alias or a command on PATH); `doctor`, a `warn` line per such alias that no
+      block after it overrides; `uninstall` names the file with the block and its undo.
+    - **Subcommands still work through the alias.** `run -a <id> <subcommand> ...`, for the
+      provider's own subcommands (`Provider.subcommands`, from its `--help`, plus a hidden one
+      found by name), runs the provider on that account's folder with its clean environment and
+      nothing else: no sign-in check, ranking, warning, trust question or session record; the
+      arguments, stdout and exit status are the provider's (agents parse `agents --json`).
+      Without `-a` it is refused with one line naming `-a`: a subcommand is about one account's
+      folder, and the best account's answer would look right and be about an arbitrary one.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -1225,7 +1279,8 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | Print-mode resume for the handoff note: `-p --output-format stream-json --verbose --include-partial-messages --tools "" --resume <id>`; one JSON object per line: `system`/`thinking_tokens`, `stream_event` with `content_block_start` (`thinking`, `text`) and `content_block_delta` (`thinking_delta`, `text_delta` with `delta.text`); the final line's `result` (and `is_error`) | `NOTE_ARGS`, the `NOTE_*` spellings, `note_command`, `note_event`, `note_text` | lines that stop parsing: the spinner, the clock and the last phase stay; no result line: the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools; `--include-partial-messages` requires `--print` and `--output-format stream-json`, its example passes `--verbose`), /sessions ("Access conversations from scripts"), read 2026-11-12. Run live on 2.1.322, 2026-11-12: an Opus turn at medium effort (thinking block, then 37 text deltas, then `result`; recorded as `tests/fixtures/claude-2.1.322/note-stream.jsonl`) and a Haiku turn at low effort (no thinking block) |
 | The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (a background and an interactive session) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |
-| Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover` | `setup` lists fewer folders; `join --from <folder>` names one | not applicable |
+| Shell aliases that set the folder variable; the folders to look in (with their own state file, or the default folder with HOME's) | `RC_FILES`, `ACCOUNT_DIR_GLOB`, `STATE_FILE`, `discover`, `aliases` | `setup` lists fewer folders; `join --from <folder>` names one; an alias not read is not taken over (decision 31) | not applicable |
+| The tool's own subcommands, which start no session: `agents`, `attach`, `auth`, `auto-mode`, `doctor`, `gateway`, `import`, `install`, `logs`, `mcp`, `plugin(s)`, `purge`, `respawn`, `rm`, `setup-token`, `stop`/`kill`, `ultrareview`, `update`/`upgrade`, and `daemon` (not in `--help`) | `SUBCOMMANDS` | a new one missing from the list goes through the launcher (a session record, ranking lines); a removed one is the tool's own error | `claude --help`, 2.1.330, 2026-11-20; `daemon`: `claude daemon --help`, same version |
 | Using a full reset: `/limit-reset` in a session on the account, or claude.ai's usage page; it refills the 5-hour and weekly limits and keeps the weekly reset day (only named to the agent, never run or read) | `full_reset` | the warning names a way that no longer works; ranking and detection are unaffected | told by the owner, 2026-11-19; not checked by fairshare |
 | Plan names and capacity (`pro`, `max`, `ultra`) | `plans/*.toml` (`names`, `capacity`) | edit the plan file; an unmatched name leaves the config's plan | `pro` on 2.1.321; `max`, `ultra` unverified |
 

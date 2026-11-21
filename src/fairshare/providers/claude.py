@@ -21,9 +21,9 @@ from zoneinfo import ZoneInfo
 
 from .. import store
 from ..model import (EFFORT_NONE, NOTE_THINKING, NOTE_WRITING, USAGE_MODEL_TURN, USAGE_NO_ANSWER,
-                     USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT, Account, AccountStatus, Candidate,
-                     Capture, LiveSession, NoteEvent, SessionSeen, Window, model_window, plan_for,
-                     window_names)
+                     USAGE_NOT_UNDERSTOOD, USAGE_SIGNED_OUT, Account, AccountStatus, Alias,
+                     Candidate, Capture, LiveSession, NoteEvent, SessionSeen, Window, model_window,
+                     plan_for, window_names)
 
 name = "claude"                      # fairshare's own id for this provider (accounts.toml, plans)
 tool = "Claude Code"                 # the tool as users know it, for messages
@@ -43,6 +43,14 @@ STATUS_ARGS = ("auth", "status", "--json")   # the sign-in check; accounts.toml 
 LOGIN_ARGS = ("auth", "login")               # interactive: the tool owns the browser sign-in
 LOGOUT_ARGS = ("auth", "logout")
 VERSION_ARGS = ("--version",)
+# The tool's own subcommands: `claude <subcommand> ...` does not start a session, so `run -a ID`
+# hands it straight to the tool on that account's folder. Listed under "Commands:" by
+# `claude --help` (2.1.330, 2026-11-20); `daemon` is not listed there but is real
+# (`claude daemon --help`, same version: run, status, logs, uninstall, stop).
+SUBCOMMANDS = ("agents", "attach", "auth", "auto-mode", "doctor", "gateway", "import", "install",
+               "logs", "mcp", "plugin", "plugins", "purge", "respawn", "rm", "setup-token", "stop",
+               "kill", "ultrareview", "update", "upgrade", "daemon")
+subcommands = SUBCOMMANDS
 PROBE_TIMEOUT = 5.0                          # seconds
 # The usage probe: the tool's own `/usage`, a local command (no model call, verified on 2.1.322,
 # 2026-11-11), printed as a JSON envelope so that a release which sends it to the model instead
@@ -148,7 +156,9 @@ DEFAULT_DIR = ".claude"              # the folder used without CONFIG_DIR_ENV; i
 default_dir = "~/" + DEFAULT_DIR
 ACCOUNT_DIR_GLOB = ".claude*"        # folders under HOME that may be accounts (discovery only)
 RC_FILES = (".zshrc", ".zprofile", ".zshenv", ".bashrc", ".bash_profile", ".bash_aliases",
-            ".profile")              # read-only, for aliases that set CONFIG_DIR_ENV
+            ".profile")              # for aliases that set CONFIG_DIR_ENV; only fairshare's own
+                                     # block is ever written in them (decision 31)
+rc_files = RC_FILES
 _ALIAS = re.compile(r"""^\s*alias\s+([\w.-]+)=["']?\s*(?:env\s+)?"""
                     + re.escape(CONFIG_DIR_ENV) + r"""=("[^"]*"|'[^']*'|[^\s"';]+)""")
 
@@ -737,6 +747,45 @@ def discover(home: Path) -> list[Candidate]:
                                           and (home / STATE_FILE).is_file()):
             found[d] = Candidate(d.name.lstrip("."), name, d, f"folder ~/{d.name}")
     return sorted(found.values(), key=lambda c: (c.config_dir != home / DEFAULT_DIR, c.id))
+
+
+def aliases(home: Path) -> list[Alias]:
+    """Every alias line in the shell files under `home` that sets CONFIG_DIR_ENV, in file and
+    line order, with what else it runs: the tool alone (BINARY, by name or path, maybe after
+    `command`), or other variables and arguments as well. A line that cannot be split as a shell
+    would is taken as running something else."""
+    found = []
+    for rc in RC_FILES:
+        try:
+            lines = (home / rc).read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        for n, line in enumerate(lines, 1):
+            if not (m := _ALIAS.match(line)):
+                continue
+            d = _expand(m.group(2).strip("\"'"), home)
+            try:
+                defs = shlex.split(line.split("alias", 1)[1], comments=True)
+                words = shlex.split(defs[0].partition("=")[2]) if defs else []
+            except ValueError:
+                words = []
+            words = words[1 + (words[:1] == ["env"]):]          # [env] CONFIG_DIR_ENV=<folder>
+            prefix = tuple(words[:_assignments(words)])
+            words = words[len(prefix):]
+            if words[:1] == ["command"]:
+                words = words[1:]
+            tool = bool(words) and Path(words[0]).name == BINARY
+            found.append(Alias(m.group(1), d, home / rc, n, tool, prefix,
+                               tuple(words[1:]) if tool else ()))
+    return found
+
+
+def _assignments(words: list[str]) -> int:
+    """How many of `words` are leading `NAME=value` assignments."""
+    n = 0
+    while n < len(words) and re.match(r"^[A-Za-z_]\w*=", words[n]):
+        n += 1
+    return n
 
 
 def _expand(p: str, home: Path) -> Path:

@@ -42,6 +42,8 @@ class Account:
     capacity: float | None = None  # the account's own override; it survives plan detection
     plan_error: str | None = None  # why `plan` is None: the account is left out of ranking
     browser: str | None = None     # how its sign-in link opens (`browser.parse`); None: default
+    source: Path | None = None     # the user's own folder join copied from (`from`); None: none,
+                                   # or joined before join recorded it
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,20 @@ class Candidate:
     provider: str
     config_dir: Path
     found: str           # where it was found, shown to the user
+
+
+@dataclass(frozen=True)
+class Alias:
+    """A shell alias of the user's that starts the provider's tool on one folder, as found in a
+    shell file. `tool`: what it runs is the provider's own command; `prefix` (other variables it
+    sets) and `args` (what it passes after the command) are kept as written, word by word."""
+    name: str
+    config_dir: Path
+    rc: Path             # the shell file
+    line: int            # 1-based
+    tool: bool
+    prefix: tuple[str, ...] = ()
+    args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -283,8 +299,10 @@ def _account(a: dict, hub: Path) -> Account:
     args, usage = _args(a, "status_args"), _args(a, "usage_args")
     if (spec := a.get("browser")) is not None:
         browser.parse(spec)                  # raises ValueError saying what is accepted
+    if (source := a.get("from")) is not None and not isinstance(source, str):
+        raise ValueError(f"from of {a['id']} must be a folder path in quotes")
     return Account(a["id"], provider, plan, hub / "accounts" / a["id"], args or None, usage,
-                   capacity, error, spec)
+                   capacity, error, spec, Path(source) if source else None)
 
 
 def _args(a: dict, key: str) -> tuple[str, ...] | None:

@@ -324,10 +324,14 @@ class Setup(UserFolders):
 
     def test_on_a_terminal_each_folder_is_asked_a_name(self):
         # play takes the name work would default to; work's default is then refused
-        answers = ["", "3 4", "x y", "work", "", "", "job", "", "y", ""]
+        answers = ["", "3 4", "x y", "work", "", "", "job", "", "y", "", "n"]
         self.person("job", "zoe")
         self.assertEqual(self.go("setup", tty=True, answers=answers), 0, self.err)
         self.assertEqual(self.ids_in_config(), ["work", "job"])
+        # the aliases follow the folders, not the names: play's folder is now work, work's job
+        self.assertIn("+alias work='fairshare run -a job'\n+alias play='fairshare run -a work'\n",
+                      self.out)
+        self.assertEqual(self.asked.call_args_list[-1].args[0], "Change ~/.zshrc? [Y/n] ")
         prompts = [c.args[0] for c in self.asked.call_args_list]
         self.assertEqual([p for p in prompts if p.startswith("Name")],
                          ["Name for ~/.claude-play [play]: "] * 2
@@ -495,7 +499,7 @@ class Join(UserFolders):
             self.assertNotIn(secret, self.out + self.err)
 
     def test_same_login_on_a_terminal_explains_and_offers_three_ways(self):
-        for answers, code, ids in ((["", "", "k"], 0, ["work", "play"]),
+        for answers, code, ids in ((["", "", "k", "n"], 0, ["work", "play"]),
                                    (["", "", "x", "n"], 1, ["work"])):
             with self.subTest(answers=answers):
                 self.twin()
@@ -506,7 +510,7 @@ class Join(UserFolders):
                               "signed in to that account. Sign out on claude.ai, or choose "
                               "another browser profile, then:\n", self.out)
                 prompts = [c.args[0] for c in self.asked.call_args_list]
-                self.assertEqual(prompts[-1],
+                self.assertEqual([x for x in prompts if x.startswith("[")][-1],
                                  "[Enter] sign in again · k = keep anyway · n = don't add ")
                 self.assertEqual(self.ids_in_config(), ids)
                 self.assertTrue(hub.account_dir(self.hub, "play").is_dir())
@@ -528,7 +532,7 @@ class Join(UserFolders):
             return choice
         with mock.patch.object(cli, "_same_login", then_sign_out):
             code = self.go("join", "--from", "~/.claude-play", tty=True,
-                           answers=["", "", "", "2", "/usr/bin/true"])
+                           answers=["", "", "", "2", "/usr/bin/true", "n"])
         self.assertEqual(code, 0, self.err)
         self.assertEqual(self.calls("play"), ["auth login", "auth status --json"] * 2)
         self.assertEqual(self.out.count("Which browser should play's sign-in links open in?"), 2)

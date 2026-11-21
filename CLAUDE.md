@@ -3,7 +3,7 @@
 Routes AI-assistant sessions across several subscriptions by real usage. Open-source (MIT). **Nothing in this repo may reference any other project, private host, path, account or person's credentials.** One exception: the README's "Prior art" credit.
 
 ## Layout
-`src/fairshare/policy.py` the rule (pure) · `model.py` data + config loading · `providers/` one adapter per provider · `plans/` data files · `store.py` snapshots · `hub.py` the hub: links, start check, seeding · `browser.py` per-account sign-in browser · `session.py` runs the child session (signals, exit code) · `cli.py`. Seams and decisions: `docs/architecture.md`. Stance on terms: `docs/terms-and-limits.md`. User-facing behaviour: `docs/usage.md`. How to contribute: `CONTRIBUTING.md`.
+`src/fairshare/policy.py` the rule (pure) · `model.py` data + config loading · `providers/` one adapter per provider · `plans/` data files · `store.py` snapshots · `hub.py` the hub: links, start check, seeding · `browser.py` per-account sign-in browser · `shell.py` fairshare's block of aliases in a user's shell file (pure) · `session.py` runs the child session (signals, exit code) · `cli.py`. Seams and decisions: `docs/architecture.md`. Stance on terms: `docs/terms-and-limits.md`. User-facing behaviour: `docs/usage.md`. How to contribute: `CONTRIBUTING.md`.
 
 ## Run
 `PYTHONPATH=src python3 -m unittest discover -s tests -v` (stdlib only: no pytest, no dependencies, ever, without a reason written in docs/architecture.md).

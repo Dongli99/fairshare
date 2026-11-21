@@ -38,10 +38,13 @@ want that folder's settings instead. A file that is new in the hub (fairshare's 
 setup, say) is reported in one line (`installed <what> in <path>`); diffs are kept for changes to
 a file that already exists.
 
-Last, while the shared settings say nothing about it, setup asks once whether to turn on Claude
+Then, while the shared settings say nothing about it, setup asks once whether to turn on Claude
 Code's Remote Control for every session (follow and steer them from claude.ai/code or the Claude
 app). Enter turns it on, for every account at once, since they share one settings file; `n`
 leaves the settings alone. A setting already there, from the folder that seeded them, is kept.
+
+Last, when an alias of yours still starts Claude Code on a folder you just joined, setup offers
+to take it over (see [Your own aliases](#your-own-aliases)).
 
 setup always leaves a complete hub, even when it joins nothing; until an account is joined,
 `fairshare`, `run` and `status` say ``no accounts yet: `fairshare join <name>` signs one in``
@@ -49,7 +52,7 @@ setup always leaves a complete hub, even when it joins nothing; until an account
 hub, then says once that Claude Code must be installed (``no Claude Code command found on
 PATH; install it, then run `fairshare setup` again to join accounts``) and joins nothing (exit 1). It
 ends with ``start sessions with `fairshare`; plain `claude` still uses ~/.claude, outside the
-hub``: fairshare never edits your shell files.
+hub``. fairshare's only edit to a shell file is its block of aliases, shown and asked first.
 
 `fairshare join [ID] [--from FOLDER]` adds one account. It makes the account's folder in the
 hub, runs Claude Code's own sign-in there (your browser; fairshare never sees a token), and
@@ -73,8 +76,51 @@ differences are shown), and, after asking, the per-project trust, your MCP serve
 run done" flags and the Claude in Chrome consent. Never your identity, and never `sessions/`
 (each running session's key, stale on arrival). The source folder is never written.
 
+`--from` also records the folder in the account's table (`from = "..."`), so that an alias
+naming that folder can be taken over even when the account got another name. When the joined
+folder has an alias, or fairshare's block of aliases exists, join offers the new account's line
+in the block, with its own yes (see [Your own aliases](#your-own-aliases)).
+
 `fairshare join ID` for an account already joined signs it in again and changes nothing else:
 the fix for an expired or lost login.
+
+### Your own aliases
+
+Joining copies a folder into the hub and leaves the folder as it was, so an alias such as
+`alias work='CLAUDE_CONFIG_DIR=~/.claude-work claude'` would go on starting the old folder:
+its sessions would not be in the hub, and `work agents --json` or `work daemon status` would
+answer about the old folder, wrongly and without a word. `fairshare aliases` takes such aliases
+over with one block at the end of the shell file where it found them:
+
+```sh
+# >>> fairshare aliases >>>
+alias work='fairshare run -a work'
+# <<< fairshare aliases <<<
+```
+
+Being last, the block overrides your own line above it, which stays as it is. It shows the diff
+(fairshare's lines only), says which of your aliases it overrides, and asks `Change ~/.zshrc?
+[Y/n]` (Enter: yes); the file is backed up beside it first (`.zshrc.bak-fairshare-<time>`). Run
+it again and it changes nothing; `fairshare aliases --remove` takes the block out, the same way,
+and gives you back the file as it was.
+
+- Which aliases: those that set `CLAUDE_CONFIG_DIR` to a folder joined into the hub, matched by
+  the folder (the `from` that join records) whatever the account is named; an account joined
+  before join recorded it is matched by name instead. Aliases to other folders, and your other
+  aliases, are left alone.
+- An alias that passes more than the folder (`... claude --model opus`, or other variables) is
+  left alone, with one line giving the alias you could write yourself
+  (`alias wm='fairshare run -a work --model opus'`).
+- Without a terminal nothing is written: the block is printed with how to apply it. A shell file
+  that is a link (a dotfile manager such as stow, chezmoi or home-manager) or cannot be written
+  is never written either: paste the printed block into your own source file.
+- The shells read: `~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bashrc`, `~/.bash_profile`,
+  `~/.bash_aliases`, `~/.profile`. Only `alias NAME=...` lines are seen, not shell functions.
+
+Through the alias, `work` starts a session on the account `work` (as `fairshare run -a work`),
+and Claude Code's own subcommands still work: `work agents --json`, `work rm <id>`,
+`work mcp list`, `work daemon status` go straight to Claude Code on that account's hub folder,
+with nothing of fairshare around them (see [Starting a session](#starting-a-session)).
 
 `fairshare leave ID` stops routing to an account; its folder and login stay (`--logout` signs it
 out too).
@@ -90,6 +136,15 @@ arguments) passes them to Claude Code unchanged. `fairshare run -a work -c` star
 `work` instead, skipping the ranking (with a warning if it is near a limit); this replaces a
 per-account alias. Only a leading `-a` is fairshare's: `fairshare run -- -a x` passes `-a x` on.
 For a shorter name, make your own alias for `fairshare`.
+
+When the first argument is one of Claude Code's own subcommands (`agents`, `attach`, `auth`,
+`auto-mode`, `daemon`, `doctor`, `gateway`, `import`, `install`, `logs`, `mcp`, `plugin`,
+`purge`, `respawn`, `rm`, `setup-token`, `stop`/`kill`, `ultrareview`, `update`), no session
+starts: `fairshare run -a work agents --json` runs `claude agents --json` on `work`'s hub folder
+and nothing else (no sign-in check, ranking, warning or record), with Claude Code's own output
+and exit code. Without `-a` it is refused (exit 2), since such a command is about one account:
+``fairshare: `claude agents` is about one account's folder; name the account: fairshare run -a
+ID agents``. `fairshare agents` says the same.
 
 When two accounts are within 10% of each other, a new session goes to the one with fewer
 sessions running, so sessions started together spread out. `fairshare status` marks with `>` the
@@ -469,8 +524,12 @@ is configured, and for each account: its plan exists, its sign-in check answers 
 the sign-in ends), its usage probe answers (or is off) and its `.claude.json` still holds folder
 trust where fairshare expects it. Then: the hub's statusLine still calls capture, its four hooks
 (stop-failure, post-tool, prompt, stop) still call `fairshare hook`, fairshare's skill in the hub is
-current, and the `fairshare` command they call runs. One line per check, account ids and plan
-names only, so the output can go into a public issue; exit 0 when all pass.
+current, and the `fairshare` command they call runs. Last, for each alias of yours that still
+starts Claude Code on a folder joined into the hub, with no block of fairshare's after it to
+override it, a `warn` line (`warn  claude: alias work in ~/.zshrc still starts Claude Code on
+your own folder, not on work's in the hub (run `fairshare aliases`)`); a warning does not fail
+doctor. One line per check, account ids, alias names and plan names only, so the output can go
+into a public issue; exit 0 when all pass.
 
 `fairshare doctor --fix` repairs what it can first (a moved hub, missing links, a stale or missing
 hook, a missing or outdated skill, shown as a diff), one line per fix, then runs the checks.
@@ -478,6 +537,8 @@ hook, a missing or outdated skill, shown as a diff), one line per fix, then runs
 ## Uninstall
 
 `fairshare uninstall` changes nothing (there is nothing to undo in your own folders). It prints:
+- each shell file that holds fairshare's block of aliases, and that `fairshare aliases --remove`
+  takes it out;
 - where the config is, and the `accounts.toml.bak-fairshare-*` backups beside it (one per
   `join`, `leave` or `doctor --fix` that changed the file);
 - where the state folder is: usage snapshots, session records and checkpoint notes;
@@ -499,7 +560,8 @@ and `leave` edit it as text, keeping your comments, with a backup each time. Key
 - per account (one `[[account]]` table each): `id`, `plan` (a plan file's name), `provider` (optional while
   there is one), `capacity` (overrides the plan's;
   kept when the detected plan differs), `browser` (see [Browser per account](#browser-per-account)),
-  `status_args` and `usage_args`;
+  `status_args`, `usage_args`, and `from` (the folder `join --from` copied, written by join: it
+  matches your aliases to the account, see [Your own aliases](#your-own-aliases));
 - `[policy]`: `launch_pause` (seconds, default 3, `0` = off), `resume_wait_minutes` (unset by
   default: a session stopped by its limit waits for Claude Code's own resume; a number N moves
   it automatically when the reset is more than N minutes away, `0` = always), `warning_move`
@@ -521,9 +583,9 @@ from the model.
 
 | code | when |
 |---|---|
-| 0 | done; for `run`, the session's own exit code is passed through |
+| 0 | done; for `run`, the session's own exit code is passed through (for `run -a ID <subcommand>`, Claude Code's) |
 | 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check |
-| 2 | a usage error: an unknown command or account id, `setup` or `join` without a terminal, `full-reset` on an account whose current week is not known |
+| 2 | a usage error: an unknown command or account id, `setup` or `join` without a terminal, `full-reset` on an account whose current week is not known, one of Claude Code's own subcommands without `-a` |
 | 75 | no account can take work and there is no terminal to ask (or you chose not to wait) |
 | 126, 127 | Claude Code could not be started (126) or was not found (127) |
 | 128 + N | the session died of signal N |
