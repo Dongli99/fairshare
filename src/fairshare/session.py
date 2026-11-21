@@ -21,8 +21,10 @@ def run_child(cmd: list[str], env: dict[str, str],
     the child already receives them; this parent must only survive and keep waiting:
     - SIGINT, SIGQUIT, SIGTSTP do nothing here (handlers, not SIG_IGN, so the child still starts
       with the default action for each);
-    - when the child stops, this process stops too (SIGSTOP), so the shell gets its prompt back;
-      when it is continued (`fg`), the child is continued and the wait resumes;
+    - when the child stops, this process stops too (`_stop_self`), so the shell gets its prompt
+      back; when it is continued (`fg`), the child is continued and the wait resumes. With no
+      shell left to continue it (an orphaned process group: its terminal closed), it does not
+      stop: it continues the child and goes on waiting;
     - SIGTERM and SIGHUP are forwarded to the child.
     With `on_request`, SIGUSR1 asks for a pickup: `on_request(child pid)` is called in the wait
     (not in the signal handler); False goes back to waiting, True stops the child (SIGTERM, then
@@ -72,7 +74,7 @@ def run_child(cmd: list[str], env: dict[str, str],
                 _drain(wake_r)
                 continue
             if os.WIFSTOPPED(status):
-                os.kill(os.getpid(), signal.SIGSTOP)     # returns once something continues us
+                _stop_self()                             # returns once something continues us
                 os.kill(child.pid, signal.SIGCONT)
                 continue
             child.returncode = (os.WEXITSTATUS(status) if os.WIFEXITED(status)
@@ -84,6 +86,18 @@ def run_child(cmd: list[str], env: dict[str, str],
             signal.signal(s, h)
         os.close(wake_r)
         os.close(wake_w)
+
+
+def _stop_self() -> None:
+    """Stop this process as Ctrl-Z stops a job: SIGTSTP with its default action, never SIGSTOP.
+    The kernel drops that stop in an orphaned process group, where no shell is left to continue
+    it, so the call returns at once there; SIGSTOP would leave this process stopped for good,
+    unable even to reap its child."""
+    saved = signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+    try:
+        os.kill(os.getpid(), signal.SIGTSTP)
+    finally:
+        signal.signal(signal.SIGTSTP, saved)
 
 
 def _drain(fd: int) -> None:

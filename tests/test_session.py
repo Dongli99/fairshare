@@ -71,6 +71,30 @@ class Supervised(unittest.TestCase):
         self.addCleanup(self.reap)
         return self.parent
 
+    def start_in_shell(self, mode, *extra):
+        """The supervisor as a shell runs a job: in a process group of its own, in the session of
+        a stand-in shell that stays alive, so the group is not orphaned and a stop holds. Returns
+        the supervisor's pid (its group's id); the shell exits with the supervisor's code."""
+        cmd = [sys.executable, str(self.dir / "child.py"), str(self.dir), mode, *extra]
+        job = [sys.executable, "-c", SUPERVISOR, SRC, json.dumps(cmd)]
+        shell = ("import os, subprocess, sys; "
+                 "p = subprocess.Popen(sys.argv[2:], process_group=0, stderr=subprocess.DEVNULL); "
+                 "open(sys.argv[1], 'w').write(str(p.pid)); sys.exit(p.wait())")
+        self.shell = subprocess.Popen([sys.executable, "-c", shell, str(self.dir / "job"), *job],
+                                      start_new_session=True)
+        until("the job to start", lambda: (self.dir / "job").exists()
+              and (self.dir / "job").read_text())
+        job_pid = int((self.dir / "job").read_text())
+        def reap():
+            for g in (job_pid, self.shell.pid):
+                try:
+                    os.killpg(g, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            self.shell.wait(timeout=WAIT)
+        self.addCleanup(reap)
+        return job_pid
+
     def reap(self):
         try:
             os.killpg(self.parent.pid, signal.SIGKILL)       # the group: parent and child
@@ -138,29 +162,33 @@ class Terminal(Supervised):
         self.assertEqual(self.code(), 5)                          # and passes the code on
 
     def test_ctrl_z_then_fg_stops_the_whole_job_and_resumes_it(self):
+        p = self.start_in_shell("hold")
+        pid = self.ready()
+        # Ctrl-Z: the terminal sends SIGTSTP to the job's group. The parent does nothing with
+        # it and the child stops...
+        os.killpg(p, signal.SIGTSTP)
+        until("the child to stop", lambda: state(pid).startswith("T"))
+        # ...and the parent stops itself, so the shell would get its prompt back.
+        until("the parent to stop", lambda: state(p).startswith("T"))
+        # fg: the shell continues the group; the parent continues the child too.
+        os.killpg(p, signal.SIGCONT)
+        until("the child to run again", lambda: state(pid) and not state(pid).startswith("T"))
+        until("the parent to run again", lambda: not state(p).startswith("T"))
+        self.stop_child()
+        self.assertEqual(self.shell.wait(timeout=WAIT), 5)        # the code still passes through
+
+    def test_with_no_shell_left_a_stopped_child_is_continued_and_the_parent_never_stops(self):
+        # This harness's group is orphaned (no parent in its session): nothing could continue a
+        # stopped parent, as after its terminal closed.
         p = self.start("hold")
         pid = self.ready()
-        # Ctrl-Z: the terminal sends SIGTSTP to the group. The parent does nothing with it...
-        os.kill(p.pid, signal.SIGTSTP)
-        time.sleep(0.2)
-        self.assertEqual(os.waitpid(p.pid, os.WNOHANG | os.WUNTRACED), (0, 0))
-        # ...and the child stops. (Sent as SIGSTOP: a group with no terminal is orphaned, and
-        # the kernel then ignores SIGTSTP's stop.)
         os.kill(pid, signal.SIGSTOP)
-        until("the child to stop", lambda: state(pid).startswith("T"))
-        # The parent stops itself, so the shell would get its prompt back.
-        def parent_stopped():
-            done, status = os.waitpid(p.pid, os.WNOHANG | os.WUNTRACED)
-            return done == p.pid and os.WIFSTOPPED(status)
-        until("the parent to stop", parent_stopped)
-        self.assertTrue(state(p.pid).startswith("T") and state(pid).startswith("T"))
-        # fg: the parent is continued, and continues the child.
-        os.kill(p.pid, signal.SIGCONT)
-        until("the child to run again", lambda: state(pid) and not state(pid).startswith("T"))
+        until("the child to run again", lambda: (self.dir / "pid").exists()
+              and state(pid) and not state(pid).startswith("T"))
         self.assertFalse(state(p.pid).startswith("T"))
-        self.assertIsNone(p.poll())
+        self.assertEqual(os.waitpid(p.pid, os.WNOHANG | os.WUNTRACED), (0, 0))
         self.stop_child()
-        self.assertEqual(self.code(), 5)                          # the code still passes through
+        self.assertEqual(self.code(), 5)
 
     def test_sigterm_and_sighup_to_the_parent_reach_the_child(self):
         for name in ("TERM", "HUP"):

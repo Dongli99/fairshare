@@ -319,8 +319,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       foreground process group, so the child still gets them. They are no-op handlers, not
       SIG_IGN, which would be inherited by the child;
     - Ctrl-Z: the parent ignores SIGTSTP and waits with WUNTRACED. When the child stops, the
-      parent stops itself with SIGSTOP, so the shell gets its prompt back and sees one stopped
-      job; when the parent is continued (`fg`), it sends SIGCONT to the child and keeps waiting;
+      parent stops itself, so the shell gets its prompt back and sees one stopped job; when the
+      parent is continued (`fg`), it sends SIGCONT to the child and keeps waiting. It stops
+      itself with SIGTSTP at its default action, not SIGSTOP: the kernel drops that stop in an
+      orphaned process group (the terminal closed and no shell is left to continue it), so
+      there the parent continues the child and keeps waiting. With SIGSTOP a launcher was found
+      stopped for 10 days after its terminal closed, its child a zombie it could not reap;
     - SIGTERM and SIGHUP to the parent are forwarded to the child, which the parent then awaits;
     - SIGUSR1 asks for a pickup (decision 19) when the caller gives a callback; otherwise it
       keeps its default. The wait sleeps on a pipe every signal wakes (`set_wakeup_fd`), so a
@@ -1189,7 +1193,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   surrounding Claude Code session was seen to set it).
 - `run -a` takes the account only as its first argument; later `-a` goes to the provider.
 - Ctrl-Z and `fg` are tested by sending the stop and continue signals to a supervised fake
-  child; a real terminal (interactive shell in a pty) was checked by hand once, 2026-11-09.
+  child's process group under a stand-in shell (a group that is not orphaned), and the orphaned
+  case without one; a real terminal (interactive shell in a pty) was checked by hand once,
+  2026-11-09, before the self-stop became SIGTSTP.
 - Plan detection has seen only Claude Pro: the `"max"` and `"ultra"` names are unverified; an
   unmatched value leaves the plan in `accounts.toml`.
 - The sign-in check relies on `claude auth status --json` (Claude Code 2.1.322). If a release
@@ -1219,9 +1225,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
   is copied into the hub's shared settings with the rest and not flagged. Claude Code applies
   that `env` to every account; whether the sign-in check then reports a non-subscription login
   (which would leave the account out) is not verified.
-- Ctrl-Z shows the launcher's job as `Suspended (signal)` (exit status 145) rather than
-  `Stopped`, because the launcher stops itself with SIGSTOP (decision 12); `fg` resumes both
-  processes normally.
+- Ctrl-Z should now show the launcher's job as a plain suspended job (it stops itself with
+  SIGTSTP; with SIGSTOP the shell said `Suspended (signal)`, exit status 145); not yet seen in a
+  real terminal. `fg` resumes both processes.
 - A background start (pickup, handoff, worker) joins its session by name, ignoring the ids live
   under that name before it started. Another session started under the same name by someone
   else in those 10 s could still be taken for it; the order `claude agents --json` lists
