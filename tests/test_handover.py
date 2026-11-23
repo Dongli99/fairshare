@@ -11,6 +11,7 @@ import pty
 import signal
 import subprocess
 import sys
+import tempfile
 import termios
 import time
 import unittest
@@ -739,6 +740,130 @@ class WorkerModel(Handover):
         self.assertIn("name another with --model; no worker started", err)
         self.assertEqual(self.worker("--model", "opus", "--effort", "high", "--account", "b",
                                      "z")[0], 0)                       # explicit: no filter
+
+
+class DefaultModel(Handover):
+    """A launch that names no model filters by the model it would start on, never passes it, and
+    keeps the ranking when no account has that model's week."""
+
+    def setUp(self):
+        super().setUp()
+        write(self.tmp / "hub/shared/settings.json", json.dumps({"model": "opus"}))
+
+    def args_of(self, account):
+        """The arguments of the account's last call of the fake claude: its session's, after the
+        sign-in check's."""
+        return [x for x in (self.log / f"args-{account}").read_text().splitlines() if x]
+
+    def test_a_plain_launch_skips_an_account_with_the_default_models_week_spent(self):
+        self.opus_spent("b")
+        code, _, err = self.go(real=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn("fairshare -> c", err)
+        self.assertEqual(self.args_of("c"), [])                      # no --model
+
+    def test_when_no_account_has_it_the_ranking_stands_without_a_question(self):
+        self.policy("launch_pause = 0")
+        self.opus_spent("b", "c")
+        for tty in (False, True):
+            with self.subTest(tty=tty):
+                code, _, err = self.go(real=True, tty=tty)
+                self.assertEqual(code, 0, err)
+                self.assertIn("fairshare -> b", err)
+                self.assertEqual(self.args_of("b"), [])
+                self.assertIn("warning: b's Opus week is spent", err)
+                self.assertNotIn("left this week", err)
+                self.asked.assert_not_called()
+
+    def test_no_default_model_filters_nothing(self):
+        (self.tmp / "hub/shared/settings.json").write_text("{}")
+        self.opus_spent("b")
+        code, _, err = self.go(real=True)
+        self.assertEqual(code, 0, err)
+        self.assertIn("fairshare -> b", err)
+
+    def test_a_carried_model_still_wins_over_the_default(self):
+        write(self.tmp / "hub/shared/settings.json", json.dumps({"model": "sonnet"}))
+        self.record(model="claude-opus-5-5", effort="high")
+        self.opus_spent("b", "c")
+        code, err = self.launches("run", "-a", "a", requests=[Request(SID, True, 4321)])
+        self.assertEqual((code, len(self.calls)), (1, 1))
+        self.assertIn("left this week; name another with --model", err)
+
+    def test_a_background_pickup_with_no_model_skips_the_spent_default(self):
+        self.record()
+        self.opus_spent("b")
+        code, _, err = self.go("pickup", SID, "--bg")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.bg_args("b"), [])
+        self.assertNotIn("--model", self.bg_args("c"))
+        self.assertIn("--resume", self.bg_args("c"))
+
+
+class DefaultModelLookup(unittest.TestCase):
+    """The Claude adapter's default model: ANTHROPIC_MODEL (a settings file's `env` block over
+    the environment's), then the `model` key; files local, then project, then the user's."""
+
+    def setUp(self):
+        t = tempfile.TemporaryDirectory()
+        self.addCleanup(t.cleanup)
+        self.folder, self.shared = Path(t.name) / "work", Path(t.name) / "shared"
+        self.shared.mkdir()
+        (self.folder / ".claude").mkdir(parents=True)
+        env = mock.patch.dict(os.environ, {"HOME": t.name})
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("ANTHROPIC_MODEL", None)
+
+    def put(self, where, data):
+        path = {"local": self.folder / ".claude/settings.local.json",
+                "project": self.folder / ".claude/settings.json",
+                "user": self.shared / "settings.json"}[where]
+        path.write_text(data if isinstance(data, str) else json.dumps(data))
+
+    def model(self):
+        return claude.default_model(self.folder, self.shared)
+
+    def test_nothing_found_is_none(self):
+        self.assertIsNone(self.model())
+
+    def test_files_in_order_local_project_user(self):
+        self.put("user", {"model": "haiku"})
+        self.assertEqual(self.model(), "haiku")
+        self.put("project", {"model": "sonnet"})
+        self.assertEqual(self.model(), "sonnet")
+        self.put("local", {"model": "opus"})
+        self.assertEqual(self.model(), "opus")
+
+    def test_the_variable_beats_every_model_key(self):
+        self.put("local", {"model": "opus"})
+        with mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "fable"}):
+            self.assertEqual(self.model(), "fable")
+        self.put("user", {"env": {"ANTHROPIC_MODEL": "sonnet"}})       # an env block, any file
+        self.assertEqual(self.model(), "sonnet")
+
+    def test_an_env_block_beats_the_environment_and_follows_the_file_order(self):
+        self.put("user", {"env": {"ANTHROPIC_MODEL": "haiku"}, "model": "opus"})
+        with mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "fable"}):
+            self.assertEqual(self.model(), "haiku")
+            self.put("project", {"env": {"ANTHROPIC_MODEL": "sonnet"}})
+            self.assertEqual(self.model(), "sonnet")
+
+    def test_malformed_files_and_values_are_skipped(self):
+        self.put("user", {"model": "haiku"})
+        self.put("local", "{not json")
+        self.put("project", {"model": 5, "env": {"ANTHROPIC_MODEL": ["x"]}})
+        self.assertEqual(self.model(), "haiku")
+        self.put("project", [1, 2])
+        self.put("local", {"env": "opus", "model": ""})
+        self.assertEqual(self.model(), "haiku")
+
+    def test_it_reads_only(self):
+        self.put("user", {"model": "haiku"})
+        before = sorted(p.relative_to(self.folder.parent) for p in self.folder.parent.rglob("*"))
+        self.model()
+        self.assertEqual(sorted(p.relative_to(self.folder.parent)
+                                for p in self.folder.parent.rglob("*")), before)
 
 
 class Skill(unittest.TestCase):

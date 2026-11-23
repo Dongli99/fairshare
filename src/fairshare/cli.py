@@ -1161,7 +1161,8 @@ def _waits(s: Survey, rec: SessionRecord, req: Request, lim: tuple[str, float] |
     if v is None or lim is None or not providers.get(v.account.provider).resumes_at_reset:
         return None
     wait = s.tuning.resume_wait_minutes
-    if wait is None or lim[1] - s.now <= wait * 60 or not _having_model(s, _carry(rec, req)[0]):
+    if wait is None or lim[1] - s.now <= wait * 60 or not _having_model(
+            s, _carry(rec, req)[0], rec.cwd or os.getcwd()):
         return lim[1]
     return None
 
@@ -1370,10 +1371,24 @@ def _lacks_model(acct: Account, snap: Snapshot | None, model: str, t: Tuning,
                for k, w in (snap.windows if snap else {}).items())
 
 
-def _having_model(s: Survey, model: str | None) -> list[Verdict]:
-    """The eligible verdicts, less those whose account has `model`'s week spent."""
-    return [v for v in s.verdicts if v.eligible and not (
-        model and _lacks_model(v.account, s.snaps.get(v.account.id), model, s.tuning, s.now))]
+def _having_model(s: Survey, model: str | None, folder: str | Path | None = None
+                  ) -> list[Verdict]:
+    """The eligible verdicts, less those whose account has `model`'s week spent. With no `model`,
+    the model a session started in `folder` would run on without one (the provider's
+    `default_model`; it is never passed on), and softly: when no eligible account has its week,
+    all of them."""
+    eligible = [v for v in s.verdicts if v.eligible]
+    if model:
+        return [v for v in eligible
+                if not _lacks_model(v.account, s.snaps.get(v.account.id), model, s.tuning, s.now)]
+    if folder is None or not eligible:
+        return eligible
+    shared = hub_mod.shared_dir(_load()[2])
+    defaults = {p: providers.get(p).default_model(Path(folder), shared)
+                for p in {v.account.provider for v in eligible}}
+    return [v for v in eligible if not (
+        (m := defaults[v.account.provider])
+        and _lacks_model(v.account, s.snaps.get(v.account.id), m, s.tuning, s.now))] or eligible
 
 
 def _no_model_line(model: str) -> str:
@@ -1579,8 +1594,10 @@ def _route(args, moving: str | None = None, pause: bool = False, model: str | No
     still take work. `pause`: on a terminal, a choice worth making waits `launch_pause` seconds
     for a key (`_pause`). `model`, `effort`: the session keeps them; an eligible account whose
     week for that model is spent is skipped, and when every eligible one is, a terminal asks
-    whether to start the top one on its default model, and no terminal refuses. `continues` as
-    `_launch` takes it."""
+    whether to start the top one on its default model, and no terminal refuses. With no
+    `model`, the same skip applies to the default model the session would start on, and when
+    every eligible account has its week spent, the ranking stands (`_having_model`).
+    `continues` as `_launch` takes it."""
     try:
         while True:
             s = _survey()
@@ -1601,8 +1618,8 @@ def _route(args, moving: str | None = None, pause: bool = False, model: str | No
             if note := _preference_note(s):
                 _say(note)
             _nothing_to_rank(s)
-            if model and any(v.eligible for v in s.verdicts):
-                having = _having_model(s, model)
+            if any(v.eligible for v in s.verdicts):
+                having = _having_model(s, model, os.getcwd())
                 if having:
                     s = replace(s, verdicts=[v for v in s.verdicts
                                              if v in having or not v.eligible])
@@ -2039,7 +2056,7 @@ def _pickup_background(rec: SessionRecord, req: Request) -> int:
         candidates = [x for x in accounts if x.id == req.account]
         eligible = [v for v in s.verdicts if v.account.id == req.account]
     else:
-        eligible = _having_model(s, model)
+        eligible = _having_model(s, model, here)
         if model and not eligible and any(v.eligible for v in s.verdicts):
             _say(f"{_no_model_line(model)}; name another with --model")
             return 1
@@ -2640,7 +2657,7 @@ def cmd_worker(a) -> int:
         if not any(v.eligible for v in s.verdicts):
             _say("no account can take work now; no worker started")
             return 1
-        candidates = [v.account for v in _having_model(s, a.model)]
+        candidates = [v.account for v in _having_model(s, a.model, here)]
         if not candidates:
             _say(f"{_no_model_line(a.model)}; name another with --model; no worker started")
             return 1

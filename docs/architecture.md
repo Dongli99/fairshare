@@ -771,7 +771,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       in `cli.py`; the policy is unchanged. When no eligible account has the model, a terminal
       says so in one line and asks `[d]` start on the top account with its default model (no
       `--model`, no `--effort`) or `[q]` quit; without a terminal one line names `--model`
-      (exit 1). Never a silent swap. `-a` is the user's choice: no filter.
+      (exit 1). Never a silent swap. `-a` is the user's choice: no filter. A launch that names
+      and carries no model filters by the one the session would start on
+      (`Provider.default_model`: for Claude Code `ANTHROPIC_MODEL`, a settings file's `env`
+      block over the environment's, then the `model` key; the folder's local, then project
+      settings, then the shared user settings), never passed as an argument; when no eligible
+      account has its week, the ranking stands, with no question (the warning line says it).
     - **Handoff** (`fairshare handoff [NOTE] [flags]`, current session only; outside one,
       exit 2 naming `fairshare pickup SESSION`). With NOTE (what the agent runs): the note is
       appended as the checkpoint, then the launcher stops this session and starts the fresh

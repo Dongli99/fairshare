@@ -206,8 +206,9 @@ What the messages mean:
   treating `/usage` as a local command, so asking spends usage. fairshare does not use the answer
   and says so every time until you turn the probe off.
 - `warning: <id>'s Fable week is spent until Thu 03:00; other models are unaffected`: a per-model
-  weekly limit is used up on the account that is starting. The ranking does not change: which
-  model you use is up to you.
+  weekly limit is used up on the account that is starting. Another account with that week left
+  is preferred only when it is the model the session starts on; which model you use is up to
+  you.
 - `<id>: sign-in ends Fri 10:50; \`fairshare join <id>\` signs it in again`: that account's
   sign-in ends within three days.
 
@@ -352,7 +353,10 @@ a session inside another.
 
 **The model must be available.** An account whose own week for that model is spent is skipped.
 When no account that can work has it, a terminal asks whether to start on the top account with
-its default model or quit; without a terminal it refuses, naming `--model`.
+its default model or quit; without a terminal it refuses, naming `--model`. A session that
+names no model is checked against the model it would start on (`ANTHROPIC_MODEL`, or `model` in
+your settings): an account with that model's week spent is skipped, and when every account has
+it spent, fairshare starts as ranked and prints the warning below.
 
 `! fairshare ...` and `/fairshare ...` are the same commands by two routes:
 

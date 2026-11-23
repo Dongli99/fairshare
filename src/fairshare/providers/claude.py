@@ -166,6 +166,13 @@ SESSION_ID_ENV, SESSION_PID_ENV = "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"
 
 # Files and folders.
 SETTINGS_FILE = "settings.json"      # holds the statusLine hook
+# A session started with no `--model` (code.claude.com/docs/en/env-vars "Precedence" and
+# /settings "Settings precedence", read 2026-11-23): MODEL_ENV wins over the `model` key of any
+# settings file; a settings file's `env` block is written into the process environment over the
+# shell's value; between files, project local beats shared project beats user (the hub's shared
+# SETTINGS_FILE). Managed settings are not read.
+MODEL_ENV, MODEL_KEY, ENV_KEY = "ANTHROPIC_MODEL", "model", "env"
+PROJECT_SETTINGS = ("settings.local.json", SETTINGS_FILE)   # in the folder's DEFAULT_DIR
 # What every account shares through the hub; a name ending in "/" is a folder. Everything else in
 # an account's folder (its login, STATE_FILE, caches, jobs, locks) stays its own. Observed in real
 # config dirs on 2.1.322; CLAUDE.md, agents/, commands/, output-styles/ and keybindings.json are
@@ -385,6 +392,25 @@ def uses_week(model: str, week: str) -> bool:
     is in the model's."""
     words = week.lower().split()
     return bool(words) and all(w in model.lower() for w in words)
+
+
+def _settings_obj(path: Path) -> dict:
+    """A settings file's top-level object; {} when it is missing, unreadable or malformed."""
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def default_model(folder: Path, shared: Path) -> str | None:
+    """The model a session started in `folder` with no model argument runs on, by the tool's own
+    precedence (see MODEL_ENV); None when nothing names one. Reads only."""
+    found = [_settings_obj(p) for p in (*(folder / DEFAULT_DIR / f for f in PROJECT_SETTINGS),
+                                        capture_file(shared))]
+    envs = [e.get(MODEL_ENV) for d in found if isinstance(e := d.get(ENV_KEY), dict)]
+    return next((m for m in (*envs, os.environ.get(MODEL_ENV), *(d.get(MODEL_KEY) for d in found))
+                 if isinstance(m, str) and m), None)
 
 
 def background(account: Account, name: str | None, prompt: str, extra: list[str] = ()

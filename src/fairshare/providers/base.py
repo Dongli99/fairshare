@@ -76,6 +76,12 @@ class Provider(Protocol):
         """Whether the per-model week the usage report names `week` limits `model` (an id, an
         alias or a display name)."""
 
+    def default_model(self, folder: Path, shared: Path) -> str | None:
+        """The model a session started in `folder` with no model argument would run on, by the
+        provider's own settings precedence (its environment, the folder's settings, then the
+        user settings among the hub's shared items `shared`); None when nothing names one.
+        Reads only; skips a file it cannot read or parse."""
+
     def background(self, account: Account, name: str | None, prompt: str, extra: list[str] = ()
                    ) -> tuple[list[str], dict[str, str]]:
         """The command and the clean environment (as `launch`) that start a session of
