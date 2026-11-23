@@ -45,6 +45,10 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 - `fairshare fork <session id>` is a copy on purpose, under a new id; the original goes on.
 - To stop a worker, use your own tools (`fairshare run -a <account> stop <id>`, or a message
   to it).
+- Removing finished workers is your job: once a worker's result is merged or used, run
+  `fairshare run -a <its account> rm <its session id>`. That only drops it from the list (its
+  conversation is kept); it deletes a worktree only if Claude Code made it, and refuses when that
+  would lose unpushed work.
 
 ## When fairshare warns you
 A warning names the account, its percent, when that window resets and the best other account.
