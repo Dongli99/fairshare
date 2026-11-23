@@ -273,27 +273,37 @@ def _spent_models(acct_id: str, snap: Snapshot | None, t: Tuning, now: float) ->
             and w.resets_at > now]
 
 
-def _room_line(acct: Account, snap: Snapshot | None, now: float) -> list[str]:
+def _room(acct: Account, snap: Snapshot | None, now: float) -> dict | None:
     """The dollars the account can still spend before the first warning level, from the rate
-    its usage log gives each plan window (`rates`): the smallest room binds. Then each rate,
-    with how many window instances it pools and their lowest and highest rate, so the reader
-    can judge the fit. Nothing when no window has a rate yet. Shown only: nothing decides on
-    it yet."""
+    its usage log gives each plan window (`rates`): the smallest room binds. Per window with a
+    rate: its dollars of room, the rate and how many window instances it pools, with their
+    lowest and highest rate, so the reader can judge the fit. None when no window has a rate
+    yet. Shown only: nothing decides on it yet."""
     p = acct.plan
     found = rates.fit_plan(store.usage_log(acct.id), p.short_name, p.long_name, now) if p else {}
     if not found:
-        return []
-    hours = {k: h for k, h in ((p.short_name, p.short_hours), (p.long_name, p.long_hours)) if k}
-    label = {k: _span(h) if h else k for k, h in hours.items()}
+        return None
     room = rates.room(found, snap.windows if snap else {}, WARN_LEVELS[0], now)
     binds = min(room, key=room.get)
-    others = "; ".join(f"{label[k]} ~${room[k]:.2f}" if k in room else f"{label[k]} no rate yet"
-                       for k in hours if k != binds)
-    each = ", ".join(f"{label[k]} {r.per_pct:.3g} (" + (
-        f"{r.instances} windows, {r.low:.3g}-{r.high:.3g})" if r.instances > 1 else "1 window)")
-        for k, r in found.items())
-    return [f"room ~${room[binds]:.2f} before the {WARN_LEVELS[0]}% warning ({label[binds]} "
-            f"binds{'; ' + others if others else ''}) · $/pt {each}"]
+    return {"dollars": room[binds], "binds": binds, "warn_pct": WARN_LEVELS[0],
+            "windows": {k: {"dollars": room[k], "per_pct": r.per_pct, "instances": r.instances,
+                            "low": r.low, "high": r.high} for k, r in found.items()}}
+
+
+def _room_line(acct: Account, room: dict | None) -> list[str]:
+    """status's line for `_room` data, if there is any."""
+    if not room:
+        return []
+    p, binds, found = acct.plan, room["binds"], room["windows"]
+    hours = {k: h for k, h in ((p.short_name, p.short_hours), (p.long_name, p.long_hours)) if k}
+    label = {k: _span(h) if h else k for k, h in hours.items()}
+    others = "; ".join(f"{label[k]} ~${found[k]['dollars']:.2f}" if k in found
+                       else f"{label[k]} no rate yet" for k in hours if k != binds)
+    each = ", ".join(f"{label[k]} {r['per_pct']:.3g} (" + (
+        f"{r['instances']} windows, {r['low']:.3g}-{r['high']:.3g})" if r["instances"] > 1
+        else "1 window)") for k, r in found.items())
+    return [f"room ~${room['dollars']:.2f} before the {room['warn_pct']}% warning "
+            f"({label[binds]} binds{'; ' + others if others else ''}) · $/pt {each}"]
 
 
 def _top(verdicts: list[Verdict]) -> Verdict:
@@ -338,9 +348,9 @@ def _role(rec: SessionRecord) -> str:
     return w.name if (w := _worker_of(rec.id)) else ROLE_WORKER
 
 
-def _about(rec: SessionRecord) -> tuple[str, str]:
-    """A session's model (display name) and folder (its last part), `-` when unknown."""
-    return rec.model_name or rec.model or "-", (Path(rec.cwd).name if rec.cwd else "") or "-"
+def _about(rec: SessionRecord) -> tuple[str | None, str | None]:
+    """A session's model (display name) and folder (its last part), None when unknown."""
+    return rec.model_name or rec.model, (Path(rec.cwd).name if rec.cwd else "") or None
 
 
 def _live(rec: SessionRecord, now: float) -> bool:
@@ -353,25 +363,36 @@ def _running(recs: list[SessionRecord], now: float) -> dict[str, int]:
     return Counter(r.account for r in recs if _live(r, now))
 
 
-def _sessions_block(acct_id: str, recs: list[SessionRecord], now: float) -> list[str]:
-    """status's lines for an account's live sessions, heaviest in the last hour first, at most
-    SESSIONS_SHOWN, then `+N more`: id start, model, folder, role, spend and its share of the
-    account's last-hour spend; `-` with no cost data. A session that went on under a new id
-    (`moved_to`) is not listed; its spend still counts for its own account."""
+def _sessions_data(acct_id: str, recs: list[SessionRecord], now: float
+                   ) -> tuple[list[dict], int]:
+    """An account's live sessions, heaviest in the last hour first, at most SESSIONS_SHOWN, and
+    how many more there are: per session its id, model, folder, role, spend in the last hour
+    (`cost_last_hour`, None with no cost data) and its share of the account's last-hour spend
+    (`share_last_hour_pct`, None with no cost data or nothing spent). A session that went on
+    under a new id (`moved_to`) is not listed; its spend still counts for its own account."""
     mine = [r for r in recs if r.account == acct_id]
     spent = _hour_spend(mine, now)
     total = sum(x for x in spent.values() if x)
     live = sorted((r for r in mine if _live(r, now)),
                   key=lambda r: (-(spent[r.id] if spent[r.id] is not None else -1), r.id))
-    lines = []
+    rows = []
     for r in live[:SESSIONS_SHOWN]:
         x = spent[r.id]
         model, folder = _about(r)
-        lines.append(f"session {r.id[:8]} · {model} · {folder} · {_role(r)} · " + (
-            "-" if x is None else f"${x:.2f}" + (f" ({100 * x / total:.0f}%)" if total else "")))
-    if len(live) > SESSIONS_SHOWN:
-        lines.append(f"+{len(live) - SESSIONS_SHOWN} more")
-    return lines
+        rows.append({"id": r.id, "model": model, "folder": folder, "role": _role(r),
+                     "cost_last_hour": x,
+                     "share_last_hour_pct": 100 * x / total if x is not None and total else None})
+    return rows, max(0, len(live) - SESSIONS_SHOWN)
+
+
+def _sessions_block(rows: list[dict], more: int) -> list[str]:
+    """status's lines for `_sessions_data`: id start, model, folder, role, spend and its share;
+    `-` with no cost data; then `+N more`."""
+    lines = [f"session {r['id'][:8]} · {r['model'] or '-'} · {r['folder'] or '-'} · "
+             f"{r['role']} · " + ("-" if (x := r["cost_last_hour"]) is None else f"${x:.2f}"
+                + ("" if (p := r["share_last_hour_pct"]) is None else f" ({p:.0f}%)"))
+             for r in rows]
+    return lines + ([f"+{more} more"] if more else [])
 
 
 def _heaviest(rec: SessionRecord, acct_id: str, now: float) -> str:
@@ -385,42 +406,102 @@ def _heaviest(rec: SessionRecord, acct_id: str, now: float) -> str:
     if not heavy:
         return ""
     model, folder = _about(heavy[2])
-    return (f" Heaviest in the last hour: session {heavy[1][:8]} ({model}, {folder}, "
-            f"{100 * heavy[0] / total:.0f}%).")
+    return (f" Heaviest in the last hour: session {heavy[1][:8]} ({model or '-'}, "
+            f"{folder or '-'}, {100 * heavy[0] / total:.0f}%).")
 
 
-def cmd_status(_a) -> int:
+@dataclass
+class _Row:
+    """One account as `status` shows it: the data text and `--json` both print."""
+    account: Account
+    state: str                       # "ranked", "left_out" or "same_login"
+    verdict: Verdict | None = None   # ranked only
+    rank: int | None = None          # ranked only, from 1
+    why: str | None = None           # left out: why; same login: the id ranked for it
+    notes: list[str] = field(default_factory=list)   # except room and sessions
+    room: dict | None = None         # `_room`
+    sessions: list[dict] = field(default_factory=list)   # `_sessions_data`
+    more: int = 0                    # live sessions beyond those listed
+
+
+def _status_rows(s: Survey, recs: list[SessionRecord]) -> list[_Row]:
+    """Every account `status` shows, in order: ranked, left out, then the same-login twins."""
+    probes, expiring = _probe_lines(s), _expiry_lines(s.expires, s.now)
+    plans = store.active_full_resets(s.now)
+
+    def row(a: Account, state: str, notes: list[str], **kw) -> _Row:
+        sessions, more = _sessions_data(a.id, recs, s.now)
+        return _Row(a, state, notes=notes, sessions=sessions, more=more, **kw)
+
+    rows = [row(v.account, "ranked",
+                [*s.notes.get(v.account.id, []), *_plan_note(v.account.id, plans, s.now),
+                 *([probes[v.account.id]] if v.account.id in probes else []),
+                 *_spent_models(v.account.id, s.snaps.get(v.account.id), s.tuning, s.now),
+                 *([expiring[v.account.id]] if v.account.id in expiring else [])],
+                verdict=v, rank=i, room=_room(v.account, s.snaps.get(v.account.id), s.now))
+            for i, v in enumerate(s.verdicts, 1)]
+    rows += [row(a, "left_out", [*s.notes.get(a.id, []), *_plan_note(a.id, plans, s.now)],
+                 why=why, room=_room(a, s.snaps.get(a.id), s.now)) for a, why in s.out]
+    rows += [row(a, "same_login", [*_plan_note(a.id, plans, s.now),
+                                   *([expiring[a.id]] if a.id in expiring else [])], why=rep)
+             for a, rep in s.twins]
+    return rows
+
+
+def _status_json(s: Survey, rows: list[_Row]) -> dict:
+    """The data of `status --json` (schema 1, documented in docs/usage.md): every key always
+    present, absent = None, times in epoch seconds, numbers as the data has them."""
+    top = _top(s.verdicts) if s.verdicts else None
+    plans = store.active_full_resets(s.now)
+
+    def account(r: _Row) -> dict:
+        a, v, snap = r.account, r.verdict, s.snaps.get(r.account.id)
+        return {
+            "id": a.id, "plan": a.plan.name if a.plan else None, "state": r.state,
+            "rank": r.rank, "eligible": v.eligible if v else None,
+            "score": v.score if v else None, "usable_in_hours": v.usable_in if v else None,
+            "reason": v.reason if v else None,
+            "left_out": r.why if r.state == "left_out" else None,
+            "same_login_as": r.why if r.state == "same_login" else None,
+            "windows": {k: {"used_pct": w.used_pct, "resets_at": w.resets_at}
+                        for k, w in snap.windows.items()} if snap else None,
+            "usage_as_of": snap.captured_at if snap else None,
+            "sign_in_ends": s.expires.get(a.id),
+            "full_reset": {"adds_pct": FULL_RESET_PCT, "until": plans[a.id]}
+            if a.id in plans else None,
+            "room": r.room, "notes": r.notes, "sessions": r.sessions, "sessions_more": r.more}
+
+    pref = s.preference
+    return {"schema": 1, "now": s.now, "top": top.account.id if top else None,
+            "why": versus(top, s.verdicts) or None if top and top.eligible else None,
+            "preference": {"account": pref[0], "until": pref[1], "honoured": _honoured(s)}
+            if pref else None,
+            "accounts": [account(r) for r in rows]}
+
+
+def cmd_status(a) -> int:
     s = _survey()
+    rows = _status_rows(s, store.sessions())
+    if a.json:
+        print(json.dumps(_status_json(s, rows), indent=2))
+        return 0
     if s.preference and not _honoured(s):
         print(_preference_note(s))
-    probes, expiring = _probe_lines(s), _expiry_lines(s.expires, s.now)
-    recs, top = store.sessions(), _top(s.verdicts) if s.verdicts else None
-    plans = store.active_full_resets(s.now)
-    for i, v in enumerate(s.verdicts):
-        mark, aid = (">" if v is top else " "), v.account.id
-        flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
-        if i == 0 and _honoured(s):
-            flag = f"  [preferred until {_clock(s.preference[1], s.now)}]"
-        print(f"{mark} {aid:<12} {v.account.plan.name:<14} score {v.score:6.2f}  "
-              f"{v.reason}{_age(s, aid)}{flag}")
-        for note in [*s.notes.get(aid, []), *_plan_note(aid, plans, s.now),
-                     *([probes[aid]] if aid in probes else []),
-                     *_spent_models(aid, s.snaps.get(aid), s.tuning, s.now),
-                     *([expiring[aid]] if aid in expiring else []),
-                     *_room_line(v.account, s.snaps.get(aid), s.now),
-                     *_sessions_block(aid, recs, s.now)]:
-            print(f"    {note}")
-    for a, why in s.out:
-        print(f"  {a.id:<12} {a.plan.name if a.plan else '-':<14} left out: {why}")
-        for note in [*s.notes.get(a.id, []), *_plan_note(a.id, plans, s.now),
-                     *_room_line(a, s.snaps.get(a.id), s.now),
-                     *_sessions_block(a.id, recs, s.now)]:
-            print(f"    {note}")
-    for a, rep in s.twins:
-        print(f"  {a.id:<12} {a.plan.name:<14} same login as {rep}")
-        for note in [*_plan_note(a.id, plans, s.now),
-                     *([expiring[a.id]] if a.id in expiring else []),
-                     *_sessions_block(a.id, recs, s.now)]:
+    top = _top(s.verdicts) if s.verdicts else None
+    for r in rows:
+        acct, v = r.account, r.verdict
+        if v:
+            flag = "" if v.eligible else f"  [avoid] {_usable(v, s.now)}"
+            if r.rank == 1 and _honoured(s):
+                flag = f"  [preferred until {_clock(s.preference[1], s.now)}]"
+            print(f"{'>' if v is top else ' '} {acct.id:<12} {acct.plan.name:<14} "
+                  f"score {v.score:6.2f}  {v.reason}{_age(s, acct.id)}{flag}")
+        elif r.state == "left_out":
+            print(f"  {acct.id:<12} {acct.plan.name if acct.plan else '-':<14} "
+                  f"left out: {r.why}")
+        else:
+            print(f"  {acct.id:<12} {acct.plan.name:<14} same login as {r.why}")
+        for note in [*r.notes, *_room_line(acct, r.room), *_sessions_block(r.sessions, r.more)]:
             print(f"    {note}")
     if top and top.eligible and (why := versus(top, s.verdicts)):
         print(f"why {top.account.id}: {why}")
@@ -1998,7 +2079,7 @@ def _session_rows(recs: list[SessionRecord], live: dict[str, list | None],
                   prompts: dict[str, str | None], now: float, pickup: bool) -> list[str]:
     """The list's lines, numbered from 1: id start, folder, account, state, when last seen and
     the last prompt, in aligned columns."""
-    cells = [[str(n), r.id[:8], _about(r)[1], r.account,
+    cells = [[str(n), r.id[:8], _about(r)[1] or "-", r.account,
               _row_state(r, live.get(r.account), now, pickup), f"seen {_clock(r.seen, now)}"]
              for n, r in enumerate(recs, 1)]
     widths = [max(len(c[i]) for c in cells) for i in range(len(cells[0]))] if cells else []
@@ -4138,7 +4219,10 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="fairshare", description=__doc__)
     p.add_argument("-v", "--version", action="version", version=f"fairshare {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status").set_defaults(f=cmd_status)
+    stp = sub.add_parser("status", help="the accounts, their usage, the choice and the live "
+                         "sessions; --json: the same as one JSON object")
+    stp.add_argument("--json", action="store_true", help="print one JSON object, nothing else")
+    stp.set_defaults(f=cmd_status)
     cp = sub.add_parser("capture", help="the usage hook; the account is the session's own folder")
     cp.add_argument("account", nargs="?", help=argparse.SUPPRESS)   # the form before the hub
     cp.add_argument("--then", help="the user's own command for this hook, run after recording")

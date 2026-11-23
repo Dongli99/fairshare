@@ -67,7 +67,8 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
 
 - `fairshare` starts a session on the best account. `fairshare run <args>` passes the arguments
   to Claude Code unchanged; `fairshare run -a ID` starts that account instead.
-- `fairshare status` lists the accounts, best first, with their usage and live sessions.
+- `fairshare status` lists the accounts, best first, with their usage and live sessions;
+  `--json` prints the same as one JSON object for scripts.
 - Near a limit (90% and 95% of a window), fairshare tells the agent in the session, naming the
   best account now. A skill fairshare installs in the hub teaches it to run `fairshare handoff`
   with a note at its next stopping point, unless little work is left: a fresh session continues

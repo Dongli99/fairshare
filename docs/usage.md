@@ -544,6 +544,58 @@ percentage point is learned from what its sessions spent while each window rose 
 estimate, so model mix moves it); the count and the range say how well it holds. Nothing acts on
 it yet.
 
+## Status as JSON
+
+`fairshare status --json` prints the same facts as `fairshare status` as one JSON object (indent
+2) and nothing else on stdout, for scripts, status bars and other agents. It asks the same
+questions, in the same way, and exits as `status` does; an error (no config, no accounts, no hub)
+goes to stderr with nothing on stdout. Times are epoch seconds and numbers are raw. Every key is
+always present: what does not apply is `null`. `schema` is `1`; it changes only when a key is
+removed, renamed or changes meaning, and new keys can appear without it (read what you need and
+ignore the rest).
+
+```
+{
+  "schema": 1,
+  "now": 1799999999.5,
+  "top": "b",
+  "why": "b before a (score 1.60 vs 1.00: ...); b: seven_day 20% used, resets in 50h; a: ...",
+  "preference": null,
+  "accounts": [ { "id": "b", "state": "ranked", "rank": 1, ... } ]
+}
+```
+
+| key | meaning |
+|---|---|
+| `schema` | the version of this shape |
+| `now` | the time `status` took its numbers |
+| `top` | the id of the account a launch starts on (the `>` row); `null` when no account is ranked |
+| `why` | the text after `why <id>:` in `status`; `null` when it prints none (the top account cannot take work, or no other can) |
+| `preference` | `null`, or `{"account", "until", "honoured"}`: the account named by `fairshare prefer`, when it ends, and whether it is the one ranked first (`false`: it cannot take work now and the best account is used) |
+| `accounts` | one object per account: the ranked ones first (best first), then the left out, then the same-login folders |
+
+Each account:
+
+| key | meaning |
+|---|---|
+| `id`, `plan` | the account's id and plan name (`null` when its plan has no plan file) |
+| `state` | `ranked`; `left_out` (not signed in, not a subscription login, no plan file, ...); or `same_login` (one login in several folders is one quota, ranked once, under another id) |
+| `rank` | ranked only: 1 for the best |
+| `eligible` | ranked only: `false` when a window is at its limit; `status` marks the row `[avoid]` |
+| `score` | ranked only: the policy's score; a spent window is negative |
+| `usable_in_hours` | ranked only: hours until it can take work again; 0 when it can now |
+| `reason` | ranked only: the reason the row shows (`seven_day 20% used, resets in 50h`) |
+| `left_out` | left out only: why |
+| `same_login_as` | same login only: the id ranked for that login |
+| `windows` | the usage snapshot as stored, `{"<window>": {"used_pct", "resets_at"}}`, with each per-model week under its own key (`seven_day:<model>`); `null` with no snapshot |
+| `usage_as_of` | when that snapshot was captured; `null` with none |
+| `sign_in_ends` | when the sign-in ends; `null` when not known |
+| `full_reset` | `null`, or `{"adds_pct", "until"}`: a planned full reset still to use (`adds_pct` of the week, until it is used or the week resets at `until`) |
+| `room` | `null` until a window has a rate, else the dollars left before the first warning level: `{"dollars", "binds", "warn_pct", "windows"}`, where `binds` is the window with the least room and `windows` holds, per window with a rate, `{"dollars", "per_pct", "instances", "low", "high"}` (its room, dollars per percentage point, the window instances pooled, and their lowest and highest rate) |
+| `notes` | the lines `status` prints under the account, in order, except the room line and the sessions: plan or sign-in remarks, a failed usage probe, a spent per-model week, a sign-in ending soon, a planned full reset |
+| `sessions` | the live sessions `status` lists for the account (heaviest in the last hour first, at most 5): `{"id", "model", "folder", "role", "cost_last_hour", "share_last_hour_pct"}`: the full session id; its model's name; its folder's last part; `main` or the worker's name; its spend in the last hour in dollars and its share of the account's, in percent; `null` where `status` shows `-` (`share_last_hour_pct` is also `null` when nothing was spent) |
+| `sessions_more` | how many more live sessions there are than listed (`status`'s `+N more`); 0 for none |
+
 ## One assistant: the hub
 
 Every account's folder in the hub links to one shared set of settings, CLAUDE.md, skills,

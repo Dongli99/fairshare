@@ -1197,6 +1197,18 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     sessions (the web app) raises the percent with no dollars recorded, which lowers the rate.
     Nothing decides on it yet: not the ranking, the warnings, the status bar or `worker`.
 
+34. **`status --json` is a public contract** (2026-11-23). Scripts, status bars and other agents
+    read the accounts, their usage, the choice and the live sessions without parsing text.
+    `cmd_status` builds one `_Row` per account from the one `Survey` (no second survey, no new
+    probing rule); the text and `_status_json` both print those rows, and `_room` and
+    `_sessions_data` return data that `_room_line` and `_sessions_block` format. The object has
+    a `schema` number, every key is always present (`null` for what does not apply), times are
+    epoch seconds and numbers are raw. `schema` bumps only when a key is removed, renamed or
+    changes meaning; adding a key keeps it, so a reader ignores keys it does not know. Every key
+    is documented in `docs/usage.md`: a key is added there in the same change. Nothing is in the
+    object that the text does not show: the sessions are the ones listed there (at most five,
+    heaviest first), and `sessions_more` is its `+N more`.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
