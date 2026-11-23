@@ -177,6 +177,8 @@ class Worker:
     effort: str | None = None
     cost: float | None = None         # its measured cost when it ended or went still (unread yet)
     duration: float | None = None     # seconds from its start to its last cost movement
+    removed: float | None = None      # when its main session removed it (`worker --remove`):
+                                      # `watch` says nothing more about it
 
 
 @dataclass(frozen=True)

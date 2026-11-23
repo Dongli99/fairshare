@@ -46,9 +46,9 @@ workers. A worker makes no account decisions: it checkpoints when asked.
 - To stop a worker, use your own tools (`fairshare run -a <account> stop <id>`, or a message
   to it).
 - Removing finished workers is your job: once a worker's result is merged or used, run
-  `fairshare run -a <its account> rm <its session id>`. That only drops it from the list (its
-  conversation is kept); it deletes a worktree only if Claude Code made it, and refuses when that
-  would lose unpushed work.
+  `fairshare worker --remove <name>`. That only drops it from the list (its conversation is
+  kept) and `watch` stops speaking of it; it deletes a worktree only if Claude Code made it, and
+  refuses when that would lose unpushed work (then it does nothing else).
 
 ## When fairshare warns you
 A warning names the account, its percent, when that window resets and the best other account.

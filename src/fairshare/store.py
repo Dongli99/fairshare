@@ -558,7 +558,7 @@ def _read_worker(path: Path) -> Worker | None:
         d = json.loads(path.read_text())
         return Worker(path.stem, str(d["parent"]), str(d["account"]), str(d["cwd"]),
                       float(d["started"]), _text(d.get("session")), _text(d.get("model")),
-                      _text(d.get("effort")), _num(d.get("cost")), _num(d.get("duration")))
+                      _text(d.get("effort")), _num(d.get("cost")), _num(d.get("duration")), _num(d.get("removed")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -613,6 +613,13 @@ def finish_worker(name: str, cost: float | None, duration: float) -> bool:
             return False
         _save_worker(replace(w, cost=cost, duration=duration))
     return True
+
+
+def remove_worker(name: str, now: float) -> None:
+    """Mark a worker removed: its main session is done with it (`watch` stops speaking of it)."""
+    with locked(_workers() / ".lock"):
+        if (w := worker(name)) and w.removed is None:
+            _save_worker(replace(w, removed=now))
 
 
 def join_worker(name: str, session_id: str) -> None:

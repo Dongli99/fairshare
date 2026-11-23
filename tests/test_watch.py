@@ -250,3 +250,63 @@ class Watch(Work):
         cli._joined(w, "s-theirs", NOW)
         store.append_checkpoint("s-theirs", "x\n")
         self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+
+    # A worker its main session removed (`worker --remove`) is not spoken of: no checkpoint,
+    # limit stop, turn end, waiting, idle or ended line; one not removed still is.
+
+    def things(self, name):
+        """A worker with a checkpoint, a limit stop and a later turn end, no longer listed."""
+        sid = self.worker(name, live=False)
+        store.append_checkpoint(sid, "## t\nhalf\n")
+        store.note_session(SessionSeen(sid), "b", NOW, stranded=True)
+        self.stopped(sid, NOW + 1)
+        return sid
+
+    def test_a_removed_worker_says_nothing_not_removed_still_does(self):
+        self.things("w-kept")
+        self.things("w-gone")
+        store.remove_worker("w-gone", NOW)
+        code, out, _ = self.watch("--timeout", "5")
+        self.assertEqual(code, 0)
+        self.assertIn("worker w-kept wrote a checkpoint", out)
+        self.assertIn("worker w-kept was stopped by b's limit", out)
+        self.assertIn("worker w-kept ended", out)
+        self.assertNotIn("w-gone", out)
+        self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+
+    def test_the_lines_a_removed_worker_would_have_had(self):
+        sid = self.things("w-1")
+        self.assertEqual(len(self.watch("--timeout", "5")[1].splitlines()), 4)   # control
+        store.remove_worker("w-1", NOW)
+        store.append_checkpoint(sid, "## t\nall\n")                   # a new checkpoint
+        self.stopped(sid, NOW + 60)                                    # a new turn end
+        self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+
+    def test_a_removed_worker_is_not_waiting_or_idle_or_looked_for(self):
+        sid = self.worker()
+        self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")   # seen busy
+        store.remove_worker("w-1", NOW)
+        asked = []
+
+        def listing(acct):
+            asked.append(acct.id)
+            return [claude.LiveSession(sid, "w-1", None, waiting=True)]
+        with mock.patch.object(claude, "list_sessions", listing):
+            self.assertEqual(self.watch("--timeout", "20")[1], "nothing happened\n")
+            listed = [claude.LiveSession(sid, "w-1", False)]            # idle after busy
+            with mock.patch.object(claude, "list_sessions", lambda acct: listed):
+                self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+        self.assertEqual(asked, [])                                     # no listing for it at all
+
+    def test_a_removed_worker_that_is_listed_no_more_is_not_said_ended(self):
+        self.worker(live=False)
+        store.remove_worker("w-1", NOW)
+        self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+
+    def test_status_still_lists_the_session_of_a_removed_worker(self):
+        """`status` reads the listing, not the worker records."""
+        self.worker()
+        before = self.go("status")[1]
+        self.assertIn("session s-w-1", before)
+        store.remove_worker("w-1", NOW)
+        self.assertEqual(self.go("status")[1], before)

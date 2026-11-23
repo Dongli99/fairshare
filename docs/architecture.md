@@ -721,7 +721,11 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       running sessions every 15 s; it exits 0 with one line per event: its account's crossing
       (the same marks as the hooks: whichever tells first), a worker's checkpoint note grown, a
       worker stranded (`fairshare pickup <id>`), a worker's turn end, a worker ended or idle
-      after busy; `nothing happened` on timeout. What it said is kept on the caller's record
+      after busy (none of these for a worker marked removed by `fairshare worker --remove NAME`,
+      which runs the provider's own removal, `claude rm`, through the worker's account as
+      `run -a ID rm` does, and on success, or when that account no longer lists the session,
+      sets the worker record's `removed` time; a refusal marks nothing and exits 1);
+      `nothing happened` on timeout. What it said is kept on the caller's record
       (`reported`), so a restarted watch does not repeat itself. A checkpoint note a pickup
       copied to a worker's new session counts as said when the old session's was. A worker
       missing from the listing within 60 s of its start is not judged ended yet (a new

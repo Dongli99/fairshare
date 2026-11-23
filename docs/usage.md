@@ -456,6 +456,15 @@ run the commands yourself, from inside a session:
   prefix. The main session chooses the model and effort (both required; `--effort none` for a
   model without effort levels); the skill tells it to fit them to the task. The worker's prompt
   starts with one line telling it to checkpoint when asked.
+- `fairshare worker --remove NAME` (the name, or the worker's session id or the start of one)
+  is for when the main session is done with a worker, its result merged or used: it runs
+  Claude Code's own `rm` for that session on the account the worker runs on (what `fairshare run
+  -a ID rm <id>` would run) and marks the worker removed, so `watch` says nothing more about it
+  (no checkpoint, turn end, waiting, idle or ended line). It prints `worker fs-parser removed
+  (5e55105e on b); watch will not speak of it`. The conversation is kept; a worktree is deleted
+  only if Claude Code made it. When `rm` refuses (it would lose unpushed work), its message is
+  printed, the worker stays unmarked and the exit status is 1; a name that is none of this
+  session's workers exits 2.
 - `fairshare watch` waits until something concerns this session and prints one line per event:
   its account crossed 90% or 95%, a worker wrote a checkpoint (with the note's path), a worker was
   stopped by its limit (with when that limit resets, since Claude Code resumes the worker by
@@ -465,7 +474,7 @@ run the commands yourself, from inside a session:
   a worker waits for an answer only a person can give (a question or a permission prompt, in the
   middle of a turn: `worker fs-parser is waiting for an answer (a question or a permission
   prompt) that only a person can give: fairshare run -a b attach 5e55105e`; said once each time
-  it starts waiting; the skill has the main session tell you), or a worker ended or went idle. A worker's turn end comes from its own `Stop` hook, which
+  it starts waiting; the skill has the main session tell you), or a worker ended or went idle (never for a worker removed with `--remove`). A worker's turn end comes from its own `Stop` hook, which
   fairshare wires in the hub: Claude Code's list of sessions can call a worker busy for hours
   after it stopped. The main session keeps it running as a background command and starts it
   again after each event; `--timeout SECONDS` gives up with `nothing happened`.

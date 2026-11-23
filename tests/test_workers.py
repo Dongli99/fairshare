@@ -2,6 +2,7 @@
 test_honest (temp HOME, config, state and hub; fake claude and fairshare first on PATH, proved
 in Fleet.setUp; inherited CLAUDE*, FAIRSHARE_* and BROWSER cleared). The fake claude is wrapped
 so that `--bg --name X` makes X a live session and `agents --json` lists the live ones."""
+import io
 import json
 import os
 import time
@@ -20,7 +21,9 @@ PARENT = "9f8e7d6c-0000-4000-8000-00000000000a"
 
 WRAPPER = """#!/bin/sh
 # Records the folder it ran in; `--bg --name X ...` makes X live (unless $FAKE_NO_JOIN), and
-# `agents --json` lists the live sessions as sessions s-X (nothing at all with $FAKE_NO_LIST).
+# `agents --json` lists the live sessions as sessions s-X (nothing at all with $FAKE_NO_LIST);
+# `rm s-X` is logged in rm-<account> and takes X off the live list, or refuses (exit 1, a message)
+# with $FAKE_RM_REFUSE.
 name=$(basename "$CLAUDE_CONFIG_DIR")
 if [ "$1" = "agents" ]; then
   [ -n "$FAKE_NO_LIST" ] && exit 0
@@ -30,6 +33,13 @@ if [ "$1" = "agents" ]; then
     sep=,
   done < "$FAKE_LOG/live"
   printf ']\\n'; exit 0
+fi
+if [ "$1" = "rm" ]; then
+  echo "$2" >> "$FAKE_LOG/rm-$name"
+  [ -n "$FAKE_RM_REFUSE" ] && { echo "refused: unpushed work" >&2; exit 1; }
+  [ -f "$FAKE_LOG/live" ] && grep -vx "${2#s-}" "$FAKE_LOG/live" > "$FAKE_LOG/live.new"
+  [ -f "$FAKE_LOG/live.new" ] && mv "$FAKE_LOG/live.new" "$FAKE_LOG/live"
+  exit 0
 fi
 if [ "$1" = "--bg" ]; then
   pwd -P > "$FAKE_LOG/cwd-$name"
@@ -277,6 +287,116 @@ class WorkerCommand(Work):
                                            self.clock[0] + cli.JOIN_RETRY_S), {})
         self.assertEqual(cli._join_pending(store.workers(), accounts, self.clock[0] + 60),
                          {"old": "s-old"})
+
+
+class RemoveWorker(Work):
+    """`fairshare worker --remove`: the tool's removal through the worker's own account (the fake
+    claude logs it, or refuses on request), then the record marked."""
+    OTHER = "9f8e7d6c-0000-4000-8000-00000000000b"
+
+    def enroll(self, name="w-1", parent=PARENT, account="b", live=True):
+        sid = f"s-{name}"
+        w = Worker(name, parent, account, str(self.here), self.clock[0] - 120)
+        store.add_worker(w)
+        cli._joined(w, sid, self.clock[0])
+        if live:
+            with open(self.log / "live", "a") as f:
+                f.write(f"{name}\n")
+        return sid
+
+    def remove(self, target, session=PARENT, env=None):
+        e = {**({"CLAUDE_CODE_SESSION_ID": session} if session else {}), **(env or {})}
+        with mock.patch.dict(os.environ, e):
+            return self.go("worker", "--remove", target, real=True)
+
+    def rms(self, account="b"):
+        f = self.log / f"rm-{account}"
+        return f.read_text().split() if f.exists() else []
+
+    def test_removed_marked_and_said_in_one_line(self):
+        sid = self.enroll()
+        code, out, err = self.remove("w-1")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, f"worker w-1 removed ({sid[:8]} on b); watch will not speak of it\n")
+        self.assertEqual(self.rms(), [sid])
+        self.assertEqual(self.rms("a"), [])                       # on the worker's own account
+        self.assertEqual(store.worker("w-1").removed, self.clock[0])
+        self.assertEqual(store.worker("w-1").session, sid)
+
+    def test_a_session_id_prefix_names_it_too(self):
+        sid = self.enroll("w-9")
+        self.assertEqual(self.remove(sid[:4])[0], 0)
+        self.assertEqual(self.rms(), [sid])
+        self.assertIsNotNone(store.worker("w-9").removed)
+
+    def test_refused_is_not_marked_and_exits_1(self):
+        sid = self.enroll()
+        code, out, _ = self.remove("w-1", env={"FAKE_RM_REFUSE": "1"})
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(self.rms(), [sid])
+        self.assertIsNone(store.worker("w-1").removed)
+
+    def test_a_session_the_account_no_longer_lists_is_marked_without_asking_the_tool(self):
+        self.enroll(live=False)
+        code, out, _ = self.remove("w-1")
+        self.assertEqual(code, 0)
+        self.assertIn("worker w-1 removed", out)
+        self.assertEqual(self.rms(), [])
+        self.assertIsNotNone(store.worker("w-1").removed)
+
+    def test_removing_twice_is_fine_and_keeps_the_first_time(self):
+        self.enroll()
+        self.remove("w-1")
+        first = store.worker("w-1").removed
+        self.clock[0] += 50
+        self.assertEqual(self.remove("w-1")[0], 0)
+        self.assertEqual(store.worker("w-1").removed, first)
+
+    def test_an_unknown_name_exits_2_and_touches_nothing(self):
+        self.enroll()
+        code, out, err = self.remove("nope")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("no worker of this session is named 'nope'", err)
+        self.assertEqual(self.rms(), [])
+
+    def test_another_sessions_worker_is_not_found(self):
+        self.enroll("theirs", parent=self.OTHER)
+        code, _, err = self.remove("theirs")
+        self.assertEqual(code, 2)
+        self.assertIn("no worker of this session", err)
+        self.assertEqual(self.rms(), [])
+        self.assertIsNone(store.worker("theirs").removed)
+
+    def test_outside_a_session_exits_2(self):
+        self.enroll()
+        self.assertEqual(self.remove("w-1", session=None)[0], 2)
+        self.assertEqual(self.rms(), [])
+
+    def test_a_worker_not_joined_yet_has_nothing_to_remove(self):
+        store.add_worker(Worker("w-1", PARENT, "b", str(self.here), self.clock[0]))
+        code, _, err = self.remove("w-1")
+        self.assertEqual(code, 1)
+        self.assertIn("no session id yet", err)
+        self.assertIsNone(store.worker("w-1").removed)
+
+    def test_a_record_without_the_field_loads_as_not_removed_and_round_trips(self):
+        self.enroll()
+        path = self.tmp / "state" / "workers" / "w-1.json"
+        d = json.loads(path.read_text())
+        self.assertIsNone(d["removed"])
+        del d["removed"]
+        path.write_text(json.dumps(d))
+        self.assertIsNone(store.worker("w-1").removed)
+        store.remove_worker("w-1", 42.0)
+        self.assertEqual(store.worker("w-1").removed, 42.0)
+        self.assertEqual(json.loads(path.read_text())["removed"], 42.0)
+
+    def test_starting_still_needs_its_flags(self):
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, mock.patch("sys.stderr", err):
+            cli.main(["worker", "--name", "x"])
+        self.assertEqual(e.exception.code, 2)
+        self.assertIn("--model, --effort, PROMPT (or --remove NAME)", err.getvalue())
 
 
 class ListSessions(Work):

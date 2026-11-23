@@ -2734,11 +2734,54 @@ def _join_pending(pending: list[Worker], accounts: list[Account], now: float) ->
     return found
 
 
+REMOVE_SUBCOMMAND = "rm"   # the tool's own removal of a background session (`<tool> rm <id>`)
+
+
+def _remove_worker(target: str) -> int:
+    """`worker --remove`: the calling session is done with the worker `target` names (its name,
+    or its session id or the start of one; only this session's own workers). The provider's
+    removal, run as `run -a ID rm` runs it (`_pass_through`: its message and exit status are
+    its own), on the account the worker's session runs on. Then the worker is marked removed,
+    and `watch` says no more of it; the same when that account no longer lists the session at
+    all. Refused by the tool (unpushed work in a worktree it made): not marked, exit 1."""
+    if (here := _provider().current_session()) is None:
+        _say("not inside a session: a worker belongs to the session that starts it")
+        return 2
+    found = [w for w in store.workers(store.latest(here))
+             if w.name == target or (w.session and w.session.startswith(target))]
+    if len(found) != 1:
+        _say(f"no worker of this session is named {target!r} or has a session starting with it"
+             if not found else f"{target!r} matches {len(found)} workers; give more of the id")
+        return 2
+    w = found[0]
+    if not w.session:
+        _say(f"worker {w.name} has no session id yet; nothing to remove")
+        return 1
+    if _no_tool():
+        return 1
+    rec = store.session(w.session)
+    accounts = _load()[0]
+    acct = next((x for x in accounts if x.id == (rec.account if rec else w.account)), None)
+    if acct is None:
+        _say(f"worker {w.name}: no account '{rec.account if rec else w.account}' is configured")
+        return 1
+    live = providers.get(acct.provider).list_sessions(acct, ended=True)
+    if live is None or any(x.id == w.session for x in live):
+        if _pass_through(acct.id, [REMOVE_SUBCOMMAND, w.session]):
+            return 1
+    store.remove_worker(w.name, _now())
+    print(f"worker {w.name} removed ({w.session[:8]} on {acct.id}); watch will not speak of it")
+    return 0
+
+
 def cmd_worker(a) -> int:
     """Start a background session for the calling session, on the model and effort the main
     session chose (`--effort none` for a model without one): on --account, else the top
     eligible account that has that model's week left and trusts this folder or can get its
-    trust by copy; named, recorded, and joined to its session id by that name."""
+    trust by copy; named, recorded, and joined to its session id by that name. `--remove NAME`
+    instead removes a worker of this session (`_remove_worker`)."""
+    if a.remove:
+        return _remove_worker(a.remove)
     prov = _provider()
     if (parent := prov.current_session()) is None:
         _say("not inside a session: a worker belongs to the session that starts it")
@@ -2906,6 +2949,11 @@ WATCH_LOCAL_S = 5.0    # seconds between looks at local state (snapshot, records
 WATCH_LIST_S = 15.0    # seconds between listings of the running sessions (a subprocess)
 
 
+def _watched(here: str) -> list[Worker]:
+    """The workers of `here` that `watch` speaks of: not those it removed (`worker --remove`)."""
+    return [w for w in store.workers(here) if w.removed is None]
+
+
 def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tuning,
                  now: float) -> list[str]:
     """What concerns the session `here` in local state: a new crossing of its account, and per
@@ -2914,11 +2962,12 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
     session (a pickup) counts as said when the old session's was; a turn end clears the worker's
     busy mark (`_watch_live`), and one older than its stop by its limit goes unsaid."""
     events = []
-    _measure_still(store.workers(here), now)
+    mine = _watched(here)
+    _measure_still(mine, now)
     if acct and acct.plan and (c := _tell_crossing(here, acct, t, now)):
         events.append(_warning_text(store.session(here), acct, c, accounts, t, now))
     found = []
-    for w in store.workers(here):
+    for w in mine:
         if not w.session:
             continue
         note = store.checkpoint_path(w.session)
@@ -2981,7 +3030,7 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
     session runs on, and only when that listing came. Busy and idle are not read for a worker
     whose turn ends its own hook stamps (`_watch_local` says those): the listing can say busy
     for hours after a turn ended."""
-    mine = store.workers(here)
+    mine = _watched(here)
     if not mine:
         return []
     joined = _join_pending(mine, accounts, now)
@@ -4287,14 +4336,19 @@ def main(argv: list[str] | None = None) -> int:
                         "accounts that lack it (never creates trust)")
     sp.add_argument("path", nargs="?", metavar="PATH", help="default: the current folder")
     sp.set_defaults(f=cmd_trust)
-    wp = sub.add_parser("worker", help="inside a session: start a background worker session")
+    wp = sub.add_parser("worker", help="inside a session: start a background worker session, "
+                        "or --remove one")
     wp.add_argument("--account", metavar="ID", help="default: the best account")
-    wp.add_argument("--name", required=True, help="the task in a few words, unique across "
-                    "every recorded worker: e.g. fs-watch-stops")
-    wp.add_argument("--model", required=True, help="the worker's model, fitted to its task")
-    wp.add_argument("--effort", required=True, help="its effort level; `none` for a model "
-                    "without one")
-    wp.add_argument("prompt", metavar="PROMPT")
+    wp.add_argument("--name", help="the task in a few words, unique across every recorded "
+                    "worker: e.g. fs-watch-stops (required to start one)")
+    wp.add_argument("--model", help="the worker's model, fitted to its task (required to "
+                    "start one)")
+    wp.add_argument("--effort", help="its effort level; `none` for a model without one "
+                    "(required to start one)")
+    wp.add_argument("--remove", metavar="NAME", help="instead of starting one: remove this "
+                    "session's worker NAME (or its session id) once you are done with it, and "
+                    "`watch` says no more of it; refused when that would lose unpushed work")
+    wp.add_argument("prompt", metavar="PROMPT", nargs="?")
     wp.set_defaults(f=cmd_worker)
     cq = sub.add_parser("checkpoint", help="inside a session: note where it stands; "
                         "--request asks workers for one, --show prints a note")
@@ -4338,6 +4392,10 @@ def main(argv: list[str] | None = None) -> int:
         _say(f"'{argv[0]}' is not a command; did you mean: fairshare run {shlex.join(argv)}")
         return 2
     a = p.parse_args(argv)
+    if a.cmd == "worker" and not a.remove and (missing := [
+            f for f, v in (("--name", a.name), ("--model", a.model), ("--effort", a.effort),
+                           ("PROMPT", a.prompt)) if v is None]):
+        wp.error(f"the following arguments are required: {', '.join(missing)} (or --remove NAME)")
     return a.f(a)
 
 
