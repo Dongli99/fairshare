@@ -216,6 +216,31 @@ def _log_usage(account_id: str, snap: Snapshot, old: Snapshot | None) -> None:
             f.write(json.dumps(line) + "\n")
 
 
+def usage_log(account_id: str) -> list[tuple[float, float | None, dict[str, tuple[float, float]]]]:
+    """The account's usage log as (time, spent, {window: (used %, reset)}), in log order; []
+    when there is none. A line that cannot be read is skipped (a torn last write), and so is a
+    window whose numbers are not numbers."""
+    try:
+        text = (state_dir() / "usage" / f"{account_id}.jsonl").read_text()
+    except OSError:
+        return []
+    out = []
+    for raw in text.splitlines():
+        try:
+            d = json.loads(raw)
+            t, spent, windows = _num(d["t"]), d["spent"], d["windows"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if t is None or not isinstance(windows, dict) or (
+                spent is not None and _num(spent) is None):
+            continue
+        out.append((t, spent if spent is None else float(spent),
+                    {k: (pct, at) for k, v in windows.items()
+                     if isinstance(v, list) and len(v) == 2
+                     and (pct := _num(v[0])) is not None and (at := _num(v[1])) is not None}))
+    return out
+
+
 def claim_probe(account_id: str, now: float, max_age: float) -> bool:
     """Whether a background usage probe for the account may start now; if so, it is marked as
     started. One whose mark is under `max_age` seconds old is taken to be running still."""

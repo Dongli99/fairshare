@@ -29,6 +29,7 @@ PostToolUse / UserPromptSubmit ──► hook post-tool | prompt ──► snaps
 Stop ──► hook stop ──► a worker's record: stopped [time, background tasks] ──► watch says it
 worker ──► survey (model filter) ──► trust (copy) ──► claude --bg --name --model --effort ──► join
 status ──► survey ──► rows + each account's live sessions (spend in the last hour, share)
+       └──► store.usage_log ──► rates.fit_plan ($ per point) ──► rates.room ──► room line
 watch (background command) ──► snapshot, records, checkpoints/ (5 s), agents (15 s) ──► exit
 
 setup ──► join ──► hub.check, browser (ask), providers/<p>.login_command, account_status
@@ -44,6 +45,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 | Plan | window names and lengths, relative capacity | `plans/*.toml` (data only) |
 | Policy | the routing rule | `policy.py` (pure function) |
 | Storage | where snapshots live | `store.py` |
+| Rates | what a percent of a window costs in dollars, and the room it gives | `rates.py` (pure; read by `status` only) |
 | Session | how a child session is started and supervised | `session.py` (provider-neutral) |
 | Hub | where the shared items live and how each account's folder links to them | `hub.py` (provider-neutral; the share list is the adapter's `SHARED`) |
 | Browser | where an account's sign-in links open | `browser.py` (provider-neutral; `BROWSER` names one launcher per account) |
@@ -1176,6 +1178,25 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       asks again; end of input or Ctrl-C does nothing (exit 1); then exactly the SESSION
       form's path. No terminal: the list on stderr and exit 2.
 
+33. **Room in dollars, measured first** (2026-11-23; stage 1 of "one limit, in dollars"). Agents
+    should act on dollars left, not on a percentage whose worth depends on the plan. `rates.py`
+    (pure) fits, per account and plan window, the dollars per percentage point from
+    `usage/<id>.jsonl` (`store.usage_log`, malformed lines skipped): within one window instance
+    (consecutive resets within `SAME_RESET_S`), a pair of consecutive lines gives the dollars
+    the account's sessions drew and the rise between them (a step down, a credit-back, counts as
+    no rise); a pair across a reset or a gap is dropped, since its dollars cannot be split.
+    Instances that rose at least `MIN_RISE_PCT` in the last `KEEP_S` (14 days) are pooled
+    (sum of dollars / sum of points); the short window needs `MIN_SHORT_INSTANCES` (2), the long
+    one `MIN_LONG_INSTANCES` (1), and `MIN_TOTAL_RISE_PCT` (10) points in all, else no rate. The
+    room is `(first warning level - used %) x rate` per window (a reset window counts as
+    unused); the smallest binds. `status` shows it under the account, with each rate's
+    instance count and its lowest and highest per-instance rate, so the fit can be judged.
+    Limits: the dollars are Claude Code's API-price estimate, so a model mix that the provider's
+    limits weigh differently from list prices moves the rate (accounts on the same plan can fit
+    different rates); usage is whole percents, hence the minimum rise; use outside fairshare's
+    sessions (the web app) raises the percent with no dollars recorded, which lowers the rate.
+    Nothing decides on it yet: not the ranking, the warnings, the status bar or `worker`.
+
 ## Known limits
 
 - Below the "nearly full" line, short-window usage plays no part in the ranking.
@@ -1375,9 +1396,8 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 ## Not built yet
 
 OpenAI/Codex adapter · packaging for Homebrew · sizes, a "still needed" ledger and burn rate
-(decision 24 records the data they need) · room in dollars: what a percent of each window costs,
-fitted per account from `usage/<id>.jsonl` (each new snapshot's windows, with the dollars its
-sessions drew since the one before), before anything relies on it.
+(decision 24 records the data they need) · acting on the room in dollars (decision 33 measures
+and shows it): a worker's estimate held against the room, warnings and the ranking in dollars.
 
 Before a second provider lands, these Claude-only spots must move behind the provider seam
 (none affects a Claude-only user today):

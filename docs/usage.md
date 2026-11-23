@@ -537,6 +537,13 @@ name, its spend in the last hour and its share of the account's (`-`: no cost se
 worker ends, or its cost has not moved for 30 minutes, its cost and duration are kept on its
 worker record; nothing uses them yet.
 
+Once an account's usage log holds enough windows, `status` also shows how many dollars it can
+still spend before the 90% warning, and which window binds: `room ~$3.75 before the 90% warning
+(5h binds; 7d ~$12.00) · $/pt 5h 0.075 (2 windows, 0.05-0.1), 7d 0.3 (1 window)`. The rate per
+percentage point is learned from what its sessions spent while each window rose (an API-price
+estimate, so model mix moves it); the count and the range say how well it holds. Nothing acts on
+it yet.
+
 ## One assistant: the hub
 
 Every account's folder in the hub links to one shared set of settings, CLAUDE.md, skills,

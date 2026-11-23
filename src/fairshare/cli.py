@@ -30,7 +30,7 @@ from pathlib import Path
 
 from . import browser
 from . import hub as hub_mod
-from . import __version__, providers, session, shell, store
+from . import __version__, providers, rates, session, shell, store
 from .model import (ACCOUNT_ID, DEFAULT_HUB, EFFORT_NONE, KIND_BACKGROUND, KIND_INTERACTIVE,
                     NOTE_THINKING, NOTE_WRITING, ROLE_WORKER, USAGE_MODEL_TURN, Account, Alias,
                     AccountStatus, ConfigError, LiveSession, Request, SessionRecord, SessionSeen,
@@ -273,6 +273,29 @@ def _spent_models(acct_id: str, snap: Snapshot | None, t: Tuning, now: float) ->
             and w.resets_at > now]
 
 
+def _room_line(acct: Account, snap: Snapshot | None, now: float) -> list[str]:
+    """The dollars the account can still spend before the first warning level, from the rate
+    its usage log gives each plan window (`rates`): the smallest room binds. Then each rate,
+    with how many window instances it pools and their lowest and highest rate, so the reader
+    can judge the fit. Nothing when no window has a rate yet. Shown only: nothing decides on
+    it yet."""
+    p = acct.plan
+    found = rates.fit_plan(store.usage_log(acct.id), p.short_name, p.long_name, now) if p else {}
+    if not found:
+        return []
+    hours = {k: h for k, h in ((p.short_name, p.short_hours), (p.long_name, p.long_hours)) if k}
+    label = {k: _span(h) if h else k for k, h in hours.items()}
+    room = rates.room(found, snap.windows if snap else {}, WARN_LEVELS[0], now)
+    binds = min(room, key=room.get)
+    others = "; ".join(f"{label[k]} ~${room[k]:.2f}" if k in room else f"{label[k]} no rate yet"
+                       for k in hours if k != binds)
+    each = ", ".join(f"{label[k]} {r.per_pct:.3g} (" + (
+        f"{r.instances} windows, {r.low:.3g}-{r.high:.3g})" if r.instances > 1 else "1 window)")
+        for k, r in found.items())
+    return [f"room ~${room[binds]:.2f} before the {WARN_LEVELS[0]}% warning ({label[binds]} "
+            f"binds{'; ' + others if others else ''}) · $/pt {each}"]
+
+
 def _top(verdicts: list[Verdict]) -> Verdict:
     """The account a launch starts on: the first that can take work, else the top-ranked. A
     nearly full short window can outscore an account that can work; it still takes no session."""
@@ -384,11 +407,13 @@ def cmd_status(_a) -> int:
                      *([probes[aid]] if aid in probes else []),
                      *_spent_models(aid, s.snaps.get(aid), s.tuning, s.now),
                      *([expiring[aid]] if aid in expiring else []),
+                     *_room_line(v.account, s.snaps.get(aid), s.now),
                      *_sessions_block(aid, recs, s.now)]:
             print(f"    {note}")
     for a, why in s.out:
         print(f"  {a.id:<12} {a.plan.name if a.plan else '-':<14} left out: {why}")
         for note in [*s.notes.get(a.id, []), *_plan_note(a.id, plans, s.now),
+                     *_room_line(a, s.snaps.get(a.id), s.now),
                      *_sessions_block(a.id, recs, s.now)]:
             print(f"    {note}")
     for a, rep in s.twins:
