@@ -133,6 +133,10 @@ AGENT_WAITING = "waiting"
 # `claude logs <id>` answered "session not found — it may have already ended", while a live one's
 # printed its screen; `--all` lists ended ones (`done`, `stopped`) the same way, with no pid.
 AGENT_KIND, AGENT_PID = "kind", "pid"
+# A background item's `id` is a short id (the first 8 characters of `sessionId` on 2.1.330) and
+# is what `claude stop`, `rm` and `logs` take: given the full `sessionId` they answer "No session
+# matching" (exit 1; planner, 2026-11-23). Interactive items carry no `id`.
+AGENT_HANDLE = "id"
 # `agents --json --all` also lists the sessions that ended (`state` `done`, `stopped`; no pid),
 # background ones with `kind: "background"`, through their own account only (2.1.330,
 # 2026-11-21: `--help` "With --json: also include completed background sessions", and the live
@@ -496,13 +500,14 @@ def list_sessions(account: Account, ended: bool = False) -> list[LiveSession] | 
                         else None, status.get(i.get(AGENT_STATUS)),
                         AGENT_KINDS.get(i.get(AGENT_KIND)),
                         i.get(AGENT_PID) if type(i.get(AGENT_PID)) is int else None,
-                        i.get(AGENT_STATUS) == AGENT_WAITING)
+                        i.get(AGENT_STATUS) == AGENT_WAITING,
+                        i.get(AGENT_HANDLE) if isinstance(i.get(AGENT_HANDLE), str) else None)
             for i in raw if isinstance(i, dict) and isinstance(i.get(AGENT_ID), str)]
 
 
 def stop_session(account: Account, session_id: str) -> bool:
-    """Stop the background session `session_id` through `account`'s folder; whether the tool
-    said it did (exit 0). Never raises."""
+    """Stop the background session `session_id` (its listing's `handle`: AGENT_HANDLE) through
+    `account`'s folder; whether the tool said it did (exit 0). Never raises."""
     try:
         r = subprocess.run([real_binary(), *STOP_ARGS, session_id],
                            env=clean_env(account.config_dir), stdin=subprocess.DEVNULL,

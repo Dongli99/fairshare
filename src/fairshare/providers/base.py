@@ -115,8 +115,9 @@ class Provider(Protocol):
         Never raises."""
 
     def stop_session(self, account: Account, session_id: str) -> bool:
-        """Stop the background session `session_id` through `account`'s folder (its conversation
-        is kept); whether the provider said it did. Never raises."""
+        """Stop the background session `session_id` (its listing's `handle` when it has one)
+        through `account`'s folder (its conversation is kept); whether the provider said it did.
+        Never raises."""
 
     def transcript_text(self, path: Path) -> list[tuple[str, str]] | None:
         """A session transcript's main conversation, oldest first, as (role, text) pairs:

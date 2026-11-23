@@ -1981,7 +1981,7 @@ def _stop(rec: SessionRecord, req: Request, acct: Account, x: LiveSession) -> Re
     when the stop fails or it stays."""
     sid = rec.id[:8]
     prov = providers.get(acct.provider)
-    if not prov.stop_session(acct, rec.id):
+    if not prov.stop_session(acct, x.handle or rec.id):
         _say(f"{prov.tool} did not stop {sid}; nothing done")
         return 1
     end = _now() + STOP_WAIT
@@ -2766,8 +2766,10 @@ def _remove_worker(target: str) -> int:
         _say(f"worker {w.name}: no account '{rec.account if rec else w.account}' is configured")
         return 1
     live = providers.get(acct.provider).list_sessions(acct, ended=True)
-    if live is None or any(x.id == w.session for x in live):
-        if _pass_through(acct.id, [REMOVE_SUBCOMMAND, w.session]):
+    listed = next((x for x in live if x.id == w.session), None) if live is not None else None
+    if live is None or listed:
+        if _pass_through(acct.id, [REMOVE_SUBCOMMAND,
+                                   listed.handle if listed and listed.handle else w.session]):
             return 1
     store.remove_worker(w.name, _now())
     print(f"worker {w.name} removed ({w.session[:8]} on {acct.id}); watch will not speak of it")

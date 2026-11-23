@@ -208,6 +208,8 @@ class LiveSession:
                                       # session: it runs no process now)
     waiting: bool = False             # it waits for a person's answer (a question or a
                                       # permission prompt) and does nothing until it has one
+    handle: str | None = None         # what the provider's own commands (stop, rm) take to
+                                      # name it, when that is not `id`; None: not listed
 
 
 KIND_INTERACTIVE, KIND_BACKGROUND = "interactive", "background"   # open in a terminal | not

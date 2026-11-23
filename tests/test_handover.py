@@ -34,7 +34,8 @@ WRAPPER = """#!/bin/sh
 # A background start records its arguments and folder and goes live under its name: as the
 # session it resumes (in place), or as s-<name> (a fork, or a fresh session). `agents --json`
 # lists the live ones: lines `<id> <name> [<kind> [<pid> [<status>]]]` (background, 100, busy by
-# default; `null` for none); with `--all`, also those of $FAKE_LOG/ended. `stop <id>` logs the
+# default; `null` for none), each with the short handle `h-<id>`; with `--all`, also those of
+# $FAKE_LOG/ended. `stop` takes only the handle, as the real tool does; `stop h-<id>` logs the
 # id to $FAKE_LOG/stops and moves it from the list to the ended ones, unless $FAKE_STOP_EXIT
 # (its exit code) or $FAKE_STOP_STAYS is set. A headless turn
 # (`-p` with `--resume`) logs its arguments and answers $FAKE_NOTE (after $FAKE_NOTE_SLEEP
@@ -46,13 +47,15 @@ if [ "$1" = "agents" ]; then
   for f in $files; do
     [ -f "$f" ] && while read id n kind pid st; do
       [ "${st:-busy}" = null ] && st=null || st="\\"${st:-busy}\\""
-      printf '%s{"sessionId": "%s", "name": "%s", "kind": "%s", "pid": %s, "status": %s}' \\
-        "$sep" "$id" "$n" "${kind:-background}" "${pid:-100}" "$st"; sep=,
+      printf '%s{"id": "h-%s", "sessionId": "%s", "name": "%s", "kind": "%s", "pid": %s, "status": %s}' \\
+        "$sep" "$id" "$id" "$n" "${kind:-background}" "${pid:-100}" "$st"; sep=,
     done < "$f"
   done
   printf ']\\n'; exit 0
 fi
 if [ "$1" = "stop" ]; then
+  case "$2" in h-*) ;; *) echo "No session matching '$2'" >&2; exit 1 ;; esac
+  set -- "$1" "${2#h-}"
   echo "$2" >> "$FAKE_LOG/stops"
   [ -n "$FAKE_STOP_EXIT" ] && exit "$FAKE_STOP_EXIT"
   if [ -z "$FAKE_STOP_STAYS" ] && [ -f "$FAKE_LOG/live" ]; then

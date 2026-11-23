@@ -22,19 +22,24 @@ PARENT = "9f8e7d6c-0000-4000-8000-00000000000a"
 WRAPPER = """#!/bin/sh
 # Records the folder it ran in; `--bg --name X ...` makes X live (unless $FAKE_NO_JOIN), and
 # `agents --json` lists the live sessions as sessions s-X (nothing at all with $FAKE_NO_LIST);
-# `rm s-X` is logged in rm-<account> and takes X off the live list, or refuses (exit 1, a message)
+# each with the short handle h-X, which `rm` takes, as the real tool does (anything else: "No
+# session matching", exit 1); `rm h-X` logs s-X in rm-<account> and takes X off the live list,
+# or refuses (exit 1, a message)
 # with $FAKE_RM_REFUSE.
 name=$(basename "$CLAUDE_CONFIG_DIR")
 if [ "$1" = "agents" ]; then
   [ -n "$FAKE_NO_LIST" ] && exit 0
   printf '['; sep=
   [ -f "$FAKE_LOG/live" ] && while read n; do
-    printf '%s{"sessionId": "s-%s", "name": "%s", "status": "busy", "pid": 1}' "$sep" "$n" "$n"
+    printf '%s{"id": "h-%s", "sessionId": "s-%s", "name": "%s", "status": "busy", "pid": 1}' \\
+      "$sep" "$n" "$n" "$n"
     sep=,
   done < "$FAKE_LOG/live"
   printf ']\\n'; exit 0
 fi
 if [ "$1" = "rm" ]; then
+  case "$2" in h-*) ;; *) echo "No session matching '$2'" >&2; exit 1 ;; esac
+  set -- "$1" "s-${2#h-}"
   echo "$2" >> "$FAKE_LOG/rm-$name"
   [ -n "$FAKE_RM_REFUSE" ] && { echo "refused: unpushed work" >&2; exit 1; }
   [ -f "$FAKE_LOG/live" ] && grep -vx "${2#s-}" "$FAKE_LOG/live" > "$FAKE_LOG/live.new"
