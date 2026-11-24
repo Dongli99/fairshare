@@ -11,6 +11,7 @@ from fairshare.model import Account, Snapshot, Tuning, Window, load_plan
 
 from test_honest import H, NOW, ORG, Fleet
 import test_hooks
+from test_rates import rated, spending
 from test_workers import Work
 
 WEEK = NOW + 50 * H                                  # Sun 10:00 UTC
@@ -138,30 +139,48 @@ class Detection(unittest.TestCase):
 
 
 class Bar(Fleet):
-    def line(self, week, plan=True):
+    """Account a's rates (test_rates.rated): $1.00 a point of its week."""
+
+    def line(self, week, plan=True, spent=4.0, rate=True):
         acct = Account("a", "claude", load_plan("claude-pro"), None)
         if plan:
             store.plan_full_reset("a", WEEK)
+        if rate:
+            rated(self.tmp, "a")
+        else:
+            (self.tmp / "state" / "usage" / "a.jsonl").unlink(missing_ok=True)
+        if spent:
+            spending("s-a", "a", spent)
         snap = Snapshot(NOW, {"five_hour": Window(10, NOW + 3 * H), "seven_day": Window(week, WEEK)})
         return cli._status_line(acct, snap, NOW, True, Tuning())
 
-    def test_the_week_says_reset_then_use_reset_once_at_the_first_warning(self):
+    def test_the_week_says_reset_then_use_reset_once_the_reset_is_due(self):
         self.assertEqual(self.line(20), "a · 5h 10% · 7d 20% +reset")
-        self.assertEqual(self.line(92), f"a · 5h 10% · {cli.TIGHT}7d 92% (Sun 10:00) use reset"
-                                        f"{cli.PLAIN}")
+        self.assertEqual(self.line(92), f"a · 5h 10% · {cli.TIGHT}7d 92% (Sun 10:00) +reset"
+                                        f"{cli.PLAIN}")               # $8 left: 2 h at $4.00
+        self.assertEqual(self.line(97), f"a · 5h 10% · {cli.TIGHT}7d 97% (Sun 10:00) use reset"
+                                        f"{cli.PLAIN}")               # $3 left: 45 min
+
+    def test_no_spend_or_no_rate_is_not_due(self):
+        for kw in ({"spent": 0}, {"rate": False}):
+            with self.subTest(**kw):
+                self.assertEqual(self.line(97, **kw), f"a · 5h 10% · {cli.TIGHT}7d 97% "
+                                                      f"(Sun 10:00) +reset{cli.PLAIN}")
 
     def test_no_plan_no_marker(self):
         self.assertEqual(self.line(20, plan=False), "a · 5h 10% · 7d 20%")
-        self.assertEqual(self.line(92, plan=False),
-                         f"a · 5h 10% · {cli.TIGHT}7d 92% (Sun 10:00){cli.PLAIN}")
+        self.assertEqual(self.line(97, plan=False),
+                         f"a · 5h 10% · {cli.TIGHT}7d 97% (Sun 10:00){cli.PLAIN}")
 
 
 class Warning(Work):
-    """The hooks of test_hooks (its helpers, not its tests); the session runs on account a."""
-    hook, said = test_hooks.Speaking.hook, test_hooks.Speaking.said
+    """The hooks of test_hooks (its helpers, not its tests); the session runs on account a, at
+    $2.00 an hour; a's rates: $0.10 a point of its 5h window, $1.00 of its week."""
+    hook, said, near = test_hooks.Speaking.hook, test_hooks.Speaking.said, test_hooks.Speaking.near
 
     def setUp(self):
         super().setUp()
+        rated(self.tmp, "a")
         p = mock.patch.object(cli, "_start_probe", lambda acct, cwd, now: None)
         p.start()
         self.addCleanup(p.stop)
@@ -171,42 +190,42 @@ class Warning(Work):
                 "user then refills it and the stopped sessions continue here. No checkpoint, "
                 "handoff or pickup.")
 
-    def test_a_week_at_90_with_a_plan_says_work_to_the_limit(self):
-        self.snap("a", five=(10, 3), seven=(91, 50))
+    def test_without_a_plan_the_usual_move(self):
+        self.near(five=(10, 3), seven=(99, 50))
         said = self.said()
-        self.assertIn("Best other account: b", said)               # no plan: the usual move
+        self.assertIn("Best other account: b", said)
         self.assertNotIn("full reset", said)
-        self.snap("a", five=(10, 3), seven=(96, 50))
+
+    def test_a_week_near_its_limit_with_a_plan_says_work_to_the_limit(self):
+        self.near(five=(10, 3), seven=(99, 50))
         store.plan_full_reset("a", NOW + 50 * H)
         said = self.said()
-        self.assertTrue(said.startswith("fairshare: account a is at 96% of its 7d window "))
-        self.assertTrue(said.endswith(self.CARRY_ON), said)
-        self.assertNotIn("Best other account", said)
+        self.assertEqual(said, "fairshare: account a has about $1.00 left before its limit, about "
+                         "30 min at its pace in the last hour ($2.00); it refills at Sun 10:00 to "
+                         "about $10.00. " + self.CARRY_ON)
 
-    def test_a_short_window_crossing_on_a_full_week_says_the_same(self):
-        self.snap("a", five=(10, 3), seven=(92, 50))
+    def test_a_short_window_binding_on_a_nearly_spent_week_says_the_same(self):
+        self.near(five=(95, 3), seven=(98.5, 50))                   # 5h $0.50, week $1.50
         store.plan_full_reset("a", NOW + 50 * H)
-        self.said()                                                 # the week's crossing
-        self.snap("a", five=(91, 3), seven=(92, 50))
-        self.assertIn("91% of its 5h window (resets 11:00). " + self.CARRY_ON, self.said())
+        self.assertIn("refills at 11:00 to about $1.50. " + self.CARRY_ON, self.said())
 
     def test_a_worker_works_to_the_limit_too(self):
-        self.snap("a", five=(10, 3), seven=(91, 50))
-        store.plan_full_reset("a", NOW + 50 * H)
         test_hooks.Speaking.worker(self)
+        self.near(five=(10, 3), seven=(99, 50))
+        store.plan_full_reset("a", NOW + 50 * H)
         said = self.said()
         self.assertTrue(said.endswith(self.CARRY_ON), said)
         self.assertNotIn("checkpoint \"", said)
 
-    def test_a_week_below_90_keeps_the_reset_and_moves(self):
-        self.snap("a", five=(91, 3), seven=(10, 50))
+    def test_a_week_with_room_keeps_the_reset_and_moves(self):
+        self.near(five=(92, 3), seven=(10, 50))                     # week $90 left
         store.plan_full_reset("a", NOW + 50 * H)
         said = self.said()
         self.assertNotIn("full reset", said)
-        self.assertIn("(resets 11:00). Best other account: b ", said)
+        self.assertIn("refills at 11:00 to about $10.00. Best other account: b ", said)
 
     def test_a_planned_reset_elsewhere_makes_that_account_the_best_other(self):
-        self.snap("a", five=(91, 3), seven=(10, 50))
+        self.near()
         store.plan_full_reset("c", NOW + 50 * H)                    # c: 7d 50%, now 150% room
         said = self.said()
         self.assertIn("Best other account: c (5h 10% · 7d 50%)", said)

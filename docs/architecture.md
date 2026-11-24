@@ -25,11 +25,12 @@ launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► hold
                                     └──► stop child ──► [headless note turn] ──► fresh (handoff)
                                     └──► stop child ──► fresh, no prompt (switch)
 PostToolUse / UserPromptSubmit ──► hook post-tool | prompt ──► snapshot + session record (local)
-                                   ──► additionalContext: crossing warning or checkpoint request
+                                   ──► usage log ──► rates.limit + the hour's spend ──► _near
+                                   ──► additionalContext: near-limit warning or checkpoint request
 Stop ──► hook stop ──► a worker's record: stopped [time, background tasks] ──► watch says it
 worker ──► survey (model filter) ──► trust (copy) ──► claude --bg --name --model --effort ──► join
 status ──► survey ──► rows + each account's live sessions (spend in the last hour, share)
-       └──► store.usage_log ──► rates.fit_plan ($ per point) ──► rates.room ──► room line
+       └──► store.usage_log ──► rates.fit_plan ($ per point) ──► rates.limit ──► room line
 watch (background command) ──► snapshot, records, checkpoints/ (5 s), agents (15 s) ──► exit
 
 setup ──► join ──► hub.check, browser (ask), providers/<p>.login_command, account_status
@@ -45,7 +46,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 | Plan | window names and lengths, relative capacity | `plans/*.toml` (data only) |
 | Policy | the routing rule | `policy.py` (pure function) |
 | Storage | where snapshots live | `store.py` |
-| Rates | what a percent of a window costs in dollars, and the room it gives | `rates.py` (pure; read by `status` only) |
+| Rates | what a percent of a window costs in dollars, and the room to the limit it gives | `rates.py` (pure; read by `status`, the warning and the other near-limit tests, decision 35) |
 | Session | how a child session is started and supervised | `session.py` (provider-neutral) |
 | Hub | where the shared items live and how each account's folder links to them | `hub.py` (provider-neutral; the share list is the adapter's `SHARED`) |
 | Browser | where an account's sign-in links open | `browser.py` (provider-neutral; `BROWSER` names one launcher per account) |
@@ -337,8 +338,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     **The launch pause.** `fairshare` and `fairshare run` (not `run
     -a`, not a pickup or handoff, not the refusal flow's `[s]tart`; a switch does, decision 23),
     on a terminal only, pause before
-    starting when the choice is worth making: the chosen account is tight (week at 90%, a hot
-    short window inside its grace hour, or a spent model week), the second-best eligible
+    starting when the choice is worth making: the chosen account is tight (near its limit by
+    decision 35's test, a hot short window inside its grace hour, or a spent model week), the second-best eligible
     account's score is within 10% of its score, or a `warning:` line was printed this launch.
     The eligible accounts are listed with digits, then `starting <id> in N s · Enter = now ·
     1-N = that account · q = quit` counts down (keys read in cbreak mode, the terminal always restored).
@@ -561,8 +562,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       eligible account that has the session's model (decision 23), with `--resume <id>`, the
       model and effort, and the moved prompt (`fairshare moved this session from account A to
       account B because <A hit its usage limit | A is near its usage limit | a move was asked
-      for>. Continue where you left off.`; "near" when one of A's plan windows, not yet reset,
-      is at the first warning level, 90%: the move the warning asked for) and
+      for>. Continue where you left off.`; "near" when A is near its limit by decision 35's
+      test: the move the warning asked for) and
       `FAIRSHARE_CONTINUES=<its pid>:<id>`; building those arguments clears the
       record's stranded mark and wait and leaves its account: the first capture under the same
       id writes B, and a new id (another account, decision 23) is linked to it. None eligible
@@ -704,21 +705,25 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       joined yet is joined first, or named as not asked);
       `--show SESSION|NAME` prints a note. A handoff's fresh session reads the note first
       (decision 23); a pickup resumes the session itself, which knows its own state.
-    - **Warnings** (`hook post-tool`, `hook prompt`): percent crossings, 90 then 95, once each
-      per plan window (by its reset) per session, recorded on the session record (`warned`); a
-      higher crossing covers the lower, a new reset warns again. Nothing for an input naming a
-      subagent (`agent_id`); a worker with a pending request hears the request (once per
-      request); otherwise a crossing is said for the role: the main text names the percent,
-      window, reset, the best other account by local snapshots, the advice (carry on if little
-      is left, else checkpoint and pickup) and the session's workers; the worker text says to
-      finish the step and checkpoint. The text goes as the event's documented
-      `additionalContext` (`Provider.hook_output`); nothing to say prints nothing. The hook reads
-      only the snapshot and the records: a snapshot older than twice `refresh_minutes` says
-      nothing new and starts the background probe. No burn rate (not built). Its wall time with
+    - **Warnings** (`hook post-tool`, `hook prompt`): one warning when the account nears its
+      limit (decision 35), once per session per instance of the binding window (its key and
+      reset, recorded on the session record as `warned`; older records' `[reset, level]` read
+      as that reset); a new instance, or the other window coming to bind, warns again. Nothing
+      for an input naming a subagent (`agent_id`); a worker with a pending request hears the
+      request (once per request); otherwise the warning is said for the role: the main text
+      names the dollars left, the minutes they last at the account's last-hour pace, the refill
+      time and amount, the best other account by local snapshots, the advice (carry on if
+      little is left or the refill is soon, else the `warning_move`) and the session's workers;
+      the worker text says to finish the step and checkpoint. The text goes as the event's
+      documented `additionalContext` (`Provider.hook_output`); nothing to say prints nothing.
+      The hook reads
+      only local files (the snapshot, the account's usage log, the session records): a
+      snapshot older than twice `refresh_minutes` says nothing new and starts the background
+      probe. Its wall time with
       nothing to say: a median of 55 ms over 20 fresh processes (bare `python -c pass`: 14 ms;
       importing `fairshare.cli`: about 35 ms), measured on a loaded machine.
     - **`fairshare watch [--timeout SECONDS]`**, inside a session: local state every 5 s, the
-      running sessions every 15 s; it exits 0 with one line per event: its account's crossing
+      running sessions every 15 s; it exits 0 with one line per event: its account's warning
       (the same marks as the hooks: whichever tells first), a worker's checkpoint note grown, a
       worker stranded (`fairshare pickup <id>`), a worker's turn end, a worker ended or idle
       after busy (none of these for a worker marked removed by `fairshare worker --remove NAME`,
@@ -1001,7 +1006,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 
 28. **A warning moves by handoff, by default** (amends decisions 19 and 23; `warning_move`).
     Decision 19 chose pickup because a note cannot be relied on under load, and a pickup keeps
-    the whole context. At a *warning* (90% / 95%) there is time to write a note, and a pickup to
+    the whole context. At a *warning* (then 90% / 95%; since decision 35, under an hour to the limit) there is time to write a note, and a pickup to
     another account reads the whole context again, uncached; a long context is then paid for on
     every later turn. A handoff starts lean: its fresh session reads the note first and is given
     the old session's id and how to read its transcript (`_pickup_prompt`), so what the note
@@ -1040,11 +1045,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     The other error, a bonus kept after the refill, would count the same room twice. The
     adapter owns how the reset is used, for the warning's words (`full_reset`; None: the
     provider grants none, and the warning says nothing). **The warning on a planned account**
-    (`_reset_due`: an active plan and the week at the first warning level or above, the bar's
-    `use reset`) tells every session on it, worker or main, to work on to the limit, with no
-    move: the ranking already put the account first for its refill, and a warning that said
-    move contradicted it (seen live on 2026-11-20). Below that level a crossing warns as usual
-    and says nothing of the plan: spending the refill on a half-used week wastes it. Not handled: a plan on one of two
+    (`_reset_due`: an active plan and the week near its limit by itself, decision 35's test on
+    the week's own room; the bar's `use reset`) tells every session on it, worker or main, to
+    work on to the limit, with no move: the ranking already put the account first for its
+    refill, and a warning that said move contradicted it (seen live on 2026-11-20). With room
+    left in the week, a short window near its limit warns as usual and says nothing of the plan:
+    spending the refill on a half-used week wastes it. Not handled: a plan on one of two
     folders sharing a login applies to that folder's id only, and the survey ranks the
     freshest of the two.
 
@@ -1192,14 +1198,15 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     Instances that rose at least `MIN_RISE_PCT` in the last `KEEP_S` (14 days) are pooled
     (sum of dollars / sum of points); the short window needs `MIN_SHORT_INSTANCES` (2), the long
     one `MIN_LONG_INSTANCES` (1), and `MIN_TOTAL_RISE_PCT` (10) points in all, else no rate. The
-    room is `(first warning level - used %) x rate` per window (a reset window counts as
-    unused); the smallest binds. `status` shows it under the account, with each rate's
+    room is `(100 - used %) x rate` per window (to the limit since decision 35; first to the 90%
+    warning level; a reset window counts as unused); the smallest binds. `status` shows it under the account, with each rate's
     instance count and its lowest and highest per-instance rate, so the fit can be judged.
     Limits: the dollars are Claude Code's API-price estimate, so a model mix that the provider's
     limits weigh differently from list prices moves the rate (accounts on the same plan can fit
     different rates); usage is whole percents, hence the minimum rise; use outside fairshare's
     sessions (the web app) raises the percent with no dollars recorded, which lowers the rate.
-    Nothing decides on it yet: not the ranking, the warnings, the status bar or `worker`.
+    At first nothing decided on it; decision 35 makes the warnings act on it (not the ranking or
+    `worker`).
 
 34. **`status --json` is a public contract** (2026-11-23). Scripts, status bars and other agents
     read the accounts, their usage, the choice and the live sessions without parsing text.
@@ -1211,7 +1218,41 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     changes meaning; adding a key keeps it, so a reader ignores keys it does not know. Every key
     is documented in `docs/usage.md`: a key is added there in the same change. Nothing is in the
     object that the text does not show: the sessions are the ones listed there (at most five,
-    heaviest first), and `sessions_more` is its `+N more`.
+    heaviest first), and `sessions_more` is its `+N more`. Schema 2 (decision 35): `room` counts
+    to the limit, `warn_pct` is gone, `refills_at` and `refill` are new.
+
+35. **One warning, in dollars to the limit** (2026-11-24; replaces the 90% and 95% crossings
+    per window, `WARN_LEVELS`, and `TIGHT_WEEK_PCT`). An agent read status's `room ~$X before the
+    90% warning` as "$X left" and left an account the ranking had chosen, with most of a 5-hour
+    window's worth still usable: two thresholds in one number invite that. Two percent levels
+    per window also meant two warnings per window, and on a week 10% is about a whole 5-hour
+    window, so a 90% warning moved agents far too early. Now agents see one number, the dollars
+    left before the limit: `rates.limit` takes the smaller of the 5-hour and weekly room
+    (`(100 - used) x rate`), names the binding window, its reset, and the room right after it
+    (every window that has reset by then counted as unused: a 5-hour refill is capped by the
+    week, a weekly refill leaves the 5-hour window binding). **The test** (`cli._near`): the
+    room is less than what all the account's sessions spent in the last hour (`SPEND_SPAN_S`,
+    the per-session figures `status` shows), so under an hour is left at the account's pace.
+    Account, not session: sessions share the room. Nothing spent, or no rate for any window:
+    not near. **One test everywhere**, so the ranking's launch pause, the warning, the planned
+    reset and the moved prompt cannot disagree (the earlier "ranked here, then told to move at
+    once"): `_worth_pausing` (was: week at 90%), `_reset_due` and the bar's `use reset` (was:
+    week at 90%; now the week's own room against the hour's spend), `_near_limit` (was: any
+    plan window at 90%). `_grace_warning` is unchanged: it states the ranking's own grace (its
+    `short_hot_pct` and `grace_hours`), which policy.py decides. **No percent fallback**: an
+    account with no rate yet (a new account, its first week) gets no warning, no pause from
+    this test and no `use reset`; Claude Code's limit stop and fairshare's resume after a limit
+    cover it. A warning is said once per session per instance of the binding window, so a
+    reset or a change of binding window may warn again. The status bar keeps percentages (for
+    people); the ranking is untouched. **Cost.** The hook now needs the account's rates and, when
+    there are some, the session records. Reading and fitting a 14-day usage log (made-up,
+    ~800 KB) added about 20 ms to `hook post-tool`, so the fit is kept beside the log
+    (`usage/<id>.fit.json`, `store.usage_fit`) with the log's size, and reused until the log
+    grows (a line per recorded snapshot) or for an hour at most (so the 14-day cut still drops
+    old lines from a log that stopped growing); with it the hook's extra cost was about 2 ms (median
+    of 30 fresh processes, 150 session records). `status` fits afresh: it shows the fit's
+    details. Limits: a burst (a big step after a quiet hour) warns late, since the
+    pace is the last hour's; a steady pace warns about an hour ahead.
 
 ## Known limits
 
@@ -1412,8 +1453,9 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 ## Not built yet
 
 OpenAI/Codex adapter · packaging for Homebrew · sizes, a "still needed" ledger and burn rate
-(decision 24 records the data they need) · acting on the room in dollars (decision 33 measures
-and shows it): a worker's estimate held against the room, warnings and the ranking in dollars.
+(decision 24 records the data they need) · acting further on the room in dollars (decision 33
+measures it, decision 35 warns on it): a worker's estimate held against the room, the ranking
+in dollars.
 
 Before a second provider lands, these Claude-only spots must move behind the provider seam
 (none affects a Claude-only user today):

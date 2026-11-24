@@ -69,8 +69,9 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
   to Claude Code unchanged; `fairshare run -a ID` starts that account instead.
 - `fairshare status` lists the accounts, best first, with their usage and live sessions;
   `--json` prints the same as one JSON object for scripts.
-- Near a limit (90% and 95% of a window), fairshare tells the agent in the session, naming the
-  best account now. A skill fairshare installs in the hub teaches it to run `fairshare handoff`
+- Near a limit (under an hour left at the account's pace in the last hour), fairshare tells the
+  agent in the session how many dollars are left, when the account refills, and the best account
+  now. A skill fairshare installs in the hub teaches it to run `fairshare handoff`
   with a note at its next stopping point, unless little work is left: a fresh session continues
   on that account before the limit, reading the note first. (`warning_move = "pickup"` moves the
   same session instead, with its whole context.) It is the agent's call, so it usually happens,

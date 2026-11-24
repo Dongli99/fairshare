@@ -237,12 +237,15 @@ takes no work until the reset is used. `fairshare full-reset` shows the plans,
 replaces it. An account whose current week fairshare has not seen yet cannot be planned
 (`fairshare status` asks for its usage).
 
-The status bar marks the week: `7d 20% +reset`, and `7d 92% (Sun 10:00) use reset` once the week
-is at 90% or more. From then on a warning on that account (to a main session or a worker) says
-not to move: keep working there until the limit stops the session, then you use the reset and the
-stopped sessions continue on the same account. The refill is worth most on a spent week; moving
-at 90% would leave the last tenth unused (on Pro, about a whole 5-hour window). A 5-hour
-crossing while the week is below 90% warns as usual and keeps the reset for a fuller week.
+The status bar marks the week: `7d 20% +reset`, and `7d 97% (Sun 10:00) use reset` once the reset
+is due: the week by itself has less room left, in dollars, than the account spent in the last hour
+(the test the [warning](#warnings) uses; an account with no rate yet never shows it). From then
+on the warning on that account (to a main session or a worker) says not to move: keep working
+there until the limit stops the session, then you use the reset and the stopped sessions
+continue on the same account. The refill is worth most on a spent week; moving early would leave
+the rest of it unused (on Pro, the last tenth of a week is about a whole 5-hour window). A
+5-hour window near its limit while the week still has room warns as usual and keeps the reset for
+a fuller week.
 
 The plan ends when fairshare sees the reset used: a usage probe that finds the 5-hour or the
 weekly window lower than before under the same reset (the status bar's own lower numbers are
@@ -466,7 +469,7 @@ run the commands yourself, from inside a session:
   printed, the worker stays unmarked and the exit status is 1; a name that is none of this
   session's workers exits 2.
 - `fairshare watch` waits until something concerns this session and prints one line per event:
-  its account crossed 90% or 95%, a worker wrote a checkpoint (with the note's path), a worker was
+  its account is near its limit (the [warning](#warnings)), a worker wrote a checkpoint (with the note's path), a worker was
   stopped by its limit (with when that limit resets, since Claude Code resumes the worker by
   itself then, and `fairshare pickup <id>` to move it now), a worker ended its turn and is
   waiting (`worker fs-watch-stops ended its turn and is waiting: fairshare transcript 5e55105e --tail 1`;
@@ -506,26 +509,45 @@ run the commands yourself, from inside a session:
 
 ## Warnings
 
-When the session's account crosses 90%, and again 95%, of a window (once each per window and
-session; a new window starts over), fairshare adds one line to the session's context at its next
-step (Claude Code's `PostToolUse` and `UserPromptSubmit` hooks, which fairshare wires in the
-hub). A main session reads, for example: `fairshare: account a is at 91% of its 5h window
-(resets 11:00). Best other account: b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: ...);
-b: seven_day 40% used, resets in 50h; c: ... If what is left of your work is small,
-carry on. Otherwise, at the next stopping point: run fairshare handoff "<what was done, what is
-next, ...>" to continue in a fresh session on the best account, which reads your note first.
-Workers you started: ...`. That is the default move, `warning_move = "handoff"`: the fresh
-session starts lean instead of reading the whole context again on another account, and it can read
-the old session's transcript for anything the note missed. Set `warning_move = "pickup"` under
+When the session's account has under an hour left before its limit at its current pace,
+fairshare adds one line to the session's context at its next step (Claude Code's `PostToolUse`
+and `UserPromptSubmit` hooks, which fairshare wires in the hub). "Left" is the account's room in
+dollars (see `status`'s room line in [Who is drawing the quota](#who-is-drawing-the-quota)): the
+smaller of its 5-hour and weekly room. "Pace" is what all the account's sessions spent in the
+last hour: they share the room. So: the room is less than the last hour's spend. Nothing spent
+in the last hour, no warning. It is said once per session for each instance of the window that
+binds: when that window resets, or the other window comes to bind, it may warn again. A main
+session reads, for example: `fairshare: account a has about $0.80 left before its limit, about
+24 min at its pace in the last hour ($2.00); it refills at 11:00 to about $10.00. Best other
+account: b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: ...); b: seven_day 40% used,
+resets in 50h; c: ... If what is left of your work is small, or the account refills soon, carry
+on. Otherwise, at the next stopping point: run fairshare handoff "<what was done, what is next,
+...>" to continue in a fresh session on the best account, which reads your note first. Workers
+you started: ...`. The refill is the room right after the binding window resets: a 5-hour
+refill is capped by what the week still allows, and a weekly refill leaves the 5-hour window to
+bind. That is the default move, `warning_move = "handoff"`: the fresh session starts lean
+instead of reading the whole context again on another account, and it can read the old
+session's transcript for anything the note missed. Set `warning_move = "pickup"` under
 `[policy]` for the other: the line then says to write a checkpoint and run fairshare pickup, and
 the same session continues on the best account with its whole context. (`! fairshare pickup`
 works at any time, whichever is set; a session stopped by its limit is unchanged, see above.) A
 worker reads that it should finish its current step and checkpoint, and that its main session
 decides what happens next. Subagents hear nothing. Numbers older than twice `refresh_minutes`
-warn nothing (fairshare asks for fresh ones instead). When one other session of the same account drew at least half of that account's
-spend in the last hour, the main warning adds `Heaviest in the last hour: session 1f2e3d4c
-(Opus, api, 70%).` The hook reads only local files; with nothing to say it prints nothing and
-takes well under a tenth of a second.
+warn nothing (fairshare asks for fresh ones instead). When one other session of the same account
+drew at least half of that account's spend in the last hour, the main warning adds `Heaviest in
+the last hour: session 1f2e3d4c (Opus, api, 70%).` The hook reads only local files; with nothing
+to say it prints nothing and takes well under a tenth of a second.
+
+An account with no rate yet (a new account, about its first week, until its usage log holds
+enough windows) gets no warning: there are no dollars to put against its pace, and there is no
+percent fallback. Claude Code's own limit stop still applies, and fairshare's resume after a
+limit (see above) covers the session it stops.
+
+The same test decides the other "near its limit" cases, so they cannot disagree with the
+warning: what counts as "nearly spent" for the launch pause (see [Starting a
+session](#starting-a-session); a nearly full 5-hour window and a spent model week still count
+too), the status bar's `use reset`, and a moved session's first prompt (`... because a is near
+its usage limit`). The status bar keeps its percentages.
 
 ## Who is drawing the quota
 
@@ -547,11 +569,12 @@ worker ends, or its cost has not moved for 30 minutes, its cost and duration are
 worker record; nothing uses them yet.
 
 Once an account's usage log holds enough windows, `status` also shows how many dollars it can
-still spend before the 90% warning, and which window binds: `room ~$3.75 before the 90% warning
-(5h binds; 7d ~$12.00) · $/pt 5h 0.075 (2 windows, 0.05-0.1), 7d 0.3 (1 window)`. The rate per
-percentage point is learned from what its sessions spent while each window rose (an API-price
-estimate, so model mix moves it); the count and the range say how well it holds. Nothing acts on
-it yet.
+still spend before its limit, which window binds, and when it refills and to how much: `room
+~$4.50 to the limit (5h binds; refills in 3h00m to ~$7.50) · $/pt 5h 0.075 (2 windows,
+0.05-0.1), 7d 0.3 (1 window)`. The rate per percentage point is learned from what its sessions
+spent while each window rose (an API-price estimate, so model mix moves it); the count and the
+range say how well it holds. A plan window with no rate yet is named (`5h no rate yet`) and left
+out of the room. This room is what the [warning](#warnings) acts on.
 
 ## Status as JSON
 
@@ -559,13 +582,14 @@ it yet.
 2) and nothing else on stdout, for scripts, status bars and other agents. It asks the same
 questions, in the same way, and exits as `status` does; an error (no config, no accounts, no hub)
 goes to stderr with nothing on stdout. Times are epoch seconds and numbers are raw. Every key is
-always present: what does not apply is `null`. `schema` is `1`; it changes only when a key is
+always present: what does not apply is `null`. `schema` is `2`; it changes only when a key is
 removed, renamed or changes meaning, and new keys can appear without it (read what you need and
-ignore the rest).
+ignore the rest). Schema 2 (after 0.3.1): `room` counts to the limit instead of to the 90%
+warning level, `room.warn_pct` is gone, and `room.refills_at` and `room.refill` are new.
 
 ```
 {
-  "schema": 1,
+  "schema": 2,
   "now": 1799999999.5,
   "top": "b",
   "why": "b before a (score 1.60 vs 1.00: ...); b: seven_day 20% used, resets in 50h; a: ...",
@@ -600,7 +624,7 @@ Each account:
 | `usage_as_of` | when that snapshot was captured; `null` with none |
 | `sign_in_ends` | when the sign-in ends; `null` when not known |
 | `full_reset` | `null`, or `{"adds_pct", "until"}`: a planned full reset still to use (`adds_pct` of the week, until it is used or the week resets at `until`) |
-| `room` | `null` until a window has a rate, else the dollars left before the first warning level: `{"dollars", "binds", "warn_pct", "windows"}`, where `binds` is the window with the least room and `windows` holds, per window with a rate, `{"dollars", "per_pct", "instances", "low", "high"}` (its room, dollars per percentage point, the window instances pooled, and their lowest and highest rate) |
+| `room` | `null` until a window has a rate, else the dollars left before the limit: `{"dollars", "binds", "refills_at", "refill", "windows"}`, where `binds` is the window with the least room, `refills_at` when it resets (`null` when it is unused already) and `refill` the room right after (`null` likewise), and `windows` holds, per window with a rate, `{"dollars", "per_pct", "instances", "low", "high"}` (its room, dollars per percentage point, the window instances pooled, and their lowest and highest rate) |
 | `notes` | the lines `status` prints under the account, in order, except the room line and the sessions: plan or sign-in remarks, a failed usage probe, a spent per-model week, a sign-in ending soon, a planned full reset |
 | `sessions` | the live sessions `status` lists for the account (heaviest in the last hour first, at most 5): `{"id", "model", "folder", "role", "cost_last_hour", "share_last_hour_pct"}`: the full session id; its model's name; its folder's last part; `main` or the worker's name; its spend in the last hour in dollars and its share of the account's, in percent; `null` where `status` shows `-` (`share_last_hour_pct` is also `null` when nothing was spent) |
 | `sessions_more` | how many more live sessions there are than listed (`status`'s `+N more`); 0 for none |
@@ -716,7 +740,7 @@ and `leave` edit it as text, keeping your comments, with a backup each time. Key
 - `[policy]`: `launch_pause` (seconds, default 3, `0` = off), `resume_wait_minutes` (unset by
   default: a session stopped by its limit waits for Claude Code's own resume; a number N moves
   it automatically when the reset is more than N minutes away, `0` = always), `warning_move`
-  (`"handoff"` by default, or `"pickup"`: the move a 90% / 95% warning tells the agent to make, see
+  (`"handoff"` by default, or `"pickup"`: the move the near-limit warning tells the agent to make, see
   [Warnings](#warnings)), `refresh_minutes`
   (default 5, at least 1), and the ranking's thresholds `short_hot_pct` (85: a short window this
   full is "nearly full"), `long_exhausted_pct` (98: a week or a short window this full is spent

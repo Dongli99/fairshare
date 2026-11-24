@@ -12,6 +12,7 @@ from fairshare.model import SessionSeen, Worker
 from fairshare.providers import claude
 
 from test_honest import NOW
+from test_rates import rated, spending
 from test_workers import PARENT, Work
 
 
@@ -63,30 +64,38 @@ class Watch(Work):
         self.watch("--timeout", "20")
         self.assertEqual(self.listed, [])
 
-    def test_its_account_crossing_once_across_restarts(self):
-        self.snap("a", five=(92, 3), seven=(10, 50))
+    def near(self, five=92):
+        """Account a $0.10 a point of its 5h window (test_rates.rated), at `five`% of it, and
+        $2.00 spent by its main session this hour."""
+        rated(self.tmp, "a")
+        self.snap("a", five=(five, 3), seven=(10, 50))
+        spending(PARENT, "a", 2.0)
+
+    def test_its_accounts_warning_once_across_restarts(self):
+        self.near()
         code, out, _ = self.watch("--timeout", "10")
         self.assertEqual(code, 0)
-        self.assertTrue(out.startswith("fairshare: account a is at 92% of its 5h window"), out)
+        self.assertTrue(out.startswith("fairshare: account a has about $0.80 left before its "
+                                       "limit"), out)
         self.assertEqual(len(out.splitlines()), 1)
         self.assertEqual(self.watch("--timeout", "10")[1], "nothing happened\n")
 
-    def test_a_crossing_a_hook_said_is_not_said_again(self):
-        self.snap("a", five=(92, 3), seven=(10, 50))
+    def test_a_warning_a_hook_said_is_not_said_again(self):
+        self.near()
         raw = json.dumps({"session_id": PARENT, "cwd": str(self.here)}).encode()
         with mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(raw))), \
                 mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "hub/accounts/a")}):
-            self.assertIn("92%", self.go("hook", "post-tool")[1])
+            self.assertIn("$0.80 left", self.go("hook", "post-tool")[1])
         self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
 
-    def test_a_crossing_while_waiting_wakes_it(self):
+    def test_a_warning_while_waiting_wakes_it(self):
         def later(s):
             self.sleep(s)
             if self.clock[0] - NOW >= 10:
-                self.snap("a", five=(95, 3), seven=(10, 50))
+                self.near(95)
         with mock.patch.object(cli, "_sleep", later):
-            code, out, _ = self.watch()
-        self.assertIn("at 95% of its 5h window", out)
+            code, out, _ = self.watch("--timeout", "60")
+        self.assertIn("has about $0.50 left before its limit", out)
         self.assertEqual(self.clock[0] - NOW, 10)
 
     def test_a_worker_checkpoint_once_then_again_when_it_grows(self):

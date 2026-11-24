@@ -139,7 +139,8 @@ class SessionRecord:
     parent: str | None = None         # a worker's main session (its id)
     checkpoint_requested: float | None = None   # when its main session asked for a checkpoint
     request_said: float | None = None # the request a hook last passed on (its time)
-    warned: dict = field(default_factory=dict)  # plan window -> [its reset, level warned]
+    warned: dict = field(default_factory=dict)  # plan window -> its reset when warned
+                                      # (older records: [reset, level])
     reported: dict = field(default_factory=dict)  # what `watch` already said: key -> value
     model: str | None = None          # the latest model id a usage hook saw
     model_name: str | None = None     # its display name
@@ -245,7 +246,7 @@ class Tuning:
     launch_pause: float = 3.0         # seconds a launch with a close choice waits; 0: never
     resume_wait_minutes: float | None = None  # None: a session stopped by its limit waits for
                                               # the reset; N: moved when that is over N min away
-    warning_move: str = "handoff"     # what a 90% / 95% warning tells the agent to run:
+    warning_move: str = "handoff"     # what the near-limit warning tells the agent to run:
                                       # "handoff" (a fresh session) or "pickup" (the same one)
 
 

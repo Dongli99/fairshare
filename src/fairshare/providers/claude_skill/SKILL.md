@@ -51,14 +51,17 @@ workers. A worker makes no account decisions: it checkpoints when asked.
   refuses when that would lose unpushed work (then it does nothing else).
 
 ## When fairshare warns you
-A warning names the account, its percent, when that window resets and the best other account.
-fairshare's choice of account (here, in `status` and in `fairshare worker`) comes with why it
-goes before the next one. The percentages leave out when each window resets and any planned full
-reset, so follow the choice; override it (`--account`) only when the job needs more room than
-the chosen account has left now, which its reason states.
+fairshare warns once, when the account has under an hour left at its pace: the warning names
+the dollars left before the limit, how many minutes that lasts at what the account spent in the
+last hour, when it refills and to how much, and the best other account. Dollars are an estimate
+(API prices, learned per account); the limit itself stops work, not the warning. fairshare's
+choice of account (here, in `status` and in `fairshare worker`) comes with why it goes before
+the next one; it weighs when each window resets and any planned full reset, so follow the
+choice; override it (`--account`) only when the job needs more room than the chosen account
+has left now, which its reason states.
 - The warning says the user planned a full reset and to keep working to the limit: do that, on
   this account (and so do your workers); no checkpoint, handoff or pickup.
-- Little work left: carry on.
+- Little work left, or the refill comes soon enough to wait for: carry on.
 - Otherwise, at the next stopping point, `fairshare checkpoint --request all` (your workers
   checkpoint), then do the move the warning names; the setting `warning_move` picks it
   (default handoff):

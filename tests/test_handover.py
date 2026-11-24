@@ -28,6 +28,7 @@ from test_honest import H, NOW, Fleet
 from test_hub import write
 import test_pickup
 from test_pickup import SID, TRANSCRIPT, Stranded
+from test_rates import rated, spending
 from test_session import WAIT
 
 WRAPPER = """#!/bin/sh
@@ -234,9 +235,11 @@ class LauncherPickup(Handover):
 
     def test_automatic_and_manual_resume_the_same_id_with_model_and_effort(self):
         self.policy("resume_wait_minutes = 30")                     # opted in; a is out for 3h
+        rated(self.tmp, "a")
         for manual, why in ((False, LIMIT), (True, NEAR)):          # manual: a's 5h at 100%
             with self.subTest(manual=manual):
                 self.record(model="claude-opus-5-5", effort="high", stranded=not manual)
+                spending(SID, "a", 1.0)                             # no room, $1.00 this hour
                 code, err = self.launches("run", "-a", "a", requests=[Request(SID, manual, 4321)])
                 self.assertEqual(code, 0, err)
                 args, acct = self.started_args()
@@ -931,7 +934,7 @@ class NoteWait(unittest.TestCase):
 
 class MovedPrompt(Fleet):
     """The resumed session's first prompt names a move only when the account changed, and why:
-    a limit, a plan window at the first warning level (a move the warning asked for), or a move
+    a limit, the account near its limit (`cli._near`: a move the warning asked for), or a move
     asked for."""
     def setUp(self):
         super().setUp()
@@ -942,13 +945,24 @@ class MovedPrompt(Fleet):
         rec = SessionRecord(SID, "a", "/w", None, NOW)
         self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
 
-    def test_a_window_at_the_warning_level_is_near_the_limit(self):
+    def test_under_an_hour_to_the_limit_is_near_it(self):
+        """The warning's test (`_near`): a's rates are $0.10 a point of 5h, $1.00 of its week."""
+        rated(self.tmp, "a")
         rec = SessionRecord(SID, "a", "/w", None, NOW)
-        for five, seven, why in (((90, 1), (10, 50), NEAR), ((10, 1), (95, 50), NEAR),
-                                 ((89, 1), (89, 50), ASKED)):
-            with self.subTest(five=five, seven=seven):
+        for five, seven, spent, why in (((92, 1), (10, 50), 2.0, NEAR),    # 5h $0.80 left
+                                        ((10, 1), (99, 50), 2.0, NEAR),    # week $1.00
+                                        ((50, 1), (10, 50), 2.0, ASKED),   # $5.00: 2.5 h
+                                        ((99, 1), (99, 50), 0.0, ASKED)):  # nothing spent
+            with self.subTest(five=five, seven=seven, spent=spent):
                 self.snap("a", five=five, seven=seven)
+                spending(SID, "a", spent)
                 self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=why))
+
+    def test_no_rate_is_not_near(self):
+        rec = SessionRecord(SID, "a", "/w", None, NOW)
+        self.snap("a", five=(100, 1), seven=(99, 50))
+        spending(SID, "a", 2.0)
+        self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
 
     def test_a_window_reset_since_or_a_model_week_is_not_near(self):
         rec = SessionRecord(SID, "a", "/w", None, NOW)

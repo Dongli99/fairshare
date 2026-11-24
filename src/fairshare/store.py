@@ -216,6 +216,37 @@ def _log_usage(account_id: str, snap: Snapshot, old: Snapshot | None) -> None:
             f.write(json.dumps(line) + "\n")
 
 
+FIT_KEEP_S = 3600   # a kept fit is computed again after this long, grown or not
+
+
+def usage_fit(account_id: str, fit) -> dict[str, list[float]]:
+    """`fit(usage_log(account_id))`, a {key: [numbers]}, kept beside the log
+    (`usage/<id>.fit.json`) with the log's size and reused while the log has not grown, for
+    at most FIT_KEEP_S: the log only grows (a line per recorded snapshot), and the hooks ask on
+    every tool call, where reading two weeks of it costs more than they may take; the age cap
+    lets the fit's own time cut drop old lines from a log that stopped growing. A cache that
+    cannot be read is computed again; one that cannot be written costs only the next read."""
+    log = state_dir() / "usage" / f"{account_id}.jsonl"
+    try:
+        size = log.stat().st_size
+    except OSError:
+        return fit([])
+    cache = log.with_name(f"{account_id}.fit.json")
+    try:
+        d = json.loads(cache.read_text())
+        got = d["fit"]
+        if d["size"] == size and 0 <= time.time() - d["at"] < FIT_KEEP_S and isinstance(
+                got, dict) and all(
+                isinstance(v, list) and all(_num(x) is not None for x in v) for v in got.values()):
+            return got
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    got = fit(usage_log(account_id))
+    with contextlib.suppress(OSError):
+        _write_json(cache.parent, cache.name, {"size": size, "at": time.time(), "fit": got})
+    return got
+
+
 def usage_log(account_id: str) -> list[tuple[float, float | None, dict[str, tuple[float, float]]]]:
     """The account's usage log as (time, spent, {window: (used %, reset)}), in log order; []
     when there is none. A line that cannot be read is skipped (a torn last write), and so is a

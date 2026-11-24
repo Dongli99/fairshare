@@ -1,4 +1,4 @@
-"""`fairshare status --json`: one JSON object on stdout, schema 1, every key always present.
+"""`fairshare status --json`: one JSON object on stdout, schema 2, every key always present.
 Runs on the fleets of test_honest (temp HOME, config, state and hub; fakes first on PATH; the
 clock injected). Made-up accounts and numbers throughout."""
 import json
@@ -14,7 +14,7 @@ ACCOUNT_KEYS = {"id", "plan", "state", "rank", "eligible", "score", "usable_in_h
                 "left_out", "same_login_as", "windows", "usage_as_of", "sign_in_ends",
                 "full_reset", "room", "notes", "sessions", "sessions_more"}
 SESSION_KEYS = {"id", "model", "folder", "role", "cost_last_hour", "share_last_hour_pct"}
-ROOM_KEYS = {"dollars", "binds", "warn_pct", "windows"}
+ROOM_KEYS = {"dollars", "binds", "refills_at", "refill", "windows"}
 RATE_KEYS = {"dollars", "per_pct", "instances", "low", "high"}
 
 
@@ -49,10 +49,10 @@ class StatusJson(Fleet):
         code, out, err = self.go("status", "--json")
         self.assertEqual((code, err), (0, ""))
         data = json.loads(out)                           # the whole of stdout parses
-        self.assertTrue(out.startswith("{\n  \"schema\": 1,\n  \"now\": "), out)   # indent=2
+        self.assertTrue(out.startswith("{\n  \"schema\": 2,\n  \"now\": "), out)   # indent=2
         self.assertTrue(out.endswith("}\n"))
         self.assertEqual(list(data), ["schema", "now", "top", "why", "preference", "accounts"])
-        self.assertEqual((data["schema"], data["now"]), (1, NOW))
+        self.assertEqual((data["schema"], data["now"]), (2, NOW))
 
     def test_accounts_in_order_with_every_key_each(self):
         data, _ = self.status()
@@ -144,18 +144,19 @@ class StatusJson(Fleet):
         self.assertIsNone(accts["b"]["room"])
         room = accts["a"]["room"]
         self.assertEqual(set(room), ROOM_KEYS)
-        self.assertEqual((room["binds"], room["warn_pct"]), ("five_hour", 90))
-        self.assertAlmostEqual(room["dollars"], 3.75)
+        self.assertEqual((room["binds"], room["refills_at"]), ("five_hour", NOW + 3 * H))
+        self.assertAlmostEqual(room["dollars"], 4.5)
+        self.assertAlmostEqual(room["refill"], 7.5)
         self.assertEqual(set(room["windows"]), {"five_hour", "seven_day"})
         for r in room["windows"].values():
             self.assertEqual(set(r), RATE_KEYS)
         five = room["windows"]["five_hour"]
         self.assertEqual((five["instances"], five["low"], five["high"]), (2, 0.05, 0.1))
         self.assertAlmostEqual(five["per_pct"], 0.075)
-        self.assertAlmostEqual(five["dollars"], 3.75)
-        self.assertAlmostEqual(room["windows"]["seven_day"]["dollars"], 12.0)
+        self.assertAlmostEqual(five["dollars"], 4.5)
+        self.assertAlmostEqual(room["windows"]["seven_day"]["dollars"], 15.0)
         # the text line is the same data, formatted
-        self.assertIn("    room ~$3.75 before the 90% warning (5h binds; 7d ~$12.00) · "
+        self.assertIn("    room ~$4.50 to the limit (5h binds; refills in 3h00m to ~$7.50) · "
                       "$/pt 5h 0.075 (2 windows, 0.05-0.1), 7d 0.3 (1 window)\n",
                       self.go("status")[1])
 
@@ -165,7 +166,7 @@ class StatusJson(Fleet):
             (NOW - 8 * H, 3.0, {"seven_day": (20, NOW + 50 * H)})])
         room = self.by_id(self.status()[0])["b"]["room"]
         self.assertEqual((room["binds"], list(room["windows"])), ("seven_day", ["seven_day"]))
-        self.assertAlmostEqual(room["dollars"], 14.0)
+        self.assertAlmostEqual(room["dollars"], 16.0)
 
     def test_full_reset_and_its_note(self):
         self.go("full-reset", "b")

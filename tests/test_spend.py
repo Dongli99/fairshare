@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest import mock
 
-from fairshare import cli, store
+from fairshare import cli, rates, store
 from fairshare.model import ROLE_WORKER, SessionRecord, SessionSeen, Worker
 
 from test_handover import Handover
@@ -149,13 +149,13 @@ class Heaviest(Handover):
         accounts = cli._load()[0]
         acct = next(a for a in accounts if a.id == "b")
         rec = store.session(me)
-        return cli._warning_text(rec, acct, ("five_hour", store.load("b").windows["five_hour"],
-                                             90), accounts, cli._load()[1], NOW)
+        room = rates.Room(0.5, "five_hour", NOW + 2 * H, 5.0, {"five_hour": 0.5})
+        return cli._warning_text(rec, acct, (room, 2.0), accounts, cli._load()[1], NOW)
 
     def test_added_at_half_or_more_absent_below(self):
         costed("s-me", "b", [1.0])
         costed("s-big", "b", [1.0], cwd="/w/api")
-        self.assertIn("(resets 10:00). Heaviest in the last hour: session s-big (Opus, api, "
+        self.assertIn("to about $5.00. Heaviest in the last hour: session s-big (Opus, api, "
                       "50%). Best other account:", self.text())
         costed("s-big", "b", [0.9], cwd="/w/api")
         self.assertNotIn("Heaviest", self.text())

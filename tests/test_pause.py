@@ -13,6 +13,7 @@ from fairshare import cli, store
 from fairshare.model import ConfigError, SessionSeen, Snapshot, Window, load_accounts
 
 from test_honest import H, NOW, ORG, Fleet
+from test_rates import rated, spending
 
 
 class Pause(Fleet):
@@ -70,7 +71,9 @@ class Pause(Fleet):
 
     def test_each_tight_trigger(self):
         # b: eligible far behind; for the grace hour, b cannot work (else the grace does not hold)
-        cases = {"week at 90%": (dict(five=(10, 2), seven=(92, 10)), (97, 100)),
+        rated(self.tmp, "a")                                   # $1.00 a point of its week
+        spending("s-a", "a", 4.0)                               # $4.00 this hour
+        cases = {"under an hour to its limit": (dict(five=(10, 2), seven=(97, 10)), (97, 100)),
                  "hot short window (inside its grace hour)": (dict(five=(90, 0.5), seven=(10, 10)),
                                                               (99, 100))}
         for label, (top, other_week) in cases.items():
@@ -81,6 +84,15 @@ class Pause(Fleet):
                 self.run_with()
                 self.assertEqual(len(self.keys), 1)
                 self.assertEqual(self.launched_id(), "a")
+
+    def test_a_full_week_idle_or_without_a_rate_does_not_pause(self):
+        self.snap("a", five=(10, 2), seven=(97, 10))
+        self.snap("b", five=(10, 2), seven=(97, 100))
+        self.run_with()                                         # no rate
+        rated(self.tmp, "a")
+        self.run_with()                                         # a rate, nothing spent
+        self.assertEqual(self.keys, [])
+        self.assertEqual(self.launched_id(), "a")
 
     def test_a_spent_model_week_pauses(self):
         store.save("a", Snapshot(NOW, {"seven_day": Window(10, NOW + 50 * H),

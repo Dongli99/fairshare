@@ -273,37 +273,77 @@ def _spent_models(acct_id: str, snap: Snapshot | None, t: Tuning, now: float) ->
             and w.resets_at > now]
 
 
-def _room(acct: Account, snap: Snapshot | None, now: float) -> dict | None:
-    """The dollars the account can still spend before the first warning level, from the rate
-    its usage log gives each plan window (`rates`): the smallest room binds. Per window with a
-    rate: its dollars of room, the rate and how many window instances it pools, with their
-    lowest and highest rate, so the reader can judge the fit. None when no window has a rate
-    yet. Shown only: nothing decides on it yet."""
+def _rates(acct: Account, now: float) -> dict[str, rates.Rate]:
+    """The rate its usage log gives each of the account's plan windows that has one, read
+    afresh (`status`)."""
     p = acct.plan
-    found = rates.fit_plan(store.usage_log(acct.id), p.short_name, p.long_name, now) if p else {}
-    if not found:
+    return rates.fit_plan(store.usage_log(acct.id), p.short_name, p.long_name, now) if p else {}
+
+
+def _room(acct: Account, snap: Snapshot | None, now: float) -> rates.Room | None:
+    """The dollars the account can still spend before its limit (`rates.limit`), or None when no
+    plan window has a rate yet. The rates are kept beside the usage log until it grows, an hour
+    at most (`store.usage_fit`): the hooks ask on every tool call."""
+    p = acct.plan
+    if p is None:
         return None
-    room = rates.room(found, snap.windows if snap else {}, WARN_LEVELS[0], now)
-    binds = min(room, key=room.get)
-    return {"dollars": room[binds], "binds": binds, "warn_pct": WARN_LEVELS[0],
-            "windows": {k: {"dollars": room[k], "per_pct": r.per_pct, "instances": r.instances,
-                            "low": r.low, "high": r.high} for k, r in found.items()}}
+    found = store.usage_fit(acct.id, lambda lines: {
+        k: [r.per_pct, r.instances, r.low, r.high]
+        for k, r in rates.fit_plan(lines, p.short_name, p.long_name, now).items()})
+    return rates.limit({k: rates.Rate(*v) for k, v in found.items() if len(v) == 4},
+                       snap.windows if snap else {}, now)
 
 
-def _room_line(acct: Account, room: dict | None) -> list[str]:
-    """status's line for `_room` data, if there is any."""
+def _pace(acct_id: str, now: float) -> float:
+    """What all the account's sessions spent in the last hour (SPEND_SPAN_S), in dollars."""
+    return sum(x for x in _hour_spend([r for r in store.sessions() if r.account == acct_id],
+                                      now).values() if x)
+
+
+def _near(acct: Account, snap: Snapshot | None, now: float) -> tuple[rates.Room, float] | None:
+    """The one test of "near the limit" (decision 35): the account's room to its limit is less
+    than what its sessions spent in the last hour, so under an hour is left at its pace. The
+    room and that spend, or None: no window with a rate, nothing spent, or more room. The
+    warning, the launch pause, the planned reset and the moved prompt all ask this."""
+    room = _room(acct, snap, now)
+    if room is None:
+        return None
+    pace = _pace(acct.id, now)
+    return (room, pace) if pace > 0 and room.dollars < pace else None
+
+
+def _room_data(acct: Account, snap: Snapshot | None, now: float) -> dict | None:
+    """`status`'s room for the account: the dollars to its limit, the window that binds, when it
+    refills (`refills_at`, None when it is unused already) and the room right after
+    (`refill`); per window with a rate its own room, the rate and how many window instances it
+    pools, with their lowest and highest rate, so the reader can judge the fit. None when no
+    window has a rate yet."""
+    found = _rates(acct, now)
+    room = rates.limit(found, snap.windows if snap else {}, now)
+    if room is None:
+        return None
+    return {"dollars": room.dollars, "binds": room.binds, "refills_at": room.resets_at,
+            "refill": room.refill,
+            "windows": {k: {"dollars": room.windows[k], "per_pct": r.per_pct,
+                            "instances": r.instances, "low": r.low, "high": r.high}
+                        for k, r in found.items()}}
+
+
+def _room_line(acct: Account, room: dict | None, now: float) -> list[str]:
+    """status's line for `_room_data`, if there is any."""
     if not room:
         return []
     p, binds, found = acct.plan, room["binds"], room["windows"]
     hours = {k: h for k, h in ((p.short_name, p.short_hours), (p.long_name, p.long_hours)) if k}
     label = {k: _span(h) if h else k for k, h in hours.items()}
-    others = "; ".join(f"{label[k]} ~${found[k]['dollars']:.2f}" if k in found
-                       else f"{label[k]} no rate yet" for k in hours if k != binds)
+    refill = "" if room["refills_at"] is None else (
+        f"; refills in {_in((room['refills_at'] - now) / HOUR)} to ~${room['refill']:.2f}")
+    norate = "".join(f"; {label[k]} no rate yet" for k in hours if k not in found)
     each = ", ".join(f"{label[k]} {r['per_pct']:.3g} (" + (
         f"{r['instances']} windows, {r['low']:.3g}-{r['high']:.3g})" if r["instances"] > 1
         else "1 window)") for k, r in found.items())
-    return [f"room ~${room['dollars']:.2f} before the {room['warn_pct']}% warning "
-            f"({label[binds]} binds{'; ' + others if others else ''}) · $/pt {each}"]
+    return [f"room ~${room['dollars']:.2f} to the limit ({label[binds]} binds{refill}{norate})"
+            f" · $/pt {each}"]
 
 
 def _top(verdicts: list[Verdict]) -> Verdict:
@@ -419,7 +459,7 @@ class _Row:
     rank: int | None = None          # ranked only, from 1
     why: str | None = None           # left out: why; same login: the id ranked for it
     notes: list[str] = field(default_factory=list)   # except room and sessions
-    room: dict | None = None         # `_room`
+    room: dict | None = None         # `_room_data`
     sessions: list[dict] = field(default_factory=list)   # `_sessions_data`
     more: int = 0                    # live sessions beyond those listed
 
@@ -438,10 +478,10 @@ def _status_rows(s: Survey, recs: list[SessionRecord]) -> list[_Row]:
                  *([probes[v.account.id]] if v.account.id in probes else []),
                  *_spent_models(v.account.id, s.snaps.get(v.account.id), s.tuning, s.now),
                  *([expiring[v.account.id]] if v.account.id in expiring else [])],
-                verdict=v, rank=i, room=_room(v.account, s.snaps.get(v.account.id), s.now))
+                verdict=v, rank=i, room=_room_data(v.account, s.snaps.get(v.account.id), s.now))
             for i, v in enumerate(s.verdicts, 1)]
     rows += [row(a, "left_out", [*s.notes.get(a.id, []), *_plan_note(a.id, plans, s.now)],
-                 why=why, room=_room(a, s.snaps.get(a.id), s.now)) for a, why in s.out]
+                 why=why, room=_room_data(a, s.snaps.get(a.id), s.now)) for a, why in s.out]
     rows += [row(a, "same_login", [*_plan_note(a.id, plans, s.now),
                                    *([expiring[a.id]] if a.id in expiring else [])], why=rep)
              for a, rep in s.twins]
@@ -449,7 +489,7 @@ def _status_rows(s: Survey, recs: list[SessionRecord]) -> list[_Row]:
 
 
 def _status_json(s: Survey, rows: list[_Row]) -> dict:
-    """The data of `status --json` (schema 1, documented in docs/usage.md): every key always
+    """The data of `status --json` (schema 2, documented in docs/usage.md): every key always
     present, absent = None, times in epoch seconds, numbers as the data has them."""
     top = _top(s.verdicts) if s.verdicts else None
     plans = store.active_full_resets(s.now)
@@ -472,7 +512,7 @@ def _status_json(s: Survey, rows: list[_Row]) -> dict:
             "room": r.room, "notes": r.notes, "sessions": r.sessions, "sessions_more": r.more}
 
     pref = s.preference
-    return {"schema": 1, "now": s.now, "top": top.account.id if top else None,
+    return {"schema": 2, "now": s.now, "top": top.account.id if top else None,
             "why": versus(top, s.verdicts) or None if top and top.eligible else None,
             "preference": {"account": pref[0], "until": pref[1], "honoured": _honoured(s)}
             if pref else None,
@@ -501,7 +541,7 @@ def cmd_status(a) -> int:
                   f"left out: {r.why}")
         else:
             print(f"  {acct.id:<12} {acct.plan.name:<14} same login as {r.why}")
-        for note in [*r.notes, *_room_line(acct, r.room), *_sessions_block(r.sessions, r.more)]:
+        for note in [*r.notes, *_room_line(acct, r.room, s.now), *_sessions_block(r.sessions, r.more)]:
             print(f"    {note}")
     if top and top.eligible and (why := versus(top, s.verdicts)):
         print(f"why {top.account.id}: {why}")
@@ -547,10 +587,11 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
     session's first redraws carry no usage yet, so the saved snapshot stands in, marked with
     when it was taken; so are numbers older than `refresh_minutes` (an idle session redraws
     them unchanged). A week with a planned full reset still to use says so: `+reset`, or `use
-    reset` once at the first warning level."""
+    reset` once the reset is due (`_reset_due`)."""
     p = acct.plan
     hours = {p.short_name: p.short_hours, p.long_name: p.long_hours} if p else {}
     planned = p and acct.id in store.active_full_resets(now)
+    due = planned and _reset_due(acct, _room(acct, snap, now), _pace(acct.id, now), now)
     known = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > now}
     names = [k for k in hours if k] + [k for k in known if k not in hours and (
         not window_model(k) or known[k].used_pct >= t.short_hot_pct)]
@@ -563,7 +604,7 @@ def _status_line(acct: Account, snap: Snapshot | None, now: float, live: bool,
             continue
         text = f"{label} {w.used_pct:.0f}%"
         mark = planned and k == p.long_name and (
-            " use reset" if w.used_pct >= WARN_LEVELS[0] else " +reset")
+            " use reset" if due else " +reset")
         if w.used_pct >= t.short_hot_pct:
             colour = SPENT if w.used_pct >= t.long_exhausted_pct else TIGHT
             text = f"{colour}{text} ({_clock(w.resets_at, now)}){mark or ''}{PLAIN}"
@@ -810,52 +851,44 @@ def _stop_failure(name: str, raw: object) -> None:
         _request(launcher, Request(seen.id, False, prov.session_pid()))
 
 
-# --- What the hooks say (decision 22): percent crossings, once each per window per session,
-# and a main session's request for a checkpoint, passed on to its worker.
+# --- What the hooks say (decision 22): one warning when the account nears its limit (`_near`,
+# decision 35), once per session per instance of the binding window, and a main session's
+# request for a checkpoint, passed on to its worker.
 
-WARN_LEVELS = (90, 95)   # a plan window crossing one of these is said once per window and session
-
-
-def _crossing(rec: SessionRecord, acct: Account, snap: Snapshot, now: float
-              ) -> tuple[tuple[str, Window, int] | None, dict]:
-    """The highest crossing of WARN_LEVELS in the account's plan windows not yet warned for this
-    session in that window (by its reset), as (window, its numbers, level); and the session's
-    warned levels with every new crossing marked (a higher one covers the lower)."""
-    p, best, warned = acct.plan, None, dict(rec.warned)
-    for k in (p.short_name, p.long_name):
-        w = k and snap.windows.get(k)
-        if not w or w.resets_at <= now:
-            continue
-        level = max((x for x in WARN_LEVELS if w.used_pct >= x), default=0)
-        old = rec.warned.get(k)
-        same = (isinstance(old, list) and len(old) == 2
-                and abs(float(old[0]) - w.resets_at) <= store.SAME_WINDOW_S)
-        if not level or (same and float(old[1]) >= level):
-            continue
-        warned[k] = [w.resets_at, level]
-        if best is None or (level, w.used_pct) > (best[2], best[1].used_pct):
-            best = (k, w, level)
-    return best, warned
+def _said(mark: object, resets_at: float) -> bool:
+    """Whether a session's warned mark for a window (the reset it was warned in; older records
+    hold [reset, level]) is for the window instance resetting at `resets_at`."""
+    if isinstance(mark, list) and mark:
+        mark = mark[0]
+    try:
+        return abs(float(mark) - resets_at) <= store.SAME_WINDOW_S
+    except (TypeError, ValueError):
+        return False
 
 
-def _tell_crossing(session_id: str, acct: Account, t: Tuning, now: float
-                   ) -> tuple[str, Window, int] | None:
-    """A crossing to say for the session, marked as said on its record in the same locked step
-    (a hook and `watch` both ask: whichever comes first says it). Numbers older than twice
-    `refresh_minutes` say nothing new (stale numbers must not move anyone) and start the
-    background probe, as capture does."""
+def _tell_near(session_id: str, acct: Account, t: Tuning, now: float
+               ) -> tuple[rates.Room, float] | None:
+    """The account's room and last-hour spend when it is near its limit and the session has not
+    been told in this instance of the binding window, marked as told on its record in the same
+    locked step (a hook and `watch` both ask: whichever comes first says it). A binding window
+    that resets, or another window binding, may warn again. A binding window with no known reset
+    (unused) says nothing. Numbers older than twice `refresh_minutes` say nothing (stale numbers
+    must not move anyone) and start the background probe, as capture does."""
     snap = store.load(acct.id)
     if snap is None or now - snap.captured_at > 2 * t.refresh_minutes * 60:
         _start_probe(acct, None, now)
         return None
+    near = _near(acct, snap, now)
+    if near is None or near[0].resets_at is None:
+        return None
+    k, at = near[0].binds, near[0].resets_at
     got = []
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
-        best, warned = _crossing(old, acct, snap, now) if old else (None, {})
-        if best is None:
+        if old is None or _said(old.warned.get(k), at):
             return None
-        got.append(best)
-        return replace(old, warned=warned)
+        got.append(near)
+        return replace(old, warned={**old.warned, k: at})
     store.update_session(session_id, change)
     return got[0] if got else None
 
@@ -884,58 +917,64 @@ def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float
 
 
 def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
-    """The best other account by the local snapshots alone, with its windows in a few words and
-    why it goes before the next one."""
+    """The best other account by the local snapshots alone, with its room to its limit in
+    dollars (its windows in a few words while it has no rate) and why it goes before the next
+    one."""
     v, snaps, ranked = _best_usable(acct, accounts, t, now)
     if v is None:
         return "none can take work now"
+    snap = snaps.get(v.account.id)
+    room = _room(v.account, snap, now)
+    state = (f"about ${room.dollars:.2f} left before its limit" if room
+             else _short_state(v.account, snap, now))
     why = versus(v, ranked)
-    return (f"{v.account.id} ({_short_state(v.account, snaps.get(v.account.id), now)})"
-            + (f"; {why}" if why else ""))
+    return f"{v.account.id} ({state})" + (f"; {why}" if why else "")
 
 
-def _warning_text(rec: SessionRecord, acct: Account, crossing: tuple[str, Window, int],
+def _warning_text(rec: SessionRecord, acct: Account, near: tuple[rates.Room, float],
                   accounts: list[Account], t: Tuning, now: float) -> str:
-    """What a crossing says, by the session's role. Provider-neutral."""
-    k, w, _ = crossing
-    p = acct.plan
-    hours = p.short_hours if k == p.short_name else p.long_hours
-    window = _span(hours) if hours else k
-    if _reset_due(acct, now):
-        return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window "
-                f"(resets {_clock(w.resets_at, now)}). The user planned a full reset on "
+    """What a warning says, by the session's role: the dollars left, the minutes they last at the
+    account's last-hour pace, and when and to how much it refills. Provider-neutral."""
+    room, pace = near
+    minutes = 60 * room.dollars / pace
+    facts = (f"has about ${room.dollars:.2f} left before its limit, "
+             + (f"about {minutes:.0f} min" if minutes >= 1 else "under a minute")
+             + f" at its pace in the last hour (${pace:.2f}); it refills at "
+             f"{_clock(room.resets_at, now)} to about ${room.refill:.2f}.")
+    if _reset_due(acct, room, pace, now):
+        return (f"fairshare: account {acct.id} {facts} The user planned a full reset on "
                 f"{acct.id} and uses it once the limit stops work, so this is not a stop: keep "
                 "working on this account until the limit stops you; the user then refills it "
                 "and the stopped sessions continue here. No checkpoint, handoff or pickup.")
     if rec.role == ROLE_WORKER:
-        return (f"fairshare: this account is at {w.used_pct:.0f}% of its {window} window. You are "
-                'a worker: finish your current step, then run fairshare checkpoint "<what is '
-                'done, what is next>". Do not start a big new step; your main session decides '
-                "what happens next.")
+        return (f"fairshare: this account {facts} You are a worker: finish your current step, "
+                'then run fairshare checkpoint "<what is done, what is next>". Do not start a '
+                "big new step; your main session decides what happens next.")
     workers = ", ".join(x.name for x in store.workers(rec.id)) or "none"
     move = ('write a checkpoint (fairshare checkpoint "<where you stand>") and run fairshare '
             "pickup to continue on the best account." if t.warning_move == "pickup" else
             'run fairshare handoff "<what was done, what is next, open decisions, constraints '
             "the user set, what was tried and failed, files touched>\" to continue in a fresh "
             "session on the best account, which reads your note first.")
-    return (f"fairshare: account {acct.id} is at {w.used_pct:.0f}% of its {window} window (resets "
-            f"{_clock(w.resets_at, now)}).{_heaviest(rec, acct.id, now)}"
+    return (f"fairshare: account {acct.id} {facts}{_heaviest(rec, acct.id, now)}"
             " Best other account: "
             f"{_best_other(acct, accounts, t, now)}"
-            ". If what is left of your work is small, carry on. Otherwise, at the next stopping "
-            f"point: {move} Workers you started: "
+            ". If what is left of your work is small, or the account refills soon, carry on. "
+            f"Otherwise, at the next stopping point: {move} Workers you started: "
             f"{workers}; to have them checkpoint: fairshare checkpoint --request all.")
 
 
-def _reset_due(acct: Account, now: float) -> bool:
+def _reset_due(acct: Account, room: rates.Room | None, pace: float, now: float) -> bool:
     """Whether the account's planned full reset is the next thing to happen to it: a plan still
-    to use and a week at the first warning level or above (the bar's `use reset`). Its sessions
-    then work on to the limit: the refill is worth most on a spent week, and moving at 90%
-    would leave the last tenth of it unused (owner, 2026-11-20)."""
-    prov, p, snap = providers.REGISTRY.get(acct.provider), acct.plan, store.load(acct.id)
-    w = snap and p and p.long_name and snap.windows.get(p.long_name)
+    to use and a week near its limit by itself (its own room less than the last hour's spend,
+    as `_near`; no rate for the week: no). Its sessions then work on to the limit: the refill
+    is worth most on a spent week, and moving before it would leave the rest of the week
+    unused (owner, 2026-11-20). A short window near its limit while the week is not warns as
+    usual and keeps the reset for a fuller week."""
+    prov, p = providers.REGISTRY.get(acct.provider), acct.plan
+    week = room.windows.get(p.long_name) if room and p and p.long_name else None
     return bool(prov and prov.full_reset and acct.id in store.active_full_resets(now)
-                and w and w.resets_at > now and w.used_pct >= WARN_LEVELS[0])
+                and week is not None and pace > 0 and week < pace)
 
 
 CHECKPOINT_ASK = ("fairshare: your main session asks for a checkpoint now: finish your current "
@@ -991,9 +1030,9 @@ def _speak(name: str, raw: object) -> str | None:
     """`hook post-tool` and `hook prompt`: what to put in the session's context, as the
     provider's hook answer, or None. Silent inside a subagent. A worker hears its main
     session's new id (once, after a continuation under one) and a pending request; otherwise a
-    new crossing of its account is said for the session's role. Reads only local files, except
-    that the prompt hook looks pending workers up by name and a worker's notice of a new main
-    session looks that session's name up."""
+    warning that its account nears its limit is said for the session's role. Reads only local
+    files, except that the prompt hook looks pending workers up by name and a worker's notice of
+    a new main session looks that session's name up."""
     accounts, tuning, _ = _load()
     if (acct := _session_account(accounts)) is None or acct.plan is None:
         return None
@@ -1015,8 +1054,8 @@ def _speak(name: str, raw: object) -> str | None:
                         _ask_checkpoint(rec.id) and CHECKPOINT_ASK) if x]
     if said:
         return prov.hook_output(name, "\n".join(said))
-    if crossing := _tell_crossing(rec.id, acct, tuning, now):
-        return prov.hook_output(name, _warning_text(rec, acct, crossing, accounts, tuning, now))
+    if near := _tell_near(rec.id, acct, tuning, now):
+        return prov.hook_output(name, _warning_text(rec, acct, near, accounts, tuning, now))
     return None
 
 
@@ -1329,17 +1368,17 @@ def _countdown(text, seconds: int = COUNTDOWN_S) -> bool:
     return _read_key(text, seconds, b"c") != b"c"
 
 
-TIGHT_WEEK_PCT = 90       # a chosen account whose week is this full makes a launch pause
 CLOSE_SCORE = 0.10        # so does a second-best account within this fraction of its score
 
 
 def _worth_pausing(s: Survey, top: Verdict, warned: bool) -> bool:
-    """Whether the choice is worth a pause: the chosen account is tight (week at
-    TIGHT_WEEK_PCT, a hot short window, or a spent model week), the second-best eligible one is
-    close behind, or a `warning:` line was said for this launch."""
+    """Whether the choice is worth a pause: the chosen account is tight (near its limit by
+    `_near`, the test its sessions are warned by; a hot short window; or a spent model week),
+    the second-best eligible one is close behind, or a `warning:` line was said for this
+    launch."""
     p, snap = top.account.plan, s.snaps.get(top.account.id)
     wins = {k: w for k, w in (snap.windows if snap else {}).items() if w.resets_at > s.now}
-    tight = (wins.get(p.long_name) and wins[p.long_name].used_pct >= TIGHT_WEEK_PCT) or (
+    tight = _near(top.account, snap, s.now) or (
         p.short_name in wins and wins[p.short_name].used_pct >= s.tuning.short_hot_pct)
     spent = _spent_models(top.account.id, snap, s.tuning, s.now)
     second = next((v for v in s.verdicts if v.eligible and v is not top), None)
@@ -1403,15 +1442,9 @@ FORKED_PROMPT = ("fairshare forked this session, as asked: it is a copy of sessi
 
 
 def _near_limit(acct_id: str, now: float) -> bool:
-    """Whether the account's snapshot has a plan window, not yet reset, at the first of
-    WARN_LEVELS or above: the level at which its sessions were told to move."""
+    """Whether the account is near its limit (`_near`): what its sessions were warned of."""
     acct = next((a for a in _load()[0] if a.id == acct_id), None)
-    snap = store.load(acct_id)
-    if acct is None or acct.plan is None or snap is None:
-        return False
-    return any(w.resets_at > now and w.used_pct >= WARN_LEVELS[0]
-               for k in (acct.plan.short_name, acct.plan.long_name)
-               if k and (w := snap.windows.get(k)))
+    return acct is not None and _near(acct, store.load(acct_id), now) is not None
 
 
 def _moved_prompt(rec: SessionRecord, new: str) -> str:
@@ -2958,7 +2991,7 @@ def _watched(here: str) -> list[Worker]:
 
 def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tuning,
                  now: float) -> list[str]:
-    """What concerns the session `here` in local state: a new crossing of its account, and per
+    """What concerns the session `here` in local state: a new warning for its account, and per
     worker a checkpoint written, a stop by its limit or a turn end, since watch last said so.
     Said things are marked on the session's record. A checkpoint copied to a worker's new
     session (a pickup) counts as said when the old session's was; a turn end clears the worker's
@@ -2966,8 +2999,8 @@ def _watch_local(here: str, acct: Account | None, accounts: list[Account], t: Tu
     events = []
     mine = _watched(here)
     _measure_still(mine, now)
-    if acct and acct.plan and (c := _tell_crossing(here, acct, t, now)):
-        events.append(_warning_text(store.session(here), acct, c, accounts, t, now))
+    if acct and acct.plan and (near := _tell_near(here, acct, t, now)):
+        events.append(_warning_text(store.session(here), acct, near, accounts, t, now))
     found = []
     for w in mine:
         if not w.session:

@@ -3,8 +3,8 @@
 The log (`store.usage_log`) holds, per changed snapshot, the dollars the account's sessions drew
 since the line before and each window's used % and reset. Within one window instance (one
 reset time) usage only rises, so the dollars between two lines of the same instance bought the
-rise between them. The fit pools those pairs over recent instances. Read-only: shown by
-`status`, decided on by nothing yet."""
+rise between them. The fit pools those pairs over recent instances. The room it gives (to the
+limit, the smaller of the windows) is what `status` shows and what the warnings decide on."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -66,13 +66,37 @@ def fit_plan(lines: list[Line], short: str | None, long: str | None, now: float
     return {k: r for k, r in found.items() if r}
 
 
-def room(rates: dict[str, Rate], windows: dict[str, Window], warn_pct: float, now: float
-         ) -> dict[str, float]:
-    """Dollars left before `warn_pct` in each window that has a rate. A window already reset,
-    or absent from the snapshot (gone at its reset, nothing seen since), counts as unused."""
+def room(rates: dict[str, Rate], windows: dict[str, Window], now: float) -> dict[str, float]:
+    """Dollars left before the limit (100% used) in each window that has a rate, as of `now`. A
+    window already reset by then, or absent from the snapshot (gone at its reset, nothing seen
+    since), counts as unused."""
     out = {}
     for k, r in rates.items():
         w = windows.get(k)
         used = w.used_pct if w and w.resets_at > now else 0.0
-        out[k] = max(0.0, warn_pct - used) * r.per_pct
+        out[k] = max(0.0, 100.0 - used) * r.per_pct
     return out
+
+
+@dataclass(frozen=True)
+class Room:
+    dollars: float              # the smallest room of the windows with a rate: what binds
+    binds: str                  # its window
+    resets_at: float | None     # when that window refills (None: unused already, nothing to wait for)
+    refill: float | None        # the room right after it refills
+    windows: dict[str, float]   # each window's own room
+
+
+def limit(rates: dict[str, Rate], windows: dict[str, Window], now: float) -> Room | None:
+    """The account's room to its limit: the binding window, its reset, and the room right after
+    that reset, every window that has reset by then counted as unused (so a short window's
+    refill is capped by what the long one still allows, and a long window's refill leaves the
+    short one binding). None when no window has a rate."""
+    each = room(rates, windows, now)
+    if not each:
+        return None
+    binds = min(each, key=each.get)
+    w = windows.get(binds)
+    at = w.resets_at if w and w.resets_at > now else None
+    refill = None if at is None else min(room(rates, windows, at).values())
+    return Room(each[binds], binds, at, refill, each)
