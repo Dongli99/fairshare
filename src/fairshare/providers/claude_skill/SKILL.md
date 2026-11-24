@@ -35,6 +35,8 @@ workers. A worker makes no account decisions: it checkpoints when asked.
   running, it wakes by itself when one ends.
 - A worker waiting for an answer (a question or a permission prompt) is stuck until a person
   answers it there; you cannot. Tell the user at once, with the `attach` command the line gives.
+  If you told them, tell them too how it ended when watch says `no longer waits`, so a wait that
+  ended (answered, or timed out and denied) is not chased.
 - `fairshare checkpoint --show <worker name>` prints a worker's note.
 - A worker stopped by its limit: watch says when that limit resets, and Claude Code resumes the
   worker by itself then, with its whole context. If that is soon, let it wait; otherwise

@@ -5,6 +5,7 @@ import io
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from unittest import mock
 
 from fairshare import cli, store
@@ -151,9 +152,62 @@ class Watch(Work):
             self.assertEqual(self.watch("--timeout", "5")[1], line)
             self.assertEqual(self.watch("--timeout", "20")[1], "nothing happened\n")
             listed[0] = claude.LiveSession(sid, "w-1", True)          # answered, working again
+            self.assertEqual(self.watch("--timeout", "5")[1],         # no transcript: plain
+                             "worker w-1 no longer waits (answered, or timed out)\n")
             self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
             listed[0] = claude.LiveSession(sid, "w-1", None, waiting=True)   # a new prompt
             self.assertEqual(self.watch("--timeout", "5")[1], line)
+
+    def decided(self, sid, decision, source, before=0.0, **extra):
+        """A permission decision appended to worker `sid`'s transcript, stamped `before` seconds
+        before the time its current wait was first said."""
+        path = self.tmp / f"{sid}.jsonl"
+        store.update_session(sid, lambda r: cli.replace(r, transcript=str(path)))
+        at = store.session(PARENT).reported[f"waiting:{sid}"] - before
+        stamp = datetime.fromtimestamp(at, timezone.utc).isoformat().replace("+00:00", "Z")
+        with open(path, "a") as f:
+            f.write(json.dumps({"type": "user", "timestamp": stamp, "permissionDecision": {
+                "decision": decision, "source": source, **extra}}) + "\n")
+
+    def test_how_a_wait_ended_is_said_once(self):
+        """When a wait it said clears, watch says once how it ended, from the worker's
+        transcript; a new wait is said again, then its own end."""
+        sid = self.worker()
+        listed = [claude.LiveSession(sid, "w-1", None, waiting=True)]
+        with mock.patch.object(claude, "list_sessions", lambda acct: listed):
+            self.assertIn("is waiting for an answer", self.watch("--timeout", "5")[1])
+            self.decided(sid, "accept", "user_temporary", before=3600)   # an older prompt
+            self.decided(sid, "reject", "config", reasonType="safetyCheck")
+            listed[0] = claude.LiveSession(sid, "w-1", True)
+            self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 no longer waits: "
+                             "nobody answered, so it was denied (the prompt timed out)\n")
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+            listed[0] = claude.LiveSession(sid, "w-1", None, waiting=True)
+            self.assertIn("is waiting for an answer", self.watch("--timeout", "5")[1])
+            self.decided(sid, "accept", "user_temporary")
+            listed[0] = claude.LiveSession(sid, "w-1", True)
+            self.assertEqual(self.watch("--timeout", "5")[1],
+                             "worker w-1 no longer waits: a person allowed it\n")
+
+    def test_a_worker_that_ends_while_waiting(self):
+        sid = self.worker()
+        listed = [claude.LiveSession(sid, "w-1", None, waiting=True)]
+        with mock.patch.object(claude, "list_sessions", lambda acct: listed):
+            self.assertIn("is waiting for an answer", self.watch("--timeout", "5")[1])
+            self.decided(sid, "reject", "user_reject")
+            listed.clear()
+            self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 no longer waits: a "
+                             "person denied it\nworker w-1 ended\n")
+
+    def test_no_wait_end_when_no_wait_was_said(self):
+        sid = self.worker()
+        listed = [claude.LiveSession(sid, "w-1", True)]
+        with mock.patch.object(claude, "list_sessions", lambda acct: listed):
+            self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
+            listed[0] = claude.LiveSession(sid, "w-1", False)
+            self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 went idle\n")
+            listed.clear()
+            self.assertEqual(self.watch("--timeout", "5")[1], "worker w-1 ended\n")
 
     def test_the_listing_reads_waiting(self):
         raw = [{"sessionId": "s-1", "name": "w", "status": "waiting", "kind": "background",

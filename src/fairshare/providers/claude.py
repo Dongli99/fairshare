@@ -537,6 +537,18 @@ T_BANG_INPUT, T_BANG_OUTPUT = "bash-input", ("bash-stdout", "bash-stderr")
 # `promptSource: "typed"`, one typed while the session worked `"queued"`.
 T_META, T_PROMPT_SOURCE, T_SYSTEM_SOURCE = ("isMeta", "isCompactSummary"), "promptSource", "system"
 T_INJECTED = re.compile(r"<[a-z][a-z-]*>")
+# How a permission prompt ended: the user-side record that carries the tool's result has
+# `permissionDecision` {`decision`: "accept" | "reject", `source`, `reasonType`, `reasonCode`, ...}
+# and an ISO `timestamp` ("...Z"). A person's answer has a `source` beginning "user"
+# (`user_temporary` for an allow once, `user_reject` for a deny); a prompt nobody answered was
+# denied by the tool itself after 120 s with `source: "config"`, `reasonType: "safetyCheck"` (its
+# tool result says the prompt timed out or was not shown). Auto mode's classifier decides with no
+# prompt, also `source: "config"` (`reasonType: "classifier"`), and so does a hook's deny
+# (`source: "hook"`): only the safety check's reject is read as a timeout. Seen in transcripts of
+# 2.1.331, 2026-11-24 (planner); internal, undocumented, may change.
+T_TIMESTAMP, T_DECISION = "timestamp", "permissionDecision"
+D_DECISION, D_SOURCE, D_REASON, D_ACCEPT, D_REJECT, D_USER, D_TIMEOUT = (
+    "decision", "source", "reasonType", "accept", "reject", "user", "safetyCheck")
 TAIL_BYTES = 256 * 1024      # the last prompt is looked for in this much of a transcript's end,
 TAIL_WIDER = 8               # then once in this many times as much
 
@@ -634,6 +646,52 @@ def last_prompt(path: Path, skip: tuple[str, ...] = ()) -> str | None:
         if found is not None or whole:
             return found
         size *= TAIL_WIDER
+    return None
+
+
+def _when(stamp: object) -> float | None:
+    """A record's ISO `timestamp` as epoch seconds, else None."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def wait_outcome(path: Path, since: float | None) -> str | None:
+    """How a permission prompt that held a session ended, from the first permission decision in
+    the end of its transcript (TAIL_BYTES) made at or after `since` (epoch seconds: when the wait
+    was seen; nothing decides while a session waits, so the first decision after is the one that
+    ended it, and later ones are its next steps; the latest in the tail when None): "allowed" or
+    "denied" when a person answered, "timed out" when the safety check denied it by itself. None
+    when there is no such decision, it is another kind (auto mode's classifier, a hook), or the
+    file cannot be read. Never raises."""
+    try:
+        lines, _ = _tail(path, TAIL_BYTES)
+    except OSError:
+        return None
+    found = None
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or not isinstance(d := r.get(T_DECISION), dict):
+            continue
+        if since is not None and ((t := _when(r.get(T_TIMESTAMP))) is None or t < since):
+            continue
+        found = d
+        if since is not None:
+            break
+    if found is None:
+        return None
+    source = found.get(D_SOURCE)
+    by_person = isinstance(source, str) and source.startswith(D_USER)
+    if found.get(D_DECISION) == D_ACCEPT:
+        return "allowed" if by_person else None
+    if found.get(D_DECISION) == D_REJECT:
+        return "denied" if by_person else "timed out" if found.get(D_REASON) == D_TIMEOUT else None
     return None
 
 

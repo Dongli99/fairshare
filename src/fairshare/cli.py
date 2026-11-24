@@ -3052,6 +3052,21 @@ def _turn_end_text(tasks: int) -> str:
             f"(it wakes when {'that' if tasks == 1 else 'one'} ends)")
 
 
+WAIT_ENDS = {"allowed": "a person allowed it", "denied": "a person denied it",
+             "timed out": "nobody answered, so it was denied (the prompt timed out)"}
+
+
+def _wait_end_text(name: str, prov, transcript: str | None, since: float) -> str:
+    """What `watch` says when a worker it said was waiting no longer waits: how the wait ended,
+    from the worker's transcript, when the provider can tell. `since` is the `waiting:` mark: the
+    time the wait was first said (an old mark of 1 has none: any decision in the tail counts)."""
+    end = prov.wait_outcome(Path(transcript), None if since == 1 else since) \
+        if transcript else None
+    if end in WAIT_ENDS:
+        return f"worker {name} no longer waits: {WAIT_ENDS[end]}"
+    return f"worker {name} no longer waits (answered, or timed out)"
+
+
 WORKER_GRACE_S = 60.0   # a worker missing from the listing this soon after its start is not
                         # judged ended: a new background session may not be listed yet
 
@@ -3061,7 +3076,8 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
     WORKER_GRACE_S has passed since its start), went idle after it was seen busy, or waits for a
     person's answer (a question or a permission prompt: said once each time it starts waiting,
     with the command that opens it, even after a turn end its hook stamped, as a prompt comes in
-    the middle of a turn), once each; pending joins are retried first. A worker is looked for in the listing of the account its
+    the middle of a turn), once each, and, when such a wait clears or the worker ends while in
+    it, how it ended (`_wait_end_text`); pending joins are retried first. A worker is looked for in the listing of the account its
     session runs on, and only when that listing came. Busy and idle are not read for a worker
     whose turn ends its own hook stamps (`_watch_local` says those): the listing can say busy
     for hours after a turn ended."""
@@ -3072,31 +3088,37 @@ def _watch_live(here: str, accounts: list[Account], now: float) -> list[str]:
     mine = [(w, store.session(w.session))
             for w in (replace(w, session=w.session or joined.get(w.name)) for w in mine)
             if w.session]
-    mine = [(w, r.account if r else w.account, bool(r and r.stopped)) for w, r in mine]
-    live = _listings({x for _, x, _ in mine}, accounts)
+    mine = [(w, r.account if r else w.account, bool(r and r.stopped), r and r.transcript)
+            for w, r in mine]
+    live = _listings({x for _, x, _, _ in mine}, accounts)
     state = {x: {s.id: s for s in ls} for x, ls in live.items() if ls is not None}
-    mine = [(w, x, state[x], stamps) for w, x, stamps in mine if x in state]
+    provs = {a.id: providers.get(a.provider) for a in accounts}
+    mine = [(w, x, state[x], stamps, (provs.get(x) or _provider(), t))
+            for w, x, stamps, t in mine if x in state]
     events, ended_now = [], []
 
     def change(old: SessionRecord | None) -> SessionRecord | None:
         if old is None:
             return None
         seen, said = dict(old.reported), []
-        for w, acct, state, stamps in mine:
+        for w, acct, state, stamps, (prov, transcript) in mine:
             ended, busy, wait = f"ended:{w.session}", f"busy:{w.session}", f"waiting:{w.session}"
             if w.session not in state:
                 if now - w.started < WORKER_GRACE_S:
                     continue
                 ended_now.append(w)
+                if since := seen.pop(wait, None):
+                    said.append(_wait_end_text(w.name, prov, transcript, since))
                 if not seen.get(ended):
                     seen[ended] = 1
                     said.append(f"worker {w.name} ended")
                 continue
             seen.pop(ended, None)
             if not state[w.session].waiting:
-                seen.pop(wait, None)
+                if since := seen.pop(wait, None):
+                    said.append(_wait_end_text(w.name, prov, transcript, since))
             elif not seen.get(wait):
-                seen[wait] = 1
+                seen[wait] = now
                 said.append(f"worker {w.name} is waiting for an answer (a question or a "
                             f"permission prompt) that only a person can give: fairshare run -a "
                             f"{acct} attach {w.session[:8]}")

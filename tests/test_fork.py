@@ -3,6 +3,7 @@ show from a terminal. The fleet of test_handover (accounts a, out; b, ranked fir
 claude lists `$FAKE_LOG/live` with each session's kind and process, and logs a `stop`)."""
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -619,6 +620,52 @@ class LastPrompt(Running):
     def test_unreadable_or_empty(self):
         self.assertIsNone(claude.last_prompt(self.tmp / "missing.jsonl"))
         self.assertIsNone(claude.last_prompt(self.write()))
+
+
+class WaitOutcome(Running):
+    """How a permission prompt ended, from the permission decisions at a transcript's end."""
+    write, user = LastPrompt.write, LastPrompt.__dict__["user"]
+    WAIT = 1_800_000_000.0                                   # when the wait was first said
+
+    def decision(self, decision, source, at=WAIT + 5, **extra):
+        stamp = datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return {"type": "user", "timestamp": stamp, "permissionDecision": {
+                    "decision": decision, "source": source, **extra}}
+
+    def test_each_decision(self):
+        cases = [(("accept", "user_temporary"), "allowed"), (("reject", "user_reject"), "denied"),
+                 (("reject", "config"), "timed out"), (("accept", "config"), None),
+                 (("ask", "user"), None)]
+        for args, want in cases:
+            path = self.write(self.decision(*args, reasonType="safetyCheck"))
+            self.assertEqual(claude.wait_outcome(path, self.WAIT), want, args)
+        for source, reason in (("config", "classifier"), ("hook", "hook")):   # no prompt
+            path = self.write(self.decision("reject", source, reasonType=reason))
+            self.assertIsNone(claude.wait_outcome(path, self.WAIT), source)
+
+    def test_the_first_decision_after_the_wait_ended_it(self):
+        path = self.write(self.decision("reject", "config", reasonType="safetyCheck"),
+                          self.decision("accept", "config", at=self.WAIT + 9,
+                                        reasonType="classifier"))       # its next tool call
+        self.assertEqual(claude.wait_outcome(path, self.WAIT), "timed out")
+
+    def test_a_decision_before_the_wait_is_not_its_end(self):
+        path = self.write(self.decision("accept", "user_temporary", at=self.WAIT - 5))
+        self.assertIsNone(claude.wait_outcome(path, self.WAIT))
+        path = self.write(self.decision("reject", "config", at=self.WAIT - 600,
+                                        reasonType="safetyCheck"))
+        self.assertIsNone(claude.wait_outcome(path, self.WAIT))
+        self.assertEqual(claude.wait_outcome(path, None), "timed out")   # an old mark: any
+
+    def test_a_torn_last_line_and_other_records(self):
+        path = self.write(self.decision("reject", "user_reject"), self.user("go on"))
+        with open(path, "a") as f:
+            f.write('{"type": "user", "permissionDecision": {"decision": "acc')
+        self.assertEqual(claude.wait_outcome(path, self.WAIT), "denied")
+
+    def test_no_transcript_or_no_decision(self):
+        self.assertIsNone(claude.wait_outcome(self.tmp / "missing.jsonl", self.WAIT))
+        self.assertIsNone(claude.wait_outcome(self.write(self.user("a question?")), self.WAIT))
 
 
 if __name__ == "__main__":

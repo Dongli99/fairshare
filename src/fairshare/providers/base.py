@@ -131,6 +131,13 @@ class Provider(Protocol):
         from the file's end only; None when none is found or it cannot be read. Never
         raises."""
 
+    def wait_outcome(self, path: Path, since: float | None) -> str | None:
+        """How a permission prompt that held the session at `path` ended, read from the
+        transcript's end, considering only what happened from `since` (epoch seconds; anything
+        when None): "allowed" or "denied" by a person, "timed out" when nobody answered and the
+        provider denied it. None when unknown (a question, nothing found, unreadable). Never
+        raises."""
+
     def launch(self, account: Account) -> tuple[list[str], dict[str, str]]:
         """The command and the complete environment that start this provider as `account`: the
         provider's clean environment (see dropped_login_vars) plus the account's own variable."""
