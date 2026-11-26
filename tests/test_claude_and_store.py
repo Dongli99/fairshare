@@ -89,9 +89,10 @@ class UsageLog(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.log = Path(d.name) / "usage" / "a.jsonl"
-        recs = [mock.Mock(account="a", costs=[[[100.0, 0.0], [150.0, 1.5], [250.0, 4.0]]]),
-                mock.Mock(account="a", costs=[]),                     # no cost data
-                mock.Mock(account="b", costs=[[[100.0, 0.0], [150.0, 9.0]]])]
+        recs = [mock.Mock(account="a", id="s1", costs=[[[100.0, 0.0]]]),
+                mock.Mock(account="a", id="s2", costs=[]),                     # no cost data
+                mock.Mock(account="b", id="s3", costs=[[[100.0, 0.0], [150.0, 9.0]]])]
+        self.recs = recs
         p = mock.patch.object(store, "sessions", lambda: recs)
         p.start()
         self.addCleanup(p.stop)
@@ -102,10 +103,25 @@ class UsageLog(unittest.TestCase):
     def test_lines_carry_the_windows_and_the_cost_since_the_last(self):
         store.record("a", {"seven_day": Window(40.0, 900.0)}, 120.0)
         store.record("a", {"seven_day": Window(40.0, 900.0)}, 200.0)      # unchanged: no line
+        self.recs[0].costs = [[[100.0, 0.0], [150.0, 1.5], [250.0, 4.0]]]
         store.record("a", {"seven_day": Window(42.0, 900.0)}, 260.0)
         self.assertEqual(self.lines(), [
-            {"t": 120.0, "spent": None, "windows": {"seven_day": [40.0, 900.0]}},
-            {"t": 260.0, "spent": 4.0, "windows": {"seven_day": [42.0, 900.0]}}])
+            {"t": 120.0, "cost": None, "windows": {"seven_day": [40.0, 900.0]}},
+            {"t": 260.0, "cost": 4.0, "windows": {"seven_day": [42.0, 900.0]}}])
+
+    def test_a_cost_point_that_grows_after_a_line_counts_in_the_next(self):
+        """The newest cost point keeps growing in place (COST_POINT_S): what it gains after a
+        line was written belongs to the next line, and nothing is counted twice."""
+        rec = mock.Mock(account="a", id="s1", costs=[[[100.0, 0.0]]])
+        with mock.patch.object(store, "sessions", lambda: [rec]):
+            store.record("a", {"seven_day": Window(40.0, 900.0)}, 120.0)
+            rec.costs = [[[100.0, 0.0], [150.0, 1.0]]]
+            store.record("a", {"seven_day": Window(41.0, 900.0)}, 160.0)      # counts 1.0
+            rec.costs = [[[100.0, 0.0], [150.0, 3.0]]]                        # grew in place
+            store.record("a", {"seven_day": Window(42.0, 900.0)}, 200.0)      # counts 2.0
+            rec.costs = [[[100.0, 0.0], [150.0, 3.5], [460.0, 5.0]]]          # grew, then a point
+            store.record("a", {"seven_day": Window(43.0, 900.0)}, 470.0)      # counts 2.0
+        self.assertEqual([x["cost"] for x in self.lines()], [None, 1.0, 2.0, 2.0])
 
 
 class StaleRedraw(unittest.TestCase):

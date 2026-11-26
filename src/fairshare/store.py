@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -200,20 +201,41 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
 
 def _log_usage(account_id: str, snap: Snapshot, old: Snapshot | None) -> None:
     """Append the new snapshot to the account's usage log (`usage/<id>.jsonl`), with the cost
-    its sessions drew since the one before (`spent`, None for the first): the data for learning
+    its sessions drew since the one before (`cost`, None for the first): the data for learning
     what a percent of each window costs. Cost points last only COST_KEEP_S, so the cost is
-    taken now. Called under the account's lock, so lines stay in order. A failed write loses
-    one line, nothing else."""
+    taken now. A session's newest point keeps growing in place for up to COST_POINT_S, past the
+    line that counted it, so each line keeps every session's newest point (`<id>.heads.json`)
+    and the next line counts what that point gained since, then the points after it. The cost
+    is written as `cost`: the `spent` of lines before this rule missed that growth (most of the
+    cost) and is not read. Called under the account's lock, so lines stay in order. A failed
+    write loses one line, nothing else."""
+    dest = state_dir() / "usage"
+    try:
+        heads = json.loads((dest / f"{account_id}.heads.json").read_text())
+    except (OSError, ValueError):
+        heads = {}
+    mine = [r for r in sessions() if r.account == account_id and r.costs]
     spent = None if old is None else sum(
-        x for r in sessions() if r.account == account_id
-        and (x := spend(r.costs, old.captured_at, snap.captured_at)))
-    line = {"t": snap.captured_at, "spent": spent,
+        _since(r.costs, heads.get(r.id) if isinstance(heads, dict) else None, old.captured_at)
+        for r in mine)
+    line = {"t": snap.captured_at, "cost": spent,
             "windows": {k: [w.used_pct, w.resets_at] for k, w in snap.windows.items()}}
     with contextlib.suppress(OSError):
-        dest = state_dir() / "usage"
         dest.mkdir(parents=True, exist_ok=True)
         with open(dest / f"{account_id}.jsonl", "a") as f:
             f.write(json.dumps(line) + "\n")
+        _write_json(dest, f"{account_id}.heads.json", {r.id: r.costs[-1][-1] for r in mine})
+
+
+def _since(series: list, head: object, since: float) -> float:
+    """The cost `series` drew after the line that saw `head` (its newest point then, [time,
+    cost]): what that point gained in place since, then each rise to a later point. With no
+    head (a session new to the account), the rises to points after `since`."""
+    if not (isinstance(head, list) and len(head) == 2 and all(_num(x) is not None for x in head)):
+        return spend(series, since, math.inf)
+    at, was = head
+    grown = sum(max(0.0, p[1] - was) for seg in series for p in seg if p[0] == at)
+    return grown + spend(series, at, math.inf)
 
 
 FIT_KEEP_S = 3600   # a kept fit is computed again after this long, grown or not
@@ -250,7 +272,8 @@ def usage_fit(account_id: str, fit) -> dict[str, list[float]]:
 def usage_log(account_id: str) -> list[tuple[float, float | None, dict[str, tuple[float, float]]]]:
     """The account's usage log as (time, spent, {window: (used %, reset)}), in log order; []
     when there is none. A line that cannot be read is skipped (a torn last write), and so is a
-    window whose numbers are not numbers."""
+    window whose numbers are not numbers. A line with no `cost` (written before `_log_usage`'s
+    heads, its `spent` too low) reads as cost unknown."""
     try:
         text = (state_dir() / "usage" / f"{account_id}.jsonl").read_text()
     except OSError:
@@ -259,7 +282,7 @@ def usage_log(account_id: str) -> list[tuple[float, float | None, dict[str, tupl
     for raw in text.splitlines():
         try:
             d = json.loads(raw)
-            t, spent, windows = _num(d["t"]), d["spent"], d["windows"]
+            t, spent, windows = _num(d["t"]), d.get("cost"), d["windows"]
         except (ValueError, KeyError, TypeError):
             continue
         if t is None or not isinstance(windows, dict) or (

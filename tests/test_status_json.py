@@ -40,7 +40,7 @@ class StatusJson(Fleet):
         d = self.tmp / "state" / "usage"
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{id}.jsonl").write_text("".join(
-            json.dumps({"t": t, "spent": s, "windows": {k: list(v) for k, v in w.items()}}) + "\n"
+            json.dumps({"t": t, "cost": s, "windows": {k: list(v) for k, v in w.items()}}) + "\n"
             for t, s, w in lines))
 
     def test_stdout_is_one_json_object_and_nothing_else(self):

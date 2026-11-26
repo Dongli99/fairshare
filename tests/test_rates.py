@@ -19,7 +19,7 @@ def write_log(tmp, id, lines):
     d = tmp / "state" / "usage"
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{id}.jsonl").write_text("".join(
-        json.dumps({"t": t, "spent": s, "windows": {k: list(v) for k, v in w.items()}}) + "\n"
+        json.dumps({"t": t, "cost": s, "windows": {k: list(v) for k, v in w.items()}}) + "\n"
         for t, s, w in lines))
 
 
@@ -146,17 +146,25 @@ class Reader(Fleet):
         d = self.tmp / "state" / "usage"
         d.mkdir(parents=True)
         (d / "a.jsonl").write_text("\n".join([
-            json.dumps({"t": 1, "spent": None, "windows": {"five_hour": [5, 100]}}),
+            json.dumps({"t": 1, "cost": None, "windows": {"five_hour": [5, 100]}}),
             "{torn",
-            json.dumps({"t": "x", "spent": 1, "windows": {}}),
-            json.dumps({"t": 2, "spent": "x", "windows": {}}),
+            json.dumps({"t": "x", "cost": 1, "windows": {}}),
+            json.dumps({"t": 2, "cost": "x", "windows": {}}),
             json.dumps([1, 2]),
-            json.dumps({"t": 3, "spent": 0.5, "windows": {"five_hour": [7, 100],
+            json.dumps({"t": 3, "cost": 0.5, "windows": {"five_hour": [7, 100],
                                                           "seven_day": ["x", 1], "w": [1]}}),
         ]) + "\n")
         self.assertEqual(store.usage_log("a"), [(1.0, None, {"five_hour": (5.0, 100.0)}),
                                                (3.0, 0.5, {"five_hour": (7.0, 100.0)})])
         self.assertEqual(store.usage_log("none"), [])
+
+    def test_a_line_from_before_the_heads_reads_as_cost_unknown(self):
+        """Lines written as `spent` missed most of the cost (store._log_usage)."""
+        d = self.tmp / "state" / "usage"
+        d.mkdir(parents=True)
+        (d / "a.jsonl").write_text(json.dumps(
+            {"t": 1, "spent": 0.2, "windows": {"five_hour": [5, 100]}}) + "\n")
+        self.assertEqual(store.usage_log("a"), [(1.0, None, {"five_hour": (5.0, 100.0)})])
 
 
 class Cache(Fleet):
@@ -173,7 +181,7 @@ class Cache(Fleet):
         store.usage_fit("a", fit)
         self.assertEqual(calls, [0, 4])                          # kept beside the log
         with open(self.tmp / "state" / "usage" / "a.jsonl", "a") as f:
-            f.write(json.dumps({"t": NOW, "spent": 0.0, "windows": {}}) + "\n")
+            f.write(json.dumps({"t": NOW, "cost": 0.0, "windows": {}}) + "\n")
         store.usage_fit("a", fit)
         self.assertEqual(calls, [0, 4, 5])                       # the log grew
         (self.tmp / "state" / "usage" / "a.fit.json").write_text('{"size": 1, "fit": {"x": ["y"]}')

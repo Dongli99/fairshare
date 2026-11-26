@@ -1212,6 +1212,12 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     limits weigh differently from list prices moves the rate (accounts on the same plan can fit
     different rates); usage is whole percents, hence the minimum rise; use outside fairshare's
     sessions (the web app) raises the percent with no dollars recorded, which lowers the rate.
+    The dollars of a line are what each session drew after the line before: a session's newest
+    cost point keeps growing in place for up to `COST_POINT_S`, so each line keeps every
+    session's newest point (`usage/<id>.heads.json`) and the next line counts that point's growth
+    since, then the points after it. Until 2026-11-26 a point counted only what it had by the
+    first line after it, which missed most of a busy session's cost (rates 4-8x too low); those
+    lines carry `spent` and are read as cost unknown, newer ones carry `cost`.
     At first nothing decided on it; decision 35 makes the warnings act on it (not the ranking or
     `worker`).
 
