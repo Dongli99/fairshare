@@ -531,7 +531,9 @@ c: ... Workers you started: ...`. The verdict, stay or move, follows the same ra
 `status`, this account included: while it still ranks first (its room expires sooner than the
 others', so it is spent first; a tie counts as first, since moving costs a cold start), or no
 other account can take work, the line says this is not a stop: keep working until the limit
-stops you, with no checkpoint, handoff or pickup. The refill is the room right after the binding window resets: a 5-hour
+stops you, with no checkpoint, handoff or pickup. An account whose room would not last an hour at
+this account's pace is never a place to move to (the cold start would buy minutes of work and a
+second move); when that leaves none, the line says to stay. The refill is the room right after the binding window resets: a 5-hour
 refill is capped by what the week still allows, and a weekly refill leaves the 5-hour window to
 bind. That is the default move, `warning_move = "handoff"`: the fresh session starts lean
 instead of reading the whole context again on another account, and it can read the old

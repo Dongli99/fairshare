@@ -716,7 +716,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       every account as `status` does (local snapshots, planned resets), this one included but
       without `spread`, which divides new sessions and would count this one against its own
       account: while this account can take work and none scores higher, or none other can take
-      work, stay to the limit (no checkpoint, handoff or pickup); otherwise move at the next
+      work, stay to the limit (no checkpoint, handoff or pickup). An account whose room would
+      not last an hour at this account's pace (`_lasts`, `_near`'s test) is no target: a move
+      costs a cold start, so minutes of room buy a second move. Otherwise move at the next
       stopping point (`warning_move`, to the best other account), and a worker finishes its
       step and checkpoints. A planned full reset that is due says stay before any ranking
       (owner, 2026-11-20). The text goes as the event's

@@ -194,6 +194,21 @@ class Speaking(Work):
         self.assertIn("b ranks above this account (score 0.60 vs 0.50), so move: at your next "
                       "stopping point, run fairshare handoff", self.said())
 
+    def test_no_move_to_an_account_that_would_not_last_an_hour(self):
+        rated(self.tmp, "b")
+        self.snap("b", five=(84, 3), seven=(40, 50))             # ranks first, but $1.60 < $2.00
+        self.near()                                              # a cannot take work: 5h 92%
+        said = self.said()
+        self.assertIn("This account can no longer take work (five_hour 92% used, resets in "
+                      "3.0h) and c can (score 1.00), so move", said)
+        self.assertIn("Best account to move to: c (5h 10% · 7d 50%).", said)
+        rated(self.tmp, "c")
+        self.snap("c", five=(84, 3), seven=(50, 50))             # c: $1.60 too
+        store.update_session(SID, lambda r: cli.replace(r, warned={}))
+        self.assertTrue(self.said().endswith(
+            "to about $10.00. No other account that can take work has an hour of room at this "
+            "account's pace" + self.STAY))
+
     def test_worker_warning(self):
         self.worker()
         self.near(five=(10, 3), seven=(99, 50))

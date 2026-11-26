@@ -905,22 +905,33 @@ def _short_state(acct: Account, snap: Snapshot | None, now: float) -> str:
     return " · ".join(parts)
 
 
-def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float
-                 ) -> tuple[Verdict | None, dict[str, Snapshot], list[Verdict]]:
+def _best_usable(acct: Account, accounts: list[Account], t: Tuning, now: float,
+                 pace: float = 0.0) -> tuple[Verdict | None, dict[str, Snapshot], list[Verdict]]:
     """The best other account that can take work, by the local snapshots alone (no sign-in
-    check, no probe), or None; those snapshots; and the other accounts ranked."""
-    others = [a for a in accounts if a.plan is not None and a.id != acct.id]
+    check, no probe), or None; those snapshots; and the other accounts ranked. With a `pace`,
+    only accounts that would last an hour at it (`_lasts`)."""
+    others = [a for a in accounts if a.plan is not None and a.id != acct.id
+              and _lasts(a, pace, now)]
     snaps = {a.id: s for a in others if (s := store.load(a.id))}
     ranked = spread(rank(others, snaps, now, t, extra=_planned(now)),
                     _running(store.sessions(), now), CLOSE_SCORE)
     return next((v for v in ranked if v.eligible), None), snaps, ranked
 
 
-def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float) -> str:
+def _lasts(acct: Account, pace: float, now: float) -> bool:
+    """Whether a running session moved to the account would not land near its limit at once:
+    its room, where it has a rate, lasts an hour at `pace` (`_near`'s test). A move costs a
+    cold start, so a smaller room would buy minutes of work and a second move."""
+    room = _room(acct, store.load(acct.id), now) if pace > 0 else None
+    return room is None or room.dollars >= pace
+
+
+def _best_other(acct: Account, accounts: list[Account], t: Tuning, now: float,
+                pace: float = 0.0) -> str:
     """The best other account by the local snapshots alone, with its room to its limit in
     dollars (its windows in a few words while it has no rate) and why it goes before the next
     one."""
-    v, snaps, ranked = _best_usable(acct, accounts, t, now)
+    v, snaps, ranked = _best_usable(acct, accounts, t, now, pace)
     if v is None:
         return "none can take work now"
     snap = snaps.get(v.account.id)
@@ -948,7 +959,7 @@ def _warning_text(rec: SessionRecord, acct: Account, near: tuple[rates.Room, flo
                 "and the stopped sessions continue here. No checkpoint, handoff or pickup.")
     head = (f"fairshare: {'this account' if rec.role == ROLE_WORKER else f'account {acct.id}'} "
             f"{facts}" + ("" if rec.role == ROLE_WORKER else _heaviest(rec, acct.id, now)))
-    why, above = _standing(acct, accounts, t, now)
+    why, above = _standing(acct, accounts, t, now, pace)
     if above is None:
         return (f"{head} {why}, so this is not a stop: keep working on this account until "
                 "the limit stops you. No checkpoint, handoff or pickup now.")
@@ -963,24 +974,28 @@ def _warning_text(rec: SessionRecord, acct: Account, near: tuple[rates.Room, flo
             "the user set, what was tried and failed, files touched>\" to continue in a fresh "
             "session on the best account, which reads your note first.")
     return (f"{head} {why}, so move: at your next stopping "
-            f"point, {move} Best account to move to: {_best_other(acct, accounts, t, now)}. "
+            f"point, {move} Best account to move to: {_best_other(acct, accounts, t, now, pace)}. "
             f"Workers you started: {workers}; to have them checkpoint: fairshare checkpoint "
             "--request all.")
 
 
-def _standing(acct: Account, accounts: list[Account], t: Tuning, now: float
+def _standing(acct: Account, accounts: list[Account], t: Tuning, now: float, pace: float
               ) -> tuple[str, str | None]:
     """Whether a running session should stay on its account, by the same rank as `status`
     (local snapshots, planned resets) but without `spread`, which divides new sessions and would
     count this one against its own account: why, in words, and the id of an account that can
-    take work and ranks above it, or None to stay. A tie stays: moving costs a cold start."""
+    take work and ranks above it, or None to stay. Moving costs a cold start, so a tie stays,
+    and an account that would not last an hour at this one's `pace` is no place to go
+    (`_lasts`)."""
     planned = [a for a in accounts if a.plan is not None]
     snaps = {a.id: s for a in planned if (s := store.load(a.id))}
     ranked = rank(planned, snaps, now, t, extra=_planned(now))
     me = next((v for v in ranked if v.account.id == acct.id), None)
-    other = next((v for v in ranked if v.eligible and v.account.id != acct.id), None)
+    others = [v for v in ranked if v.eligible and v.account.id != acct.id]
+    other = next((v for v in others if _lasts(v.account, pace, now)), None)
     if other is None:
-        return "No other account can take work now", None
+        return ("No other account can take work now" if not others else "No other account "
+                "that can take work has an hour of room at this account's pace"), None
     o = other.account.id
     if me is None or not me.eligible:
         return (f"This account can no longer take work ({me.reason if me else 'no plan'}) and "
