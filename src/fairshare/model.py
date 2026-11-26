@@ -235,7 +235,7 @@ class Snapshot:
     windows: dict[str, Window] = field(default_factory=dict)
 
 
-WARNING_MOVES = ("handoff", "pickup")   # `[policy] warning_move`
+RETIRED_POLICY = ("warning_move", "launch_pause")   # `[policy]` keys no longer used: ignored
 
 
 @dataclass(frozen=True)
@@ -245,11 +245,8 @@ class Tuning:
     grace_hours: float = 1.0          # a hot account resetting this soon is still usable
     min_hours: float = 1.0            # floor on time-to-reset, so a near reset stays finite
     refresh_minutes: float = 5.0      # usage this old is asked for again (the usage probe)
-    launch_pause: float = 3.0         # seconds a launch with a close choice waits; 0: never
     resume_wait_minutes: float | None = None  # None: a session stopped by its limit waits for
                                               # the reset; N: moved when that is over N min away
-    warning_move: str = "handoff"     # what the near-limit warning tells the agent to run:
-                                      # "handoff" (a fresh session) or "pickup" (the same one)
 
 
 def _plan_data(name: str) -> dict:
@@ -362,19 +359,14 @@ def load_accounts(path: Path) -> tuple[list[Account], Tuning, Path]:
     policy, valid = d.get("policy", {}), ", ".join(Tuning.__dataclass_fields__)
     if not isinstance(policy, dict):
         raise ConfigError("[policy] must be a table")
+    policy = {k: v for k, v in policy.items() if k not in RETIRED_POLICY}
     for k, v in policy.items():
         if k not in Tuning.__dataclass_fields__:
             raise ConfigError(f"[policy] unknown key {k!r}; valid keys: {valid}")
-        if k == "warning_move":
-            if v not in WARNING_MOVES:
-                raise ConfigError(f"[policy] warning_move must be "
-                                  f"{' or '.join(repr(m) for m in WARNING_MOVES)}")
-        elif isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
             raise ConfigError(f"[policy] {k} must be a number (not nan or inf)")
     if policy.get("refresh_minutes", 1) < 1:
         raise ConfigError("[policy] refresh_minutes must be at least 1")
-    if policy.get("launch_pause", 0) < 0:
-        raise ConfigError("[policy] launch_pause must be 0 (off) or more")
     if policy.get("resume_wait_minutes", 0) < 0:
         raise ConfigError("[policy] resume_wait_minutes must be 0 (always move) or more")
     return accounts, Tuning(**policy), hub

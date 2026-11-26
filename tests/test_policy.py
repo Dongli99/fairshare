@@ -210,39 +210,17 @@ class Spread(unittest.TestCase):
         self.assertEqual(self.ids(snaps, {"a": 4}), ["a", "b"])
 
 
-class PlannedReset(unittest.TestCase):
-    """A full reset the user plans this week: its refill counts as room in the week."""
-
-    def test_the_planned_refill_counts_as_room_left(self):
-        snaps = {"a": snap((10, 3), (50, 80)), "b": snap((10, 3), (20, 80))}
-        self.assertEqual(order([acct("a"), acct("b")], snaps), ["b", "a"])
-        v = rank([acct("a"), acct("b")], snaps, NOW, extra={"a": 100.0})
-        self.assertEqual([x.account.id for x in v], ["a", "b"])
-        self.assertAlmostEqual(v[0].score, 150 / 80)
-        self.assertIn("+100% planned (50% left until it is used)", v[0].reason)
-
-    def test_a_spent_week_stays_spent_until_the_refill_shows(self):
-        snaps = {"a": snap((10, 3), (100, 80)), "b": snap((10, 3), (90, 80))}
-        v = rank([acct("a"), acct("b")], snaps, NOW, extra={"a": 100.0})
-        self.assertEqual([(x.account.id, x.eligible) for x in v], [("b", True), ("a", False)])
-
-    def test_no_plan_ranks_as_before(self):
-        snaps = {"a": snap((10, 3), (50, 80))}
-        self.assertEqual(rank([acct("a")], snaps, NOW, extra={}),
-                         rank([acct("a")], snaps, NOW))
-
-
 class Versus(unittest.TestCase):
     """Why the first account goes before the next: the rule and both reasons, since percentages
-    alone point the other way when the room expires sooner or a refill is planned."""
+    alone point the other way when the room expires sooner."""
 
     def test_the_rule_and_both_reasons(self):
-        snaps = {"a": snap((10, 3), (74, 107)), "b": snap((10, 3), (43, 137))}
-        v = rank([acct("a"), acct("b")], snaps, NOW, extra={"a": 100.0})
+        snaps = {"a": snap((10, 3), (40, 50)), "b": snap((10, 3), (43, 137))}
+        v = rank([acct("a"), acct("b")], snaps, NOW)
         self.assertEqual(versus(v[0], v), (
-            "a before b (score 1.18 vs 0.42: room left per hour until it resets, so room that "
-            "would expire unused is spent first); a: seven_day 74% used, resets in 107h, +100% "
-            "planned (26% left until it is used); b: seven_day 43% used, resets in 137h"))
+            "a before b (score 1.20 vs 0.42: room left per hour until it resets, so room that "
+            "would expire unused is spent first); a: seven_day 40% used, resets in 50h; "
+            "b: seven_day 43% used, resets in 137h"))
 
     def test_a_lower_score_put_first_says_why(self):
         snaps = {"a": snap((10, 3), (40, 72)), "b": snap((10, 3), (42, 72))}

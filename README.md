@@ -69,13 +69,13 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
   to Claude Code unchanged; `fairshare run -a ID` starts that account instead.
 - `fairshare status` lists the accounts, best first, with their usage and live sessions;
   `--json` prints the same as one JSON object for scripts.
-- Near a limit (under an hour left at the account's pace in the last hour), fairshare tells the
-  agent in the session how many dollars are left, when the account refills, and the best account
-  now. A skill fairshare installs in the hub teaches it to run `fairshare handoff`
-  with a note at its next stopping point, unless little work is left: a fresh session continues
-  on that account before the limit, reading the note first. (`warning_move = "pickup"` moves the
-  same session instead, with its whole context.) It is the agent's call, so it usually happens,
-  not always.
+- A session's account is either in the *continue* stage, where fairshare says nothing to the
+  agent, or in the *handoff* stage: about a tenth of a Pro 5-hour window left. Then fairshare
+  tells the main session, once, to write its checkpoint and run `fairshare handoff`: its workers
+  on that account move, and a fresh session continues on the first other account that can take
+  the work, reading the note first. When none can, it says to write a checkpoint and keep
+  working: the limit stops the session and Claude Code resumes it at the reset. A skill
+  fairshare installs in the hub teaches the agent this. Workers hear nothing about usage.
 - When an account hits its limit mid-session, fairshare checks it really is out, then leaves
   the session for Claude Code to resume by itself at the reset, with its whole context. A line
   and the status bar say which limit, when it resets, and the best account that can take work;
@@ -85,13 +85,9 @@ transcripts, memory, settings, CLAUDE.md and skills. Before you run it, know tha
   session from a written note, and `! fairshare` starts a fresh session with nothing carried
   over (a *switch*).
 - From a terminal, `fairshare pickup` lists your recent sessions and continues the one you pick,
-  the same session under its own id; `fairshare fork` continues a copy instead, and the original
-  goes on.
-- A *worker* is a background session the main session starts for big work; near a limit, the
-  main session decides what its workers do.
-- `fairshare full-reset ID` plans a full reset claude.ai granted that account for this week:
-  it ranks with twice its week's room until the reset is used, and the status bar says when to
-  use it. fairshare cannot see which resets you hold, so you plan them.
+  the same session under its own id.
+- A *worker* is a background session the main session starts for big work; the main session
+  moves it (`fairshare pickup`) when fairshare names its account's handoff stage.
 - `fairshare doctor` checks the setup; `fairshare doctor --fix` repairs what it can.
   `fairshare -v` prints the installed version.
 
@@ -116,8 +112,9 @@ used. Capacity is the plan's size (Pro = 1).
   running.
 - An account whose week or short window is spent ranks below every usable account, however soon
   it resets: it cannot take work until then.
-- A planned full reset (`fairshare full-reset`) counts as 100% more weekly room until fairshare
-  sees it used or the week resets.
+
+The ranking picks where a session starts. Where a running session moves at its handoff stage is
+the first other account in that ranking with room to last until its own reset (`policy.can_take`).
 
 Usage comes from Claude Code's own local `/usage` command, asked for every account at each
 launch (no model call, nothing spent), and from its status line during a session. The rule is

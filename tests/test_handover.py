@@ -20,15 +20,14 @@ from pathlib import Path
 from unittest import mock
 
 from fairshare import cli, session, store
-from fairshare.model import (EFFORT_NONE, ROLE_WORKER, Request, SessionRecord, SessionSeen,
-                             Snapshot, Window, Worker)
+from fairshare.model import (EFFORT_NONE, Request, SessionRecord, SessionSeen, Snapshot,
+                             Window, Worker)
 from fairshare.providers import claude
 
 from test_honest import H, NOW, Fleet
 from test_hub import write
 import test_pickup
 from test_pickup import SID, TRANSCRIPT, Stranded
-from test_rates import rated, spending
 from test_session import WAIT
 
 WRAPPER = """#!/bin/sh
@@ -106,7 +105,6 @@ MOVED = ("fairshare moved this session from account a to account {new} because {
          "where you left off.")
 LIMIT = "a hit its usage limit"
 ASKED = "a move was asked for"
-NEAR = "a is near its usage limit"
 
 
 class Handover(Stranded):
@@ -235,11 +233,9 @@ class LauncherPickup(Handover):
 
     def test_automatic_and_manual_resume_the_same_id_with_model_and_effort(self):
         self.policy("resume_wait_minutes = 30")                     # opted in; a is out for 3h
-        rated(self.tmp, "a")
-        for manual, why in ((False, LIMIT), (True, NEAR)):          # manual: a's 5h at 100%
+        for manual, why in ((False, LIMIT), (True, ASKED)):         # manual: a's 5h at 100%
             with self.subTest(manual=manual):
                 self.record(model="claude-opus-5-5", effort="high", stranded=not manual)
-                spending(SID, "a", 1.0)                             # no room, $1.00 this hour
                 code, err = self.launches("run", "-a", "a", requests=[Request(SID, manual, 4321)])
                 self.assertEqual(code, 0, err)
                 args, acct = self.started_args()
@@ -316,20 +312,6 @@ class CommandPickup(Handover):
         self.assertEqual(cmd[1:6], ["--model", "claude-opus-5-5", "--effort", "max", "--resume"])
         self.assertEqual(store.session(SID).account, "a")     # until its first capture
 
-    def test_foreground_fork_of_a_running_session_continues_a_copy(self):
-        self.record(stranded=None, model="claude-opus-5-5", effort="high")
-        (self.log / "live").write_text(f"{SID}\n")                   # listed: still running
-        code, _, err = self.go("fork", SID[:8], tty=True)
-        self.assertEqual(code, 0, err)
-        cmd, env = self.launched.call_args.args[:2]
-        self.assertEqual(cmd[5:10], ["--name", "fork-0a1b2c3d", "--resume", SID,
-                                     "--fork-session"])
-        self.assertEqual(cmd[-1], cli.FORKED_PROMPT.format(old=SID, new="b"))
-        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}:copy")
-        rec = store.session(SID)                                 # left as it is
-        self.assertEqual((rec.account, rec.stranded_at, rec.moved_to), ("a", None, None))
-        self.assertFalse((self.log / "stops").exists())          # never stopped
-
     def test_foreground_of_a_session_stopped_by_hand_resumes_in_place(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
         code, _, err = self.go("pickup", SID[:8], tty=True)        # its account lists it not
@@ -350,7 +332,7 @@ class CommandPickup(Handover):
         self.assertNotIn("may still be running", err)
         self.assertEqual([(r.id, r.account) for r in store.sessions()], [(SID, "b")])
 
-    def test_without_its_accounts_list_pickup_refuses_and_fork_copies(self):
+    def test_without_its_accounts_list_pickup_refuses(self):
         self.record(stranded=None, model="claude-opus-5-5", effort="high")
         with mock.patch.object(claude, "list_sessions", lambda acct: None):
             code, _, err = self.go("pickup", SID[:8], tty=True)
@@ -358,12 +340,7 @@ class CommandPickup(Handover):
             self.launched.assert_not_called()
             self.assertIn(f"{SID[:8]} may still be running (its account's list of running "
                           "sessions cannot be had); not picked up. If it is yours, stop it first "
-                          f"(fairshare run -a a stop {SID}), then pick it up; or `fairshare fork "
-                          f"{SID[:8]}` continues a copy and leaves it running", err)
-            code, _, err = self.go("fork", SID[:8], tty=True)
-        self.assertEqual(code, 0, err)
-        self.assertEqual(self.launched.call_args.args[0][7:10], ["--resume", SID,
-                                                                 "--fork-session"])
+                          f"(fairshare run -a a stop {SID}), then pick it up", err)
 
     def test_foreground_of_a_stranded_session_resumes_in_place(self):
         self.record(model="claude-opus-5-5", effort="high")
@@ -386,26 +363,6 @@ class CommandPickup(Handover):
         self.assertEqual(Path((self.log / "cwd-b").read_text().strip()), self.work.resolve())
         self.assertEqual([(r.id, r.account, r.stranded_at) for r in store.sessions()],
                          [(SID, "b", None)])
-
-    def test_background_fork_of_a_running_session_has_a_copied_record(self):
-        self.record(stranded=None, model="claude-opus-5-5", effort="high")
-        (self.log / "live").write_text(f"{SID}\n")                   # listed: still running
-        store.update_session(SID, lambda old: SessionRecord(
-            **{**vars(old), "role": ROLE_WORKER, "parent": "p-1"}))
-        code, out, err = self.go("fork", SID, "--bg")
-        self.assertEqual(code, 0, err)
-        args = self.bg_args("b")
-        self.assertEqual(args[:6], ["--bg", "--name", "fork-0a1b2c3d", "--resume", SID,
-                                    "--fork-session"])
-        self.assertEqual(args[-1], cli.FORKED_PROMPT.format(old=SID, new="b"))
-        self.assertIn(f"forking {SID} on b", err)
-        new = "s-fork-0a1b2c3d"
-        self.assertIn(f"continued as session {new} on b", out)
-        old, copy = store.session(SID), store.session(new)
-        self.assertEqual((old.account, old.role), ("a", ROLE_WORKER))           # left as it was
-        self.assertEqual((copy.account, copy.role, copy.parent, copy.model, copy.effort,
-                          copy.cwd), ("b", ROLE_WORKER, "p-1", "claude-opus-5-5", "high",
-                                      str(self.work)))
 
     def test_a_second_pickup_of_the_same_session_links_the_new_copy_never_the_earlier(self):
         self.record(model="claude-opus-5-5", effort="high")
@@ -483,7 +440,7 @@ class Handoff(Handover):
         self.assertEqual(code, 0, err)
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
         self.assertEqual(store.take_request(launcher.pid),
-                         Request(SID, True, 4321, "handoff", "opus", name="work-h2"))
+                         Request(SID, True, 4321, "handoff", "opus", account="b", name="work-h2"))
         self.assertTrue(self.note().endswith("\nDone A; next B.\n"))
 
     def test_with_a_note_and_no_launcher_a_fresh_background_session(self):
@@ -600,24 +557,6 @@ class Handoff(Handover):
         self.assertEqual(code, 0, err)
         args, _ = self.started_args()
         self.assertEqual(args[:2], ["--resume", SID])
-
-    def test_a_background_fork_of_a_running_session_takes_the_next_fork_number(self):
-        self.record(stranded=None)
-        (self.log / "live").write_text(f"{SID} fairshare-6a\n")    # still running: its name is held
-        code, out, err = self.go("fork", SID, "--bg")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "fairshare-6a-f2", "--resume",
-                                                 SID, "--fork-session"])
-        self.assertIn("continued as session s-fairshare-6a-f2 on b", out)
-
-    def test_a_foreground_fork_of_a_running_session_takes_the_next_fork_number(self):
-        self.record(stranded=None)
-        (self.log / "live").write_text(f"{SID} fairshare-6a\nother fairshare-6a-f2\n")
-        code, _, err = self.go("fork", SID[:8], tty=True)
-        self.assertEqual(code, 0, err)
-        cmd = self.launched.call_args.args[0]
-        self.assertEqual(cmd[cmd.index("--name") + 1], "fairshare-6a-f3")   # -f2 still runs
-        self.assertIn("--fork-session", cmd)
 
     def test_the_launcher_has_the_note_written_on_the_sessions_own_account(self):
         self.record(model="claude-opus-5-5", effort="high", stranded=None)
@@ -769,7 +708,6 @@ class DefaultModel(Handover):
         self.assertEqual(self.args_of("c"), [])                      # no --model
 
     def test_when_no_account_has_it_the_ranking_stands_without_a_question(self):
-        self.policy("launch_pause = 0")
         self.opus_spent("b", "c")
         for tty in (False, True):
             with self.subTest(tty=tty):
@@ -878,9 +816,8 @@ class Skill(unittest.TestCase):
     def test_the_skill_says_so_and_never_mentions_carrying_over(self):
         text = claude.skill(Path("/x"))[1]
         for words in ('fairshare worker --name <name> --model <model> --effort <level> "<prompt>"',
-                      "Always pass `--name`", "the next `-hN`",
-                      "--effort none", "cheaper model", "strongest model",
-                      "run `fairshare <args>` exactly as given", "write the note yourself",
+                      "`--name`: the task in a few words", "--effort none", "a cheaper",
+                      "the strongest", "run `fairshare <args>` as given", "write the note yourself",
                       'fairshare handoff "<note>"', "`! fairshare ...`"):
             self.assertIn(words, text)
         self.assertNotRegex(text.lower(), r"carr(y|ies|ied)\s+(\w+\s+)?over|keeps? (its|the) "
@@ -934,8 +871,7 @@ class NoteWait(unittest.TestCase):
 
 class MovedPrompt(Fleet):
     """The resumed session's first prompt names a move only when the account changed, and why:
-    a limit, the account near its limit (`cli._near`: a move the warning asked for), or a move
-    asked for."""
+    a limit, or a move asked for."""
     def setUp(self):
         super().setUp()
         self.add("a")
@@ -943,32 +879,6 @@ class MovedPrompt(Fleet):
 
     def test_another_account_is_a_move(self):
         rec = SessionRecord(SID, "a", "/w", None, NOW)
-        self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
-
-    def test_under_an_hour_to_the_limit_is_near_it(self):
-        """The warning's test (`_near`): a's rates are $0.10 a point of 5h, $1.00 of its week."""
-        rated(self.tmp, "a")
-        rec = SessionRecord(SID, "a", "/w", None, NOW)
-        for five, seven, spent, why in (((92, 1), (10, 50), 2.0, NEAR),    # 5h $0.80 left
-                                        ((10, 1), (99, 50), 2.0, NEAR),    # week $1.00
-                                        ((50, 1), (10, 50), 2.0, ASKED),   # $5.00: 2.5 h
-                                        ((99, 1), (99, 50), 0.0, ASKED)):  # nothing spent
-            with self.subTest(five=five, seven=seven, spent=spent):
-                self.snap("a", five=five, seven=seven)
-                spending(SID, "a", spent)
-                self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=why))
-
-    def test_no_rate_is_not_near(self):
-        rec = SessionRecord(SID, "a", "/w", None, NOW)
-        self.snap("a", five=(100, 1), seven=(99, 50))
-        spending(SID, "a", 2.0)
-        self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
-
-    def test_a_window_reset_since_or_a_model_week_is_not_near(self):
-        rec = SessionRecord(SID, "a", "/w", None, NOW)
-        store.save("a", Snapshot(NOW, {"five_hour": Window(97, NOW - 60),
-                                       "seven_day": Window(20, NOW + 50 * H),
-                                       "seven_day:Opus": Window(99, NOW + 30 * H)}))
         self.assertEqual(cli._moved_prompt(rec, "b"), MOVED.format(new="b", why=ASKED))
 
     def test_a_limit_comes_first(self):

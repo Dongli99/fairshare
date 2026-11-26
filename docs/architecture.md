@@ -25,12 +25,13 @@ launcher (run_child) ◄── SIGUSR1 ──► confirm (survey) ──► hold
                                     └──► stop child ──► [headless note turn] ──► fresh (handoff)
                                     └──► stop child ──► fresh, no prompt (switch)
 PostToolUse / UserPromptSubmit ──► hook post-tool | prompt ──► snapshot + session record (local)
-                                   ──► usage log ──► rates.limit + the hour's spend ──► _near
-                                   ──► additionalContext: near-limit warning or checkpoint request
+                                   ──► main: policy.handoff_due (own account, workers' accounts)
+                                       ──► target: policy.can_take ──► the handoff stage line
+                                   ──► worker: its main session's checkpoint request, new id
 Stop ──► hook stop ──► a worker's record: stopped [time, background tasks] ──► watch says it
 worker ──► survey (model filter) ──► trust (copy) ──► claude --bg --name --model --effort ──► join
-status ──► survey ──► rows + each account's live sessions (spend in the last hour, share)
-       └──► store.usage_log ──► rates.fit_plan ($ per point) ──► rates.limit ──► room line
+status ──► survey ──► rows (stage per account) + each account's live sessions
+handoff ──► survey ──► target ──► its workers on its account: pickup ──► launcher (fresh session)
 watch (background command) ──► snapshot, records, checkpoints/ (5 s), agents (15 s) ──► exit
 
 setup ──► join ──► hub.check, browser (ask), providers/<p>.login_command, account_status
@@ -46,7 +47,6 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 | Plan | window names and lengths, relative capacity | `plans/*.toml` (data only) |
 | Policy | the routing rule | `policy.py` (pure function) |
 | Storage | where snapshots live | `store.py` |
-| Rates | what a percent of a window costs in dollars, and the room to the limit it gives | `rates.py` (pure; read by `status`, the warning and the other near-limit tests, decision 35) |
 | Session | how a child session is started and supervised | `session.py` (provider-neutral) |
 | Hub | where the shared items live and how each account's folder links to them | `hub.py` (provider-neutral; the share list is the adapter's `SHARED`) |
 | Browser | where an account's sign-in links open | `browser.py` (provider-neutral; `BROWSER` names one launcher per account) |
@@ -335,7 +335,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     - the exit code is the child's, or 128 plus the signal number when it died of a signal;
       a command that cannot start gives 127 (not found) or 126 with one message.
 
-    **The launch pause.** `fairshare` and `fairshare run` (not `run
+    **The launch pause** (removed by decision 36: a launch starts at once). `fairshare` and `fairshare run` (not `run
     -a`, not a pickup or handoff, not the refusal flow's `[s]tart`; a switch does, decision 23),
     on a terminal only, pause before
     starting when the choice is worth making: the chosen account is tight (near its limit by
@@ -705,7 +705,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       joined yet is joined first, or named as not asked);
       `--show SESSION|NAME` prints a note. A handoff's fresh session reads the note first
       (decision 23); a pickup resumes the session itself, which knows its own state.
-    - **Warnings** (`hook post-tool`, `hook prompt`): one warning when the account nears its
+    - **Warnings** (replaced by decision 36's handoff stage; kept as the record) (`hook post-tool`, `hook prompt`): one warning when the account nears its
       limit (decision 35), once per session per instance of the binding window (its key and
       reset, recorded on the session record as `warned`; older records' `[reset, level]` read
       as that reset); a new instance, or the other window coming to bind, warns again. Nothing
@@ -1011,7 +1011,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     both; fairshare reads neither), so on such an account Enter may write a value the policy
     then overrides.
 
-28. **A warning moves by handoff, by default** (amends decisions 19 and 23; `warning_move`).
+28. **A warning moves by handoff, by default** (amends decisions 19 and 23; `warning_move`;
+    superseded by decision 36: no warning, no `warning_move`; a handoff is still the move).
     Decision 19 chose pickup because a note cannot be relied on under load, and a pickup keeps
     the whole context. At a *warning* (then 90% / 95%; since decision 35, under an hour to the limit) there is time to write a note, and a pickup to
     another account reads the whole context again, uncached; a long context is then paid for on
@@ -1026,7 +1027,9 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     warning (finish the step and checkpoint; its main session decides). The skill's section
     "When fairshare warns you" describes both moves.
 
-29. **A planned full reset counts as room** (`fairshare full-reset`). claude.ai may grant an
+29. **A planned full reset counts as room** (`fairshare full-reset`; removed by decision 36,
+    with `extra`, the `+reset` marks and the warning branch; `full-reset.json` is left on disk,
+    unread). claude.ai may grant an
     account a full reset (about one a month, with a use-by date); using it refills the short
     and the weekly window now and keeps the weekly reset time. Claude Code learns of held
     resets from an internal claude.ai service, not from `/usage` nor the status line input;
@@ -1061,7 +1064,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     folders sharing a login applies to that folder's id only, and the survey ranks the
     freshest of the two.
 
-30. **A choice of account says why** (`policy.versus`). An agent that saw `74%` on the chosen
+30. **A choice of account says why** (`policy.versus`; since decision 36 only `status` says
+    it: commands agents run print the account chosen and what happened). An agent that saw `74%` on the chosen
     account and `43%` on the next overrode the choice: the score spends first the room that
     expires soonest and counts a planned refill, and neither shows in percentages. Wherever an
     agent or a person sees a choice (`status`'s last line, the warning's best other account,
@@ -1121,7 +1125,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       Without `-a` it is refused with one line naming `-a`: a subcommand is about one account's
       folder, and the best account's answer would look right and be about an arbitrary one.
 
-32. **`pickup` never copies; `fork` copies** (2026-11-21; replaces decision 19's
+32. **`pickup` never copies; `fork` copies** (`fork` removed by decision 36: no use; pickup's
+    rules stand) (2026-11-21; replaces decision 19's
     `--fork-session` for a session that may still run, and its `_may_run`). A pickup continued a
     copy under a new id whenever the session might still run, said in one line. An agent picked
     up its own stopped worker, got a copy, and its per-session tooling (which tracks files by
@@ -1195,7 +1200,10 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       asks again; end of input or Ctrl-C does nothing (exit 1); then exactly the SESSION
       form's path. No terminal: the list on stderr and exit 2.
 
-33. **Room in dollars, measured first** (2026-11-23; stage 1 of "one limit, in dollars"). Agents
+33. **Room in dollars, measured first** (2026-11-23; since decision 36 only the recording
+    stands: `store._log_usage`, its heads file and the session cost series; `rates.py`, the fit
+    and every dollar in output are gone; `rates.py` at 0845726 holds the fit for a later
+    offline study). Agents
     should act on dollars left, not on a percentage whose worth depends on the plan. `rates.py`
     (pure) fits, per account and plan window, the dollars per percentage point from
     `usage/<id>.jsonl` (`store.usage_log`, malformed lines skipped): within one window instance
@@ -1234,7 +1242,7 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     heaviest first), and `sessions_more` is its `+N more`. Schema 2 (decision 35): `room` counts
     to the limit, `warn_pct` is gone, `refills_at` and `refill` are new.
 
-35. **One warning, in dollars to the limit** (2026-11-24; replaces the 90% and 95% crossings
+35. **One warning, in dollars to the limit** (superseded by decision 36) (2026-11-24; replaces the 90% and 95% crossings
     per window, `WARN_LEVELS`, and `TIGHT_WEEK_PCT`). An agent read status's `room ~$X before the
     90% warning` as "$X left" and left an account the ranking had chosen, with most of a 5-hour
     window's worth still usable: two thresholds in one number invite that. Two percent levels
@@ -1266,6 +1274,49 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
     of 30 fresh processes, 150 session records). `status` fits afresh: it shows the fit's
     details. Limits: a burst (a big step after a quiet hour) warns late, since the
     pace is the last hour's; a steady pace warns about an hour ahead.
+
+36. **Two stages** (2026-11-26; supersedes decision 35, the warning use of decision 33, and
+    decisions 28 and 29; removes `fork` and the launch pause). Every pain agents reported came
+    from an agent weighing numbers (dollars, scores, pace) or from those numbers being wrong; the
+    dollar fit ran six days on a bug nobody saw. So an agent now hears one thing and does one
+    thing. **Start: unchanged.** The ranking picks the account for a launch, the aliases,
+    `worker`, `handoff` and `pickup`. **Two stages per account, in `policy.py`**
+    (`room`, `handoff_due`, `can_take`, pure): room is counted in points of a Pro short window
+    on both windows (the week by the plan's `per_short`, 13% of a week per short window,
+    measured on two accounts' logs, window percents only); an account is in the *handoff* stage
+    at `HANDOFF_ROOM` (10) or less, unless a reset within `RESET_SOON_S` (30 min) frees the room
+    (then the limit waits, as before). Otherwise it is in *continue*. **What is said.** Only a
+    main session hears, and only at the handoff stage (`cli._stage_lines`, from the post-tool
+    and prompt hooks and `watch`, each line once, marked in the record's `warned`: [reset of the
+    binding window, account]): hand off to the target; or, with no target, write a checkpoint
+    and keep working into the limit (Claude Code resumes at the reset: decision 25's path,
+    `resume_wait_minutes` unchanged); and when the stage ends while it is still on the account,
+    that it is over (every line that sends an agent to act has an end; when it ends only because
+    the binding window now lifts within `RESET_SOON_S`, the line says when the limit lifts
+    instead, since the room is as small as before). For a worker of its
+    own on another account in that stage, with a target: the `pickup` that moves it; with none,
+    nothing; and its end. A worker never hears about usage (its main session manages it); a
+    checkpoint request its main session sends still reaches it. **The target**
+    (`cli._targets`, one rule for `handoff`, `pickup`, the hook and the bar): the first account
+    of the start ranking that is not the session's own (nor the login it shares), has the
+    session's model and passes `policy.can_take` (room to last until its binding window lifts:
+    30 with an hour or more to go, 20 with 45 minutes, 10 with 30, a line between, capped at 30;
+    and 30 once it has lifted, so the session is not in the handoff stage again at once). The
+    hooks rank from local snapshots (`_local_survey`), the commands from a survey. **`handoff`
+    does the moving.** It finds the target (with none it says the stage line's words and
+    changes nothing), picks up the session's workers that its account lists running there onto
+    the target (stop, resume in place, `_move_workers`), then hands off as before; workers on
+    other accounts follow the new session through `store.link_session`, which re-parents every
+    worker of the old id. **Deleted:** the warning in all its forms, `warning_move`, the launch
+    pause and `launch_pause`, the ranking's reasons in what agents run, full reset, `fork`,
+    `rates.py`, the fit cache and every dollar in output (`status` lists sessions without
+    spend; `status --json` schema 3: `stage` in, `room`, `full_reset` and session costs out).
+    Old `warning_move` and `launch_pause` keys load and are ignored; `doctor` names them.
+    **Kept:** the recording (decision 33's log and the cost series), for a later offline study.
+    The own-account mark also records whether a target was named, so a session told "no
+    account can take the work" hears the handoff line once when a target appears in the same
+    window instance. **Limits:** the hooks' local ranking cannot tell two folders of one login
+    apart.
 
 ## Known limits
 
@@ -1454,7 +1505,7 @@ since it was written but no version was noted; `doctor` is the check. A clean ex
 | statusLine payload `model.id`, `model.display_name`, `effort.level` (absent when the model takes no effort level; the level actually run when the set one is unsupported) | `CAPTURE_MODEL`, `CAPTURE_MODEL_ID`, `CAPTURE_MODEL_NAME`, `CAPTURE_EFFORT`, `CAPTURE_EFFORT_LEVEL`, `session_of` | no model recorded: sessions started in place of another take the default model | documented: /statusline, read 2026-11-12 |
 | statusLine payload `cost.total_cost_usd` (an estimate at list price, not a bill; resets to 0 on `/clear`) | `CAPTURE_COST`, `CAPTURE_COST_TOTAL`, `session_of` | no spend: `status` shows `-`, no heaviest clause, no worker cost | documented: /statusline, read 2026-11-12 |
 | A resume on another account (another organization) continues the chat under a new id and drops the earlier thinking with a notice; on the same account it keeps the id; model and effort carry over both ways | none in the adapter: `FAIRSHARE_CONTINUES` (`cli.CONTINUES_ENV`), `store.link_session` | either way works: an id that stays is recorded as itself (the first capture writes the account), a new one is linked to the old (decision 23) | observed: 2.1.322, 2026-11-12 (live; agent-view docs: a resume "either continues that session under the same ID, or starts a copy under a new ID") |
-| `--resume <id>` (any project's session; the same id), `--fork-session` (a copy under a new id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line on stderr; with saved background state, a copy whenever more than the prompt follows, 2.1.330) | `RESUME_ARGS`, `FORK_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `RESUME_BARE`, `COPY_NOTE`, `resume_args`, `model_args`, `background`, `copy_note` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
+| `--resume <id>` (any project's session; the same id), `--model`, `--effort`; `--resume <id> --bg` (the same id on 2.1.257+, or a copy with a `note:` line on stderr; with saved background state, a copy whenever more than the prompt follows, 2.1.330) | `RESUME_ARGS`, `MODEL_ARGS`, `EFFORT_ARGS`, `RESUME_BARE`, `COPY_NOTE`, `resume_args`, `model_args`, `background`, `copy_note` | a pickup fails with the tool's own message; the countdown's cancel hint is wrong | documented: CLI reference, /sessions, /agent-view, read 2026-11-12; `--effort` with `--bg` not stated; not run live |
 | Print-mode resume for the handoff note: `-p --output-format stream-json --verbose --include-partial-messages --tools "" --resume <id>`; one JSON object per line: `system`/`thinking_tokens`, `stream_event` with `content_block_start` (`thinking`, `text`) and `content_block_delta` (`thinking_delta`, `text_delta` with `delta.text`); the final line's `result` (and `is_error`) | `NOTE_ARGS`, the `NOTE_*` spellings, `note_command`, `note_event`, `note_text` | lines that stop parsing: the spinner, the clock and the last phase stay; no result line: the note is not written: one line, then a pickup | documented: CLI reference (`--tools ""` disables all built-in tools, not MCP tools; `--include-partial-messages` requires `--print` and `--output-format stream-json`, its example passes `--verbose`), /sessions ("Access conversations from scripts"), read 2026-11-12. Run live on 2.1.322, 2026-11-12: an Opus turn at medium effort (thinking block, then 37 text deltas, then `result`; recorded as `tests/fixtures/claude-2.1.322/note-stream.jsonl`) and a Haiku turn at low effort (no thinking block) |
 | The limit note before a turn is cut (`[Usage limit reached; a short grace allowance remains …]`) and, after the reset, the queued prompt `I hit my usage limit while you were working, but it has reset now. Please continue from where you left off.` (`promptSource: "queued"`): the tool resumes a stopped session by itself | `RESUMES_AT_RESET` (fairshare reads neither text) | if the tool stopped resuming, a waiting session would sit at its limit until the user runs `! fairshare pickup`; set the constant False to always pick up | observed, not documented: 2.1.322, 2026-11-11 (a background and an interactive session) |
 | Window names in the payload | `plans/*.toml` (`[windows.*] name`) | edit the plan file | `five_hour`, `seven_day`: 2.1.321, 2026-11-09 (docs and live capture) |

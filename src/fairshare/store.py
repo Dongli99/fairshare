@@ -95,50 +95,6 @@ def preference(now: float) -> tuple[str, float] | None:
     return None
 
 
-def _full_resets_file() -> Path:
-    return state_dir() / "full-reset.json"
-
-
-def full_resets() -> dict[str, tuple[float, float | None]]:
-    """The planned full resets, by account id: (the account's weekly reset when it was planned,
-    when the reset was seen used or None). An entry that does not read is left out."""
-    try:
-        d = json.loads(_full_resets_file().read_text())
-    except (OSError, ValueError):
-        return {}
-    return {k: (week, _num(v.get("used_at"))) for k, v in d.items()
-            if isinstance(v, dict) and (week := _num(v.get("week_resets_at"))) is not None} \
-        if isinstance(d, dict) else {}
-
-
-def active_full_resets(now: float) -> dict[str, float]:
-    """The accounts whose planned full reset is still to be used this week, with their weekly
-    reset: not seen used and that week not over. A plan never carries into the next week."""
-    return {k: week for k, (week, used) in full_resets().items() if used is None and now < week}
-
-
-def _change_full_resets(change) -> None:
-    """Apply `change` (the plans as stored -> the plans to store) under the file's lock and
-    write the result atomically."""
-    path = _full_resets_file()
-    with locked(path.with_name(path.name + ".lock")):
-        plans = change({k: {"week_resets_at": week, "used_at": used}
-                        for k, (week, used) in full_resets().items()})
-        _write_json(state_dir(), path.name, plans)
-
-
-def plan_full_reset(account_id: str, week_resets_at: float) -> None:
-    """Plan a full reset on the account this week, replacing any plan it had."""
-    _change_full_resets(lambda d: {**d, account_id: {"week_resets_at": week_resets_at,
-                                                     "used_at": None}})
-
-
-def drop_full_reset(account_id: str | None = None) -> None:
-    """Drop the account's planned full reset (every account's with None)."""
-    _change_full_resets(lambda d: {k: v for k, v in d.items()
-                                   if account_id is not None and k != account_id})
-
-
 SAME_WINDOW_S = 3600   # resets this close together belong to the same window
 PROBE_ROUNDING = 1.0   # the probe's text gives whole percents: a fall this small is rounding
 
@@ -174,13 +130,8 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
            probe: bool = False) -> Snapshot:
     """Merge `fresh` into the stored snapshot and save it, holding the account's lock, so two
     captures arriving together cannot both read the old snapshot and the last one win. `probe`:
-    the windows came from the provider's own usage probe (see `merge`). An active planned full
-    reset of the account is marked used, in the same locked step, when a running window fell
-    (only the probe's credited-back path lowers one) or its reset moved: within a window usage
-    only rises and a full reset keeps the reset times. A small credit-back taken for the reset
-    only ends the planned bonus early. A window within SAME_WINDOW_S of its stored reset is no
-    evidence: its successor can arrive while the stored reset, given to the minute, has not
-    passed yet; a real reset still shows in the other window."""
+    the windows came from the provider's own usage probe (see `merge`). A snapshot that changed
+    is appended to the usage log (`_log_usage`)."""
     dest = state_dir() / "snapshots"
     dest.mkdir(parents=True, exist_ok=True)
     with open(dest / f"{account_id}.lock", "w") as lock:
@@ -190,25 +141,20 @@ def record(account_id: str, fresh: dict[str, Window], now: float,
         save(account_id, snap)
         if old is None or snap.captured_at != old.captured_at:
             _log_usage(account_id, snap, old)
-        if old and account_id in active_full_resets(now) and any(
-                (w := snap.windows.get(k)) and (w.used_pct < was.used_pct
-                                                or abs(w.resets_at - was.resets_at) > SAME_WINDOW_S)
-                for k, was in old.windows.items() if was.resets_at > now + SAME_WINDOW_S):
-            _change_full_resets(lambda d: {**d, account_id: {**d[account_id], "used_at": now}}
-                                if account_id in d else d)
     return snap
 
 
 def _log_usage(account_id: str, snap: Snapshot, old: Snapshot | None) -> None:
     """Append the new snapshot to the account's usage log (`usage/<id>.jsonl`), with the cost
-    its sessions drew since the one before (`cost`, None for the first): the data for learning
-    what a percent of each window costs. Cost points last only COST_KEEP_S, so the cost is
-    taken now. A session's newest point keeps growing in place for up to COST_POINT_S, past the
-    line that counted it, so each line keeps every session's newest point (`<id>.heads.json`)
-    and the next line counts what that point gained since, then the points after it. The cost
-    is written as `cost`: the `spent` of lines before this rule missed that growth (most of the
-    cost) and is not read. Called under the account's lock, so lines stay in order. A failed
-    write loses one line, nothing else."""
+    its sessions drew since the one before (`cost`, None for the first). Nothing in fairshare
+    reads it: it is data kept for a later offline study of what a percent of each window costs,
+    which cannot be recovered if it is not recorded now. Cost points last only COST_KEEP_S, so
+    the cost is taken now. A session's newest point keeps growing in place for up to
+    COST_POINT_S, past the line that counted it, so each line keeps every session's newest point
+    (`<id>.heads.json`) and the next line counts what that point gained since, then the points
+    after it. The cost is written as `cost`: the `spent` of lines before this rule missed that
+    growth (most of the cost). Called under the account's lock, so lines stay in order. A
+    failed write loses one line, nothing else."""
     dest = state_dir() / "usage"
     try:
         heads = json.loads((dest / f"{account_id}.heads.json").read_text())
@@ -236,63 +182,6 @@ def _since(series: list, head: object, since: float) -> float:
     at, was = head
     grown = sum(max(0.0, p[1] - was) for seg in series for p in seg if p[0] == at)
     return grown + spend(series, at, math.inf)
-
-
-FIT_KEEP_S = 3600   # a kept fit is computed again after this long, grown or not
-
-
-def usage_fit(account_id: str, fit) -> dict[str, list[float]]:
-    """`fit(usage_log(account_id))`, a {key: [numbers]}, kept beside the log
-    (`usage/<id>.fit.json`) with the log's size and reused while the log has not grown, for
-    at most FIT_KEEP_S: the log only grows (a line per recorded snapshot), and the hooks ask on
-    every tool call, where reading two weeks of it costs more than they may take; the age cap
-    lets the fit's own time cut drop old lines from a log that stopped growing. A cache that
-    cannot be read is computed again; one that cannot be written costs only the next read."""
-    log = state_dir() / "usage" / f"{account_id}.jsonl"
-    try:
-        size = log.stat().st_size
-    except OSError:
-        return fit([])
-    cache = log.with_name(f"{account_id}.fit.json")
-    try:
-        d = json.loads(cache.read_text())
-        got = d["fit"]
-        if d["size"] == size and 0 <= time.time() - d["at"] < FIT_KEEP_S and isinstance(
-                got, dict) and all(
-                isinstance(v, list) and all(_num(x) is not None for x in v) for v in got.values()):
-            return got
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    got = fit(usage_log(account_id))
-    with contextlib.suppress(OSError):
-        _write_json(cache.parent, cache.name, {"size": size, "at": time.time(), "fit": got})
-    return got
-
-
-def usage_log(account_id: str) -> list[tuple[float, float | None, dict[str, tuple[float, float]]]]:
-    """The account's usage log as (time, spent, {window: (used %, reset)}), in log order; []
-    when there is none. A line that cannot be read is skipped (a torn last write), and so is a
-    window whose numbers are not numbers. A line with no `cost` (written before `_log_usage`'s
-    heads, its `spent` too low) reads as cost unknown."""
-    try:
-        text = (state_dir() / "usage" / f"{account_id}.jsonl").read_text()
-    except OSError:
-        return []
-    out = []
-    for raw in text.splitlines():
-        try:
-            d = json.loads(raw)
-            t, spent, windows = _num(d["t"]), d.get("cost"), d["windows"]
-        except (ValueError, KeyError, TypeError):
-            continue
-        if t is None or not isinstance(windows, dict) or (
-                spent is not None and _num(spent) is None):
-            continue
-        out.append((t, spent if spent is None else float(spent),
-                    {k: (pct, at) for k, v in windows.items()
-                     if isinstance(v, list) and len(v) == 2
-                     and (pct := _num(v[0])) is not None and (at := _num(v[1])) is not None}))
-    return out
 
 
 def claim_probe(account_id: str, now: float, max_age: float) -> bool:
@@ -550,18 +439,17 @@ def latest(session_id: str) -> str:
     return chain[-1]
 
 
-def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
-                 copy: bool = False) -> SessionRecord | None:
+def link_session(old_id: str, seen: SessionSeen, account_id: str,
+                 now: float) -> SessionRecord | None:
     """`seen` continues the session `old_id` under a new id on `account_id` (a resume on another
-    account, or a copy). Its record takes the old one's role, parent, model, display name and
+    account, or a handoff's fresh session). Its record takes the old one's role, parent, model, display name and
     effort where it lacks them (a model `seen` names wins, as in `note_session`), the limits
     that stopped it, the account, its first folder (as `note_session` keeps it) and `seen`'s
     transcript, `continues=old_id`, and keeps a cost series of its own; the old checkpoint note
-    is copied when the new id has none. When
-    the old session has stopped (not `copy`), the new one takes its place: the old record keeps its account and costs, gets
-    `moved_to`, and is no longer stranded or waiting, and workers (their records and their
-    sessions' records) whose parent is the old id now name the new one. A `copy` of a session
-    that may still run leaves the old record and its workers as they are. None, with nothing
+    is copied when the new id has none. The new one takes the old one's place: the old record
+    keeps its account and costs, gets `moved_to`, and is no longer stranded or waiting, and
+    workers (their records and their sessions' records) whose parent is the old id now name the
+    new one, wherever they run. None, with nothing
     changed, when either id is bad, they are the same, the old record is missing or has moved
     already, or the new one already continues a session."""
     if old_id == seen.id or not _SESSION_ID.fullmatch(old_id) \
@@ -584,15 +472,13 @@ def link_session(old_id: str, seen: SessionSeen, account_id: str, now: float,
                       model=model[0], model_name=model[1], effort=model[2], continues=old_id,
                       limits={**old.limits, **new.limits})
         _write_session(dest, new)
-        if not copy:
-            _write_session(dest, replace(old, moved_to=seen.id, stranded_at=None,
-                                         waiting_until=None))
-            for p in dest.glob("*.json"):
-                if (r := _read_session(p)) and r.parent == old_id and r.id != seen.id:
-                    _write_session(dest, replace(r, parent=seen.id))
-            with locked(_workers() / ".lock"):
-                for w in workers(old_id):
-                    _save_worker(replace(w, parent=seen.id))
+        _write_session(dest, replace(old, moved_to=seen.id, stranded_at=None, waiting_until=None))
+        for p in dest.glob("*.json"):
+            if (r := _read_session(p)) and r.parent == old_id and r.id != seen.id:
+                _write_session(dest, replace(r, parent=seen.id))
+        with locked(_workers() / ".lock"):
+            for w in workers(old_id):
+                _save_worker(replace(w, parent=seen.id))
     src, dst = checkpoint_path(old_id), checkpoint_path(seen.id)
     with locked(_checkpoints() / ".lock"):
         if src.is_file() and not dst.exists():

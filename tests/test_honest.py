@@ -205,13 +205,6 @@ class Refusal(Fleet):
         self.assertNotIn("warning", err)
         self.asked.assert_not_called()
 
-    def test_hot_short_window_resetting_within_grace_warns_first(self):
-        self.add("a")
-        self.snap("a", five=(95, 0.5), seven=(40, 50))
-        _, _, err = self.go("run")
-        self.assertEqual(self.launched_dir(), str(self.tmp / "hub/accounts/a"))
-        self.assertIn("warning: a five_hour window 95% used, resets in 30m", err)
-
     def test_an_eligible_account_launches_though_a_hot_one_outscores_it(self):
         # a: half its week left, resetting in 2h (score 25); its 5h window 90% for 3h: hot,
         # scaled to 2.5 and still ranked first, but it takes no session. b can work.

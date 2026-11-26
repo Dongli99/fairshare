@@ -129,7 +129,7 @@ class BadInput(Fleet):
         self.assertIn("grace_hours must be a number", str(e.exception.code))
 
     def test_a_policy_number_must_be_finite(self):
-        for bad in ("launch_pause = nan", "refresh_minutes = inf", "grace_hours = -inf"):
+        for bad in ("min_hours = nan", "refresh_minutes = inf", "grace_hours = -inf"):
             with self.subTest(bad=bad), self.assertRaises(SystemExit) as e:
                 self.write(f"[policy]\n{bad}\n")
                 self.go("status")

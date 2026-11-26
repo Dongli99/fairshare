@@ -1,17 +1,19 @@
-"""`pickup` is the same session, never a copy; `fork` is a copy on purpose; the session list both
-show from a terminal. The fleet of test_handover (accounts a, out; b, ranked first; c; the fake
+"""`pickup` is the same session, never a copy; a handoff moves its own workers; the session list
+a pickup shows from a terminal. The fleet of test_handover (accounts a, out; b, ranked first; c; the fake
 claude lists `$FAKE_LOG/live` with each session's kind and process, and logs a `stop`)."""
 import json
 import os
+import signal
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from fairshare import cli, store
-from fairshare.model import ROLE_WORKER, LiveSession, SessionRecord, SessionSeen, Worker
+from fairshare.model import ROLE_WORKER, SessionRecord, SessionSeen, Worker
 from fairshare.providers import claude
 
 from test_handover import Handover
+from test_session import WAIT
 
 MOVED_SAME = ("fairshare restarted this session on account a because {why}; it is still the best "
               "account. Continue where you left off.")
@@ -20,7 +22,6 @@ from test_honest import NOW
 from test_pickup import SID, TRANSCRIPT
 
 ID8 = SID[:8]
-FORK_HINT = f"`fairshare fork {ID8}` continues a copy and leaves it running"
 
 
 class Running(Handover):
@@ -80,11 +81,11 @@ class PickupNeverCopies(Running):
         self.assertNotIn("--fork-session", self.bg_args("b"))
         self.assertEqual([(r.id, r.account) for r in store.sessions()], [(SID, "b")])
 
-    def test_background_no_does_nothing_and_names_fork(self):
+    def test_background_no_does_nothing(self):
         self.live(f"{SID} x-1 background 100 busy")
         code, _, err = self.go("pickup", ID8, tty=True, answers=["n"])
         self.assertEqual(code, 1)
-        self.assertTrue(err.endswith(f"fairshare: nothing done; {FORK_HINT}\n"), err)
+        self.assertTrue(err.endswith("fairshare: nothing done\n"), err)
         self.assertEqual(self.stops(), [])
         self.launched.assert_not_called()
 
@@ -123,7 +124,7 @@ class PickupNeverCopies(Running):
                     self.assertEqual(code, 1)
                     self.assertTrue(err.endswith(
                         f"fairshare: {ID8} is open in a terminal; not picked up. Exit it there, "
-                        f"then pick it up (it resumes in place); or {FORK_HINT}\n"), err)
+                        "then pick it up (it resumes in place)\n"), err)
                     self.assertEqual(self.asked.call_count, 0)
         self.assertEqual((self.stops(), self.bg_args("b")), ([], []))
         self.launched.assert_not_called()
@@ -134,7 +135,7 @@ class PickupNeverCopies(Running):
         self.assertEqual(code, 1)
         self.assertTrue(err.endswith(
             f"fairshare: {ID8} is still running; not picked up. If it is yours, stop it first "
-            f"(fairshare run -a a stop {SID}), then pick it up; or {FORK_HINT}\n"), err)
+            f"(fairshare run -a a stop {SID}), then pick it up\n"), err)
         self.assertEqual((self.stops(), self.bg_args("b")), ([], []))
         self.assertEqual(store.session(SID).account, "a")
 
@@ -166,13 +167,13 @@ class PickupNeverCopies(Running):
         for argv in (("pickup", ID8), ("pickup", ID8, "--bg")):
             code, _, err = self.go(*argv, tty=True, answers=[""])
             self.assertEqual(code, 1)
-            self.assertIn("no account can take work now", err)
+            self.assertIn("no account can take the work now; the soonest is c", err)
         self.assertEqual(self.stops(), [])
 
 
 class OwnAccountBackground(Running):
-    """A background pickup on the session's own account of a session known to run in the
-    background passes nothing but the resume and the prompt: the tool keeps such a session's
+    """A background pickup on the session's own account (`-a`: the target is never its own) of
+    a session known to run in the background passes nothing but the resume and the prompt: the tool keeps such a session's
     own saved options and copies on any other argument (claude.RESUME_BARE)."""
 
     def setUp(self):
@@ -183,32 +184,32 @@ class OwnAccountBackground(Running):
 
     def test_not_known_as_background_keeps_the_flags_and_allows_explicit_ones(self):
         (self.log / "ended").unlink()
-        code, out, err = self.go("pickup", SID, "--bg")
+        code, out, err = self.go("pickup", SID, "--bg", "-a", "a")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("a")[:9], ["--bg", "--name", "pickup-0a1b2c3d", "--resume",
                                                  SID, "--model", "claude-opus-5-5", "--effort",
                                                  "high"])
         (self.log / "live").unlink()                                 # that resume stopped
-        code, out, err = self.go("pickup", SID, "--bg", "--model", "sonnet")
+        code, out, err = self.go("pickup", SID, "--bg", "-a", "a", "--model", "sonnet")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("a")[5:7], ["--model", "sonnet"])
 
     def test_an_interactive_one_among_the_ended_or_no_list_is_not_known(self):
         (self.log / "ended").write_text(f"{SID} saved interactive null null\n")
-        self.go("pickup", SID, "--bg")
+        self.go("pickup", SID, "--bg", "-a", "a")
         self.assertEqual(self.bg_args("a")[1:3], ["--name", "pickup-0a1b2c3d"])
         (self.log / "live").unlink()                                 # that resume stopped
         (self.log / "ended").write_text(f"{SID} saved background null null\n")
         real = claude.list_sessions
         with mock.patch.object(claude, "list_sessions",
                                lambda acct, ended=False: None if ended else real(acct)):
-            code, _, err = self.go("pickup", SID, "--bg")
+            code, _, err = self.go("pickup", SID, "--bg", "-a", "a")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("a")[1:3], ["--name", "pickup-0a1b2c3d"])
 
     def test_in_place_with_no_flags_and_no_copy(self):
         with mock.patch.dict(os.environ, {"FAKE_BG_STATE": SID}):
-            code, out, err = self.go("pickup", SID, "--bg")
+            code, out, err = self.go("pickup", SID, "--bg", "-a", "a")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("a"), ["--bg", "--resume", SID,
                                              MOVED_SAME.format(why="a move was asked for")])
@@ -221,29 +222,29 @@ class OwnAccountBackground(Running):
         store.add_worker(Worker("w-1", "p-1", "a", str(self.work), NOW, SID, "haiku", "none"))
         self.live(f"{SID} w-1 background 100 idle")
         with mock.patch.dict(os.environ, {"FAKE_BG_STATE": SID}):
-            code, out, err = self.go("pickup", SID, "--bg", tty=True, answers=[""])
+            code, out, err = self.go("pickup", SID, "--bg", "-a", "a", tty=True, answers=[""])
         self.assertEqual(code, 0, err)
         self.assertEqual(self.stops(), [SID])
         self.assertEqual(self.bg_args("a")[:3], ["--bg", "--resume", SID])
         self.assertEqual(len(self.bg_args("a")), 4)
 
-    def test_explicit_model_or_effort_is_refused_naming_fork(self):
+    def test_explicit_model_or_effort_is_refused(self):
         for flags, said in ((["--model", "sonnet"], "--model sonnet"),
                             (["--effort", "max"], "--effort max"),
                             (["--model", "sonnet", "--effort", "low"],
                              "--model sonnet --effort low")):
             with self.subTest(flags=flags):
                 self.live(f"{SID} x-1")
-                code, _, err = self.go("pickup", SID, "--bg", *flags, tty=True, answers=[""])
+                code, _, err = self.go("pickup", SID, "--bg", "-a", "a", *flags, tty=True, answers=[""])
                 self.assertEqual(code, 1)
                 self.assertTrue(err.endswith(
                     f"fairshare: {ID8} resumes in the background on its own account a only as it "
                     f"was, with its own model and effort, so {said} cannot apply in place; "
-                    f"nothing done. For a copy with them: fairshare fork {ID8} {said}\n"), err)
+                    "nothing done\n"), err)
                 self.assertEqual((self.stops(), self.bg_args("a")), ([], []))
 
     def test_another_account_is_a_move_with_the_flags(self):
-        code, out, err = self.go("pickup", SID, "--bg", "-a", "b", "--model", "sonnet")
+        code, out, err = self.go("pickup", SID, "--bg", "-a", "a", "-a", "b", "--model", "sonnet")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.bg_args("b")[:7], ["--bg", "--name", "pickup-0a1b2c3d", "--resume",
                                                  SID, "--model", "sonnet"])
@@ -253,7 +254,7 @@ class OwnAccountBackground(Running):
         note = (f"note: session {ID8} is already running in the background, so this started a "
                 "copy as cafe0001. `claude attach 0a1b2c3d` opens the original.")
         with mock.patch.dict(os.environ, {"FAKE_COPY": "1", "FAKE_COPY_NOTE": note}):
-            code, out, err = self.go("pickup", SID, "--bg")
+            code, out, err = self.go("pickup", SID, "--bg", "-a", "a")
         self.assertEqual(code, 0, err)
         self.assertIn(f"{note}\nfairshare: Claude Code did not continue {ID8} in place but "
                       f"started a copy under a new id ({note})\n", err)
@@ -266,7 +267,7 @@ class OwnAccountBackground(Running):
         wrapper = self.bin / "claude"
         wrapper.write_text(wrapper.read_text().replace('n=saved;', 'n=w-1;'))
         with mock.patch.dict(os.environ, {"FAKE_COPY": "1"}):
-            code, out, err = self.go("pickup", SID, "--bg")
+            code, out, err = self.go("pickup", SID, "--bg", "-a", "a")
         self.assertEqual(code, 0, err)
         self.assertIn(f"Claude Code did not continue {ID8} in place but started a copy under a "
                       "new id\n", err)
@@ -349,89 +350,104 @@ class OwnWorker(Running):
         self.assertEqual(self.bg_args("b"), [])
 
 
-class Fork(Running):
-    """`fairshare fork`: a copy under a new id; the original is never stopped."""
+class HandoffMovesWorkers(Running):
+    """`fairshare handoff` (decision 36): to the target (the first other account that can take
+    the work), with this session's workers on its own account moved there first through the
+    pickup path; workers elsewhere stay and follow the new main session. With no target it
+    refuses with what to do instead and changes nothing."""
 
     def setUp(self):
         super().setUp()
-        self.record(stranded=None, model="claude-opus-5-5", effort="high")
+        self.record(stranded=None)                               # the main session, on a
+        for name, sid, acct in (("w-a", "s-wa", "a"), ("w-c", "s-wc", "c")):
+            store.add_worker(Worker(name, SID, acct, str(self.work), NOW, sid, "haiku", "none"))
+            self.record(sid=sid, account=acct, stranded=None)
+            store.update_session(sid, lambda old: SessionRecord(
+                **{**vars(old), "role": ROLE_WORKER, "parent": SID}))
+        self.live("s-wa w-a background 100 idle", "s-wc w-c background 101 idle")
 
-    def test_foreground_from_a_terminal_in_the_sessions_folder(self):
-        self.live(f"{SID} x-1 background 100 busy")
-        code, _, err = self.go("fork", ID8, tty=True)
-        self.assertEqual(code, 0, err)
-        cmd, env, = self.launched.call_args.args[:2]
-        self.assertEqual(cmd[1:], ["--model", "claude-opus-5-5", "--effort", "high", "--name",
-                                   "x-1-f2", "--resume", SID, "--fork-session",
-                                   cli.FORKED_PROMPT.format(old=SID, new="b")])
-        self.assertEqual(Path(os.getcwd()).resolve(), self.work.resolve())
-        self.assertEqual(env["FAIRSHARE_CONTINUES"], f"{os.getpid()}:{SID}:copy")
-        self.assertEqual(self.asked.call_count, 0)
-        self.assertEqual(self.stops(), [])
-        rec = store.session(SID)
-        self.assertEqual((rec.account, rec.moved_to), ("a", None))
-
-    def test_a_stopped_session_forks_too(self):
-        code, _, err = self.go("fork", ID8, tty=True)
-        self.assertEqual(code, 0, err)
-        cmd = self.launched.call_args.args[0]
-        self.assertEqual(cmd[5:10], ["--name", "fork-0a1b2c3d", "--resume", SID,
-                                     "--fork-session"])
-
-    def test_inside_a_session_bare_fork_is_this_one_in_the_background_never_the_launcher(self):
+    def test_its_workers_on_its_account_move_to_the_target_first(self):
         launcher = self.started()
-        code, out, err = self.inside("fork", launcher=launcher, tty=True)
+        code, out, err = self.inside("handoff", "Done A.", launcher=launcher)
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "fork-0a1b2c3d", "--resume",
-                                                 SID, "--fork-session"])
-        self.assertIsNone(store.take_request(launcher.pid))          # the launcher not asked
+        self.assertEqual(self.stops(), ["s-wa"])                 # not s-wc, on c
+        self.assertEqual(self.bg_args("b")[:7], ["--bg", "--name", "w-a", "--resume", "s-wa",
+                                                 "--model", "haiku"])
+        self.assertIn("fairshare: picking up s-wa on b, in the background\n", err)
+        self.assertNotIn("score", err)
+        self.assertEqual([(r.id, r.account) for r in store.sessions() if r.id != SID],
+                         [("s-wa", "b"), ("s-wc", "c")])
+        self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
+        self.assertEqual(store.take_request(launcher.pid).account, "b")
+        self.assertTrue(out.endswith("the launcher will stop this session and start a fresh one "
+                                     "on b that reads the note first\n"), out)
+
+    def test_a_worker_its_account_does_not_list_running_stays(self):
+        self.live("s-wc w-c background 101 idle")
+        code, _, err = self.inside("handoff", "Done A.", launcher=self.started())
+        self.assertEqual((code, self.stops(), self.bg_args("b")), (0, [], []), err)
+
+    def test_workers_elsewhere_follow_the_new_main_session(self):
+        """Without a launcher the fresh session starts in the background and is linked in this
+        one's place (`store.link_session`), so every worker of it names the new one."""
+        code, out, err = self.inside("handoff", "Done A.")
+        self.assertEqual(code, 0, err)
+        new = "s-work-h2"
+        self.assertEqual(store.session(new).continues, SID)
+        self.assertEqual({w.name: w.parent for w in store.workers()}, {"w-a": new, "w-c": new})
+        self.assertEqual(store.session("s-wc").parent, new)
+
+    def test_no_target_refuses_with_the_stage_words_and_changes_nothing(self):
+        for x in "bc":
+            self.snap(x, five=(100, 2), seven=(30, 90))
+        launcher = self.started()
+        code, out, err = self.inside("handoff", "Done A.", launcher=launcher)
+        self.assertEqual((code, out), (1, ""))
+        self.assertEqual(err, (
+            "fairshare: no account can take the work now: write your checkpoint now (fairshare "
+            'checkpoint "<what is done, what is next>"), then keep working; when the limit stops '
+            "this session, Claude Code resumes it at 11:00\n"))
         self.assertIsNone(launcher.poll())
-        self.launched.assert_not_called()
-        self.assertIn("continued as session s-fork-0a1b2c3d on b", out)
-        self.assertEqual(store.session("s-fork-0a1b2c3d").continues, SID)
+        self.assertIsNone(store.take_request(launcher.pid))
+        self.assertEqual(self.stops(), [])
+        self.assertFalse(store.checkpoint_path(SID).exists())
 
-    def test_a_workers_fork_leaves_the_worker_where_it_is(self):
-        store.add_worker(Worker("w-1", "p-1", "a", str(self.work), NOW, "s-w", "haiku", "none"))
-        self.record(sid="s-w", stranded=None)
-        store.update_session("s-w", lambda old: SessionRecord(
-            **{**vars(old), "role": ROLE_WORKER, "parent": "p-1"}))
-        self.live("s-w w-1")
-        code, out, err = self.go("fork", "s-w", "--bg")
+    def test_the_target_skips_an_account_that_cannot_take_the_work(self):
+        self.snap("b", five=(80, 2), seven=(30, 90))             # 20 points for 2 hours: no
+        launcher = self.started()
+        code, out, err = self.inside("handoff", launcher=launcher)
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.bg_args("b")[:6], ["--bg", "--name", "w-1-f2", "--resume", "s-w",
-                                                 "--fork-session"])
-        self.assertEqual([w.session for w in store.workers()], ["s-w"])
-        copy = store.session("s-w-1-f2")
-        self.assertEqual((copy.continues, copy.role, copy.parent), ("s-w", ROLE_WORKER, "p-1"))
-        self.assertEqual(store.session("s-w").moved_to, None)
+        launcher.wait(timeout=WAIT)
+        self.assertEqual(store.take_request(launcher.pid).account, "c")
+        self.assertEqual(self.bg_args("c")[:3], ["--bg", "--name", "w-a"])
 
-    def test_no_terminal_forks_in_the_background(self):
-        code, _, err = self.go("fork", ID8)
+
+class PickupTarget(Running):
+    """`fairshare pickup` goes to the target too: never the session's own account (unless
+    `-a`), and only one that can take the work."""
+
+    def test_the_first_other_account_that_can_take_the_work(self):
+        self.snap("a", five=(10, 3), seven=(10, 20))             # a ranks first: its own
+        self.snap("b", five=(80, 2), seven=(30, 90))             # b cannot take it
+        self.record(stranded=None)
+        code, out, err = self.go("pickup", SID, "--bg")
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.bg_args("b")[3:6], ["--resume", SID, "--fork-session"])
+        self.assertEqual(self.bg_args("c")[3:5], ["--resume", SID])
+        self.assertEqual(self.bg_args("a") + self.bg_args("b"), [])
+        self.assertIn(f"fairshare: picking up {SID} on c, in the background\n", err)
 
-    def test_names(self):
-        rec = store.session(SID)
-        for live, name in (([], "fork-0a1b2c3d"),
-                           (None, "fork-0a1b2c3d"),
-                           ([LiveSession("x", "fork-0a1b2c3d", None)], "fork-0a1b2c3d-f2"),
-                           ([LiveSession(SID, "w", None)], "w-f2"),
-                           ([LiveSession(SID, "w-f2", None)], "w-f3"),
-                           ([LiveSession(SID, "w", None), LiveSession("x", "w-f2", None),
-                             LiveSession("y", "w-f3", None)], "w-f4")):
-            with self.subTest(live=live):
-                self.assertEqual(cli._fork_name(rec, live), name)
-
-    def test_the_forks_first_prompt_says_it_is_a_copy(self):
-        self.assertEqual(cli.FORKED_PROMPT.format(old="s-1", new="b"),
-                         "fairshare forked this session, as asked: it is a copy of session s-1 "
-                         "under a new id, on account b, and the original goes on by itself. Do "
-                         "not take up its work unasked: say in one line that you are the copy, "
-                         "then wait for what to do.")
+    def test_inside_a_session_the_launcher_is_asked_with_the_target(self):
+        self.record(stranded=None)
+        launcher = self.started()
+        code, out, err = self.inside("pickup", launcher=launcher)
+        self.assertEqual((code, out), (0, "the launcher will stop this session and continue it "
+                                          "on b\n"), err)
+        launcher.wait(timeout=WAIT)
+        self.assertEqual(store.take_request(launcher.pid).account, "b")
 
 
 class SessionList(Running):
-    """Bare `pickup` / `fork` from a terminal outside a session."""
+    """Bare `pickup` from a terminal outside a session."""
 
     def setUp(self):
         super().setUp()
@@ -479,14 +495,9 @@ class SessionList(Running):
             '  5  s-there   other  a  open in a terminal                          seen 07:59  '
             '"Now add a test for December to January."'])
         self.assertIn("fairshare: workers are not listed (their main session manages them); "
-                      "fairshare pickup <id> and fairshare fork <id> still take one by id\n", err)
+                      "fairshare pickup <id> still takes one by id\n", err)
         self.assertTrue(err.endswith("\nfairshare: nothing done\n"), err)
         self.assertEqual(self.asked.call_args.args, ("Pick up which? [1]: ",))
-        code, out, err = self.go("fork", tty=True, answers=[KeyboardInterrupt()])
-        self.assertEqual(code, 1)
-        self.assertIn("  2  s-here-n  work   a  running in the background       seen 07:58", err)
-        self.assertIn("  5  s-there   other  a  running in a terminal           seen 07:59", err)
-        self.assertEqual(self.asked.call_args.args, ("Fork which? [1]: ",))
         self.launched.assert_not_called()
 
     def test_enter_picks_the_first_and_takes_the_session_path(self):
@@ -499,27 +510,26 @@ class SessionList(Running):
     def test_a_number_picks_and_junk_asks_again(self):
         self.add_rec("s-1", seen=NOW - 10)
         self.add_rec("s-2", cwd=self.other, seen=NOW - 20)
-        code, _, err = self.go("fork", tty=True, answers=["x", "9", "0", "2"])
+        code, _, err = self.go("pickup", tty=True, answers=["x", "9", "0", "2"])
         self.assertEqual(code, 0, err)
         self.assertEqual(self.asked.call_count, 4)
         cmd = self.launched.call_args.args[0]
-        self.assertEqual(cmd[3:6], ["--resume", "s-2", "--fork-session"])
+        self.assertEqual(cmd[1:3], ["--resume", "s-2"])
         self.assertEqual(Path(os.getcwd()).resolve(), self.other.resolve())
 
     def test_no_terminal_prints_the_list_to_stderr_and_exits_2(self):
         self.add_rec("s-1")
-        for verb in ("pickup", "fork"):
-            code, out, err = self.go(verb)
-            self.assertEqual((code, out), (2, ""))
-            self.assertEqual(len(self.rows(err)), 1)
-            self.assertTrue(err.endswith(f"fairshare: no terminal to ask which; name one: "
-                                         f"fairshare {verb} SESSION\n"), err)
-            self.assertEqual(self.asked.call_count, 0)
+        code, out, err = self.go("pickup")
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(len(self.rows(err)), 1)
+        self.assertTrue(err.endswith("fairshare: no terminal to ask which; name one: "
+                                     "fairshare pickup SESSION\n"), err)
+        self.assertEqual(self.asked.call_count, 0)
 
     def test_none_to_offer(self):
         self.add_rec("s-w", role=ROLE_WORKER)
         code, _, err = self.go("pickup", tty=True)
-        self.assertEqual((code, err), (2, "fairshare: no recorded session to pickup\n"))
+        self.assertEqual((code, err), (2, "fairshare: no recorded session to pick up\n"))
 
     def test_at_most_eight_rows(self):
         for n in range(11):
@@ -544,7 +554,7 @@ class SessionList(Running):
         real = claude.list_sessions
         with mock.patch.object(claude, "list_sessions",
                                lambda acct: calls.append(acct.id) or real(acct)):
-            self.go("fork", tty=True, answers=[EOFError()])
+            self.go("pickup", tty=True, answers=[EOFError()])
         self.assertEqual(sorted(calls), ["a", "b"])
 
 
@@ -599,7 +609,6 @@ class LastPrompt(Running):
         own = cli._own_prompts()
         sent = [cli.MOVED_PROMPT.format(old="a", new="b", why="x"),
                 cli.RESTARTED_PROMPT.format(new="a", why="x"),
-                cli.FORKED_PROMPT.format(old="s-1", new="b"),
                 "This session continues session s-1, which stopped ...",
                 cli.WORKER_LINE.format(parent="p-1") + "\n\nDo the task.",
                 cli.HANDOFF_NOTE_ASK]

@@ -33,10 +33,7 @@ def _dur(hours: float, digits: int = 0) -> str:
     return f"{max(0, round(hours * 60))}m" if hours < 1 else f"{hours:.{digits}f}h"
 
 
-def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning,
-             extra: float = 0.0) -> Verdict:
-    """`extra`: percent of the long window the user will refill before it resets (a planned
-    reset), counted as room left; a spent window stays spent until the refill shows."""
+def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning) -> Verdict:
     p = acct.plan
     wins = snap.windows if snap else {}
     short, long_ = wins.get(p.short_name), wins.get(p.long_name)
@@ -50,7 +47,7 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning,
     short_in = (short.resets_at - now) / HOUR if short else None
     long_used = long_.used_pct if long_ else 0.0
     long_in = (long_.resets_at - now) / HOUR if long_ else p.long_hours  # unknown = a fresh window
-    score = p.capacity * (100.0 - long_used + extra) / max(long_in, t.min_hours)
+    score = p.capacity * (100.0 - long_used) / max(long_in, t.min_hours)
 
     # A spent window is a fact, not a preference: nothing usable until it resets. The line is
     # the week's for both: a short window that full takes no work, however soon it resets.
@@ -68,8 +65,6 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning,
         why = f"{p.short_name} {short_used:.0f}% used, resets in {_dur(short_in, 1)}"
     else:
         why = f"{p.long_name} {long_used:.0f}% used, resets in {_dur(long_in)}"
-    if extra:   # the refill is not there yet: say what is, for a job bigger than that
-        why += f", +{extra:.0f}% planned ({max(0.0, 100.0 - long_used):.0f}% left until it is used)"
     # A hot short window stops counting once its reset is within the grace period; a spent one
     # counts until it resets.
     usable_in = max(short_in - t.grace_hours if hot else 0.0, short_in if spent else 0.0,
@@ -78,15 +73,12 @@ def evaluate(acct: Account, snap: Snapshot | None, now: float, t: Tuning,
 
 
 def rank(accounts: list[Account], snaps: dict[str, Snapshot], now: float,
-         t: Tuning = Tuning(), extra: dict[str, float] | None = None) -> list[Verdict]:
+         t: Tuning = Tuning()) -> list[Verdict]:
     """Best first: highest score, ties by id. The grace hour holds only while no account is
     eligible without it: what is left of a nearly full window lasts minutes, so a session started
-    there soon stops at its limit and waits, while another account could work now. `extra`: by
-    account id, a planned refill of its long window (`evaluate`)."""
-    more = extra or {}
-    vs = [evaluate(a, snaps.get(a.id), now, t, more.get(a.id, 0.0)) for a in accounts]
-    firm = [evaluate(a, snaps.get(a.id), now, replace(t, grace_hours=0.0), more.get(a.id, 0.0))
-            for a in accounts]
+    there soon stops at its limit and waits, while another account could work now."""
+    vs = [evaluate(a, snaps.get(a.id), now, t) for a in accounts]
+    firm = [evaluate(a, snaps.get(a.id), now, replace(t, grace_hours=0.0)) for a in accounts]
     if any(f.eligible for f in firm):
         vs = [f if v.eligible else v for v, f in zip(vs, firm)]
     return sorted(vs, key=lambda v: (-v.score, v.account.id))

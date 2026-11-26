@@ -1,96 +1,40 @@
 ---
 name: fairshare
-description: Use in a session started by fairshare (which spreads work across several accounts) to start background workers for big or long work, keep `fairshare watch` running while they live, act on fairshare's usage warnings, write and request checkpoints, pick up stopped work, hand off, and run `/fairshare` commands.
+description: Use in a session started by fairshare (which spreads work across several accounts) to start background workers for big or long work, keep `fairshare watch` running while they live, write and request checkpoints, act on a line about the handoff stage, and run `/fairshare` commands.
 ---
 
 # Working under fairshare
-
-fairshare runs this session on one of several accounts and says when an account is nearly
-spent. The main session (you, unless you were told you are a worker) decides for itself and its
-workers. A worker makes no account decisions: it checkpoints when asked.
+fairshare picks the account each session starts on. A main session (you, unless told you are a
+worker) hears from it only about the handoff stage. A worker hears only its main session.
 
 ## Worker or subagent
-- Small, short work: a subagent (the Agent tool). fairshare tells subagents nothing; if the
-  limit hits, you and the subagent stop together and one pickup covers both.
-- Big or long work: a worker, a background session that can be stopped, moved and relaunched:
-  `fairshare worker --name <name> --model <model> --effort <level> "<prompt>"` (optional
-  `--account ID`). It prints the worker's name and session id.
-- Always pass `--name`: the task in a few words, lowercase and hyphenated, starting with a short
-  project prefix, since names are unique across every recorded worker (`fs-watch-stops`). A
-  retry of the same task adds `-2`. Never an id or a date alone.
-- Always name a model and an effort fitted to the worker's task: mechanical work (renames,
-  field additions, doc edits) gets a cheaper model and a lower effort; design work or changes
-  across many files get the strongest model at high effort. For a model without effort levels,
-  pass `--effort none`.
-- A worker needs the folder trusted on its account. If another account trusts it,
-  `fairshare trust` copies that trust (it never creates trust).
+- Small, short work: a subagent (the Agent tool). Never run fairshare commands for a subagent.
+- Big or long work: a worker, a background session fairshare can stop and move:
+  `fairshare worker --name <name> --model <model> --effort <level> "<prompt>"` (`--account ID`).
+- `--name`: the task in a few words, lowercase, hyphenated, after a short project prefix
+  (`fs-watch-stops`); names are unique across all workers, so a retry adds `-2`. Never an id.
+- Model and effort fit the task: mechanical work (renames, field additions, doc edits) a cheaper
+  model at lower effort; design or many-file changes the strongest at high; `--effort none` for
+  a model without effort levels. `fairshare trust` copies folder trust another account has.
 
 ## While workers live
-- Keep `fairshare watch` running as a background command. It exits when something concerns you
-  (your account near its limit, a worker's checkpoint, a worker stopped by its limit, a worker
-  that ended its turn and waits, one waiting for an answer, ended or idle) and prints one line
-  per event. Act on them, then start `fairshare watch` again. A worker that ended its turn waits
-  for you: read its last message with the `fairshare transcript` command the line gives, then
-  answer it, give it its next step, or let it be. If the line says it left background tasks
-  running, it wakes by itself when one ends.
-- A worker waiting for an answer (a question or a permission prompt) is stuck until a person
-  answers it there; you cannot. Tell the user at once, with the `attach` command the line gives.
-  If you told them, tell them too how it ended when watch says `no longer waits`, so a wait that
-  ended (answered, or timed out and denied) is not chased.
-- `fairshare checkpoint --show <worker name>` prints a worker's note.
-- A worker stopped by its limit: watch says when that limit resets, and Claude Code resumes the
-  worker by itself then, with its whole context. If that is soon, let it wait; otherwise
-  `fairshare pickup <its session id>` stops it and continues the same session, under its own
-  id, on the best account now, in the background. pickup never copies, and stops only your own
-  workers: any other session that still runs, stop it first
-  (`fairshare run -a <its account> stop <its session id>`), then pick it up.
-- `fairshare fork <session id>` is a copy on purpose, under a new id; the original goes on.
-- To stop a worker, use your own tools (`fairshare run -a <account> stop <id>`, or a message
-  to it).
-- Removing finished workers is your job: once a worker's result is merged or used, run
-  `fairshare worker --remove <name>`. That only drops it from the list (its conversation is
-  kept) and `watch` stops speaking of it; it deletes a worktree only if Claude Code made it, and
-  refuses when that would lose unpushed work (then it does nothing else).
+- Keep `fairshare watch` running as a background command. It exits with one line per event (the
+  handoff stage, a worker's checkpoint, limit, turn end, wait for an answer or end); act on it,
+  then start it again. A worker at its turn end waits for you: `fairshare transcript` shows it.
+  One waiting for an answer needs a person: tell the user at once, with the `attach` command.
+- A worker stopped by its limit resumes by itself at the reset; `fairshare pickup <its session
+  id>` moves it now (it stops only your own workers: stop any other session first, `fairshare
+  run -a <its account> stop <its session id>`). Done with a worker: `fairshare worker --remove`.
+- `fairshare checkpoint "<what is done, what is next>"` notes where you stand; `--request <worker
+  name | session id | all>` asks workers for one; `--show <worker name>` prints one.
 
-## When fairshare warns you
-fairshare warns once, when the account has under an hour left at its pace: the warning names
-the dollars left before the limit, how many minutes that lasts at what the account spent in the
-last hour, when it refills and to how much, and the best other account. Dollars are an estimate
-(API prices, learned per account); the limit itself stops work, not the warning. fairshare's
-choice of account (here, in `status` and in `fairshare worker`) comes with why it goes before
-the next one; it weighs when each window resets and any planned full reset, so follow the
-choice; override it (`--account`) only when the job needs more room than the chosen account
-has left now, which its reason states.
-- The warning says the user planned a full reset and to keep working to the limit: do that, on
-  this account (and so do your workers); no checkpoint, handoff or pickup.
-- The warning says this account still ranks first, or no other account can take work: keep
-  working on this account until the limit stops you; no checkpoint, handoff or pickup. The
-  verdict is fairshare's (the same ranking as `status`); do not weigh the dollars yourself.
-- The warning says move: at the next stopping point, `fairshare checkpoint --request all` (your workers
-  checkpoint), then do the move the warning names; the setting `warning_move` picks it
-  (default handoff):
-  - **handoff**: `fairshare handoff "<what was done, what is next, open decisions, constraints
-    the user set, what was tried and failed, files touched>"`. A fresh session starts on the
-    best account and reads that note first; it can read this session's transcript for anything
-    the note missed. fairshare names it after this session with the next `-hN` (`x-h2`).
-    If the project's own instructions say how to write a handoff (a file, where it goes, what
-    it holds), they win: write it as they say, then pass its path as the note, adding only
-    what it lacks. Otherwise, for a long note, write it to a scratch file and pass
-    `"$(cat <file>)"`.
-  - **pickup**: `fairshare checkpoint "<where you stand>"`, then `fairshare pickup`. This same
-    session continues on the best account with its whole context (on another account that
-    context is read again once, uncached). In a session not started by fairshare nothing can
-    stop this one, so pickup refuses: hand off instead.
-
-## Checkpoints
-- `fairshare checkpoint "<what is done, what is next>"` appends to this session's note.
-- `fairshare checkpoint --request <worker name | session id | all>` asks workers for one; each
-  hears it at its next step.
+## The handoff stage: do what the line says
+- Hand off: run the `fairshare handoff "<note>"` it gives (done, next, open decisions, files; a
+  project's own handoff form wins); it moves your workers here and continues in a fresh session.
+- No account can take the work: write your checkpoint, then keep working into the limit.
+- A worker's account: run the `fairshare pickup` it names. "Over": nothing to do; keep working.
 
 ## `/fairshare` and `! fairshare`
-They are the same verbs with the same arguments. `! fairshare ...` (typed by the user) runs at
-once, costs no turn and works when the account is out. `/fairshare ...` comes to you: on
-`/fairshare <args>`, run `fairshare <args>` exactly as given, except `handoff` with no note:
-write the note yourself and run `fairshare handoff "<note>" <the same flags>`.
-
-Never run fairshare commands for a subagent: they are for the main session and its workers.
+Same verbs and arguments. `! fairshare ...` (the user's) runs at once, costs no turn, works when
+the account is out. `/fairshare <args>` comes to you: run `fairshare <args>` as given, except
+`handoff` with no note: write the note yourself, then `fairshare handoff "<note>" <same flags>`.

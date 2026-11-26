@@ -190,7 +190,7 @@ class ManualPickup(Live):
         self.snap("b", five=(100, 2), seven=(80, 150))
         self.snap("c", five=(100, 0.5), seven=(90, 150))
         self.record()
-        line = ("fairshare: no account can take work now; the soonest is c, usable at 08:30; "
+        line = ("fairshare: no account can take the work now; the soonest is c, usable at 08:30; "
                 "nothing done\n")
         launcher = self.started()
         code, out, err = self.inside("pickup", launcher=launcher)

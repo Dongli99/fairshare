@@ -721,7 +721,6 @@ class PickupLaunch(Stranded):
         self.snap("a", five=(10, 3), seven=(50, 90))
         code, err = self.launches("run", "-a", "a", requests=[(lambda: None, (SID, True))])
         self.assertEqual(self.accounts_of(), ["a", "b"])            # b ranks first
-        self.assertIn("note: a can still take work; the session is picked up as asked", err)
         self.assertEqual(self.calls[1][0][1:], ["--resume", SID, "fairshare moved this session "
                                                 "from account a to account b because a move was "
                                                 "asked for. Continue where you left off."])
@@ -801,20 +800,19 @@ class PickupCommand(Stranded):
         with mock.patch.object(cli, "_ancestors", return_value={launcher.pid}):
             code, out, _ = self.pickup(env={"CLAUDE_CODE_SESSION_ID": SID, "CLAUDE_PID": "777",
                                             "FAIRSHARE_LAUNCHER": str(launcher.pid)})
-        self.assertEqual((code, out), (0, "the launcher will stop this session and continue on "
-                                          "the best account\n"))
+        self.assertEqual((code, out), (0, "the launcher will stop this session and continue it "
+                                          "on b\n"))
         self.assertEqual(launcher.wait(timeout=WAIT), -signal.SIGUSR1)
-        self.assertEqual(store.take_request(launcher.pid), Request(SID, True, 777))
+        self.assertEqual(store.take_request(launcher.pid), Request(SID, True, 777, account="b"))
 
-    def test_inside_a_session_without_one_it_refuses_naming_handoff_and_fork(self):
+    def test_inside_a_session_without_one_it_refuses_naming_handoff(self):
         self.record()
         self.trust("b")
         code, out, err = self.pickup(env={"CLAUDE_CODE_SESSION_ID": SID})
         self.assertEqual((code, out), (1, ""))
         self.assertEqual(err, "fairshare: this session was not started by fairshare, so nothing "
                               "can stop it to resume it under its own id; for a fresh session "
-                              "that reads your note: fairshare handoff \"<note>\"; for a copy "
-                              "of this one in the background: fairshare fork\n")
+                              "that reads your note: fairshare handoff \"<note>\"\n")
         self.assertEqual((self.bg_args("b"), self.fg), ([], []))
         self.assertEqual(store.session(SID).account, "a")
 
@@ -836,16 +834,15 @@ class PickupCommand(Stranded):
             self.assertNotIn(gone, env)
         self.assertEqual(self.fg, [])
 
-    def test_background_copies_trust_to_the_top_account_first(self):
+    def test_background_copies_trust_to_the_target_first(self):
         self.record()
-        self.snap("a", five=(10, 3), seven=(10, 20))                 # a ranks first ...
-        self.trust("b")                                              # ... but only b trusts
+        self.snap("a", five=(10, 3), seven=(10, 20))                 # a ranks first, its own ...
+        self.trust("a")                                              # ... and only a trusts
         code, _, err = self.pickup(SID[:6], "--bg")
         self.assertEqual(code, 0, err)
-        self.assertIn("note: a can still take work", err)
-        self.assertIn(f"a now trusts {self.work.resolve()} (copied from b)", err)
-        self.assertEqual(self.bg_args("a")[0], "--bg")
-        self.assertTrue(claude.trusts(self.tmp / "hub/accounts/a", self.work.resolve()))
+        self.assertIn(f"b now trusts {self.work.resolve()} (copied from a)", err)
+        self.assertEqual(self.bg_args("b")[0], "--bg")
+        self.assertTrue(claude.trusts(self.tmp / "hub/accounts/b", self.work.resolve()))
 
     def test_background_without_copy_takes_only_an_account_that_trusts_the_folder(self):
         self.record()
@@ -862,10 +859,11 @@ class PickupCommand(Stranded):
         self.record()
         code, _, err = self.pickup(SID, "--bg")
         self.assertEqual(code, 1)
-        self.assertIn("eligible: b, none of which trusts", err)
+        self.assertIn(f"b cannot take it in the background: it does not trust "
+                      f"{self.work.resolve()}", err)
         self.snap("b", five=(100, 2), seven=(30, 90))
-        self.assertIn("no account can take work now; the soonest is b, usable at 10:00; nothing "
-                      "done", self.pickup(SID, "--bg")[2])
+        self.assertIn("no account can take the work now; the soonest is b, usable at 10:00; "
+                      "nothing done", self.pickup(SID, "--bg")[2])
 
     def test_session_by_prefix(self):
         self.record()

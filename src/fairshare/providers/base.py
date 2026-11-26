@@ -24,8 +24,6 @@ class Provider(Protocol):
     resumes_at_reset: bool   # the tool resumes a session its limit stopped once the limit resets
     remote_control: str | None   # what setup offers to turn on in every session (a name and
                                  # what it does, for its question); None: the tool has nothing
-    full_reset: str | None   # how users use a full reset the provider granted an account (both
-                             # its limits refilled now), for messages; None: it grants none
     subcommands: tuple[str, ...]  # the tool's own subcommands (`<command> <subcommand>`), which
                                   # start no session: `run -a` hands them straight to the tool
     rc_files: tuple[str, ...]     # the shell files under HOME read for the user's aliases
@@ -60,9 +58,9 @@ class Provider(Protocol):
     def session_pid(self) -> int | None:
         """The process id of that session, when the provider says, else None."""
 
-    def resume_args(self, session_id: str, fork: bool = False) -> list[str]:
+    def resume_args(self, session_id: str) -> list[str]:
         """Arguments that continue the session `session_id` under its own id, on whichever
-        account starts it; `fork`: in a copy under a new id."""
+        account starts it."""
 
     def name_args(self, name: str) -> list[str]:
         """Arguments that start a session under the display name `name`, as the provider lists

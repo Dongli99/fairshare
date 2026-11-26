@@ -20,10 +20,13 @@ class Shipped(Base):
         self.assertTrue(any(l.startswith("description: ") for l in front))
         self.assertTrue(claude.own_skill(text))
         for words in ("fairshare worker", "fairshare watch", "fairshare checkpoint",
-                      "--request", "fairshare trust", "fairshare pickup <its session id>",
-                      "fairshare fork <session id>", "stop <its session id>", "only your own",
-                      "subagent"):
+                      "--request", "fairshare trust", "fairshare pickup <its session", "--remove",
+                      "stop <its session id>", "only your own", "subagent", "handoff stage",
+                      "fairshare handoff"):
             self.assertIn(words, text)
+        self.assertLessEqual(len(lines), 40)
+        for gone in ("fork", "$", "dollar", "score", "full reset", "warn"):
+            self.assertNotIn(gone, text.lower())
 
     def test_recognised_by_its_name_only(self):
         for text, own in (("---\nname: fairshare\n---\n", True),

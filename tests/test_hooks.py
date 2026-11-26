@@ -15,7 +15,6 @@ from fairshare.model import ROLE_WORKER, SessionSeen, Worker
 from fairshare.providers import claude
 
 from test_honest import H, NOW
-from test_rates import rated, spending
 from test_session import SRC
 from test_workers import PARENT, Work
 
@@ -23,11 +22,11 @@ SID = "5e55105e-0000-4000-8000-000000000005"
 
 
 class Speaking(Work):
-    """Account a's rates (test_rates.rated): $0.10 a point of its 5h window, $1.00 of its week."""
+    """Accounts a (ranks first), b and c (test_workers.Work), all on Pro: a main session on a
+    reaches the handoff stage at 10 points of its 5h window left (decision 36)."""
 
     def setUp(self):
         super().setUp()
-        rated(self.tmp, "a")
         self.probes = []
         p = mock.patch.object(cli, "_start_probe",
                               lambda acct, cwd, now: self.probes.append(acct.id))
@@ -54,12 +53,10 @@ class Speaking(Work):
         got = self.hook(name, sid, **extra)
         return got and got["additionalContext"]
 
-    def near(self, five=(92, 3), seven=(10, 50), spent=2.0, sid=SID, **kw):
-        """Account a's windows, and `spent` dollars drawn in the last hour by session `sid`. By
-        default: $0.80 left in its 5h window, $90 in its week, $2.00 an hour."""
+    def stage(self, five=(92, 3), seven=(10, 50), **kw):
+        """Account a's windows; by default in its handoff stage: 8 points of its 5h left, the
+        5h resetting in 3 hours."""
         self.snap("a", five=five, seven=seven, **kw)
-        if spent:
-            spending(sid, "a", spent)
 
     def worker(self, sid=SID, requested=None):
         w = Worker("w-1", PARENT, "a", str(self.here), NOW)
@@ -68,165 +65,125 @@ class Speaking(Work):
         if requested:
             store.update_session(sid, lambda r: cli.replace(r, checkpoint_requested=requested))
 
+    HANDOFF = ('fairshare: account a is in its handoff stage: write your checkpoint and hand off '
+               'now with fairshare handoff "<what is done, what is next, open decisions, files '
+               'touched>"; it moves this session\'s workers on a and continues the work on b.')
+    OVER = "fairshare: the handoff stage on account a is over: keep working here."
+
     def test_nothing_to_say_prints_nothing(self):
         self.assertIsNone(self.hook())
         self.assertIsNone(self.hook("prompt"))
         self.assertEqual(store.session(SID).account, "a")        # the session is noted
 
     def test_the_output_shape_names_the_event(self):
-        self.near()
+        self.stage()
         self.assertEqual(self.hook()["hookEventName"], "PostToolUse")
-        self.near(five=(92, 8))                                  # the next 5h window
+        self.stage(five=(92, 8))                                 # the next 5h window
         self.assertEqual(self.hook("prompt")["hookEventName"], "UserPromptSubmit")
 
-    MAIN = ("fairshare: account a has about $0.80 left before its limit, about 24 min at its pace "
-            "in the last hour ($2.00); it refills at 11:00 to about $10.00. This account can no "
-            "longer take work (five_hour 92% used, resets in 3.0h) and b can (score 1.20), so "
-            "move: at your next stopping point, ")
-    BEST = (" Best account to move to: b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: room "
-            "left per hour until it resets, so room that would expire unused is spent first); b: "
-            "seven_day 40% used, resets in 50h; c: seven_day 50% used, resets in 50h.")
-
-    def test_main_once_per_instance_of_the_binding_window(self):
-        self.near()
-        self.assertEqual(self.said(), self.MAIN + (
-            'run fairshare handoff "<what was done, what is next, open decisions, constraints '
-            'the user set, what was tried and failed, files touched>" to continue in a fresh '
-            "session on the best account, which reads your note first." + self.BEST +
-            " Workers you started: none; to have them checkpoint: fairshare checkpoint "
-            "--request all."))
-        self.assertIsNone(self.said())
-        self.assertIsNone(self.said("prompt"))                   # the other event shares it
-        self.near(five=(99, 3), spent=5.0)                       # nearer, same instance
-        self.assertIsNone(self.said())
-        self.assertEqual(store.session(SID).warned, {"five_hour": NOW + 3 * H})
-
-    def test_warning_move_pickup_keeps_the_pickup_text(self):
-        cfg = self.tmp / "accounts.toml"
-        cfg.write_text(cfg.read_text().replace(
-            "\n\n[[account]]", '\n[policy]\nwarning_move = "pickup"\n\n[[account]]', 1))
-        self.near()
-        self.assertEqual(self.said(), self.MAIN + (
-            'write a checkpoint (fairshare checkpoint "<where you stand>") and run fairshare '
-            "pickup to continue on the best account." + self.BEST + " Workers you started: "
-            "none; to have them checkpoint: fairshare checkpoint --request all."))
-
-    def test_a_new_instance_warns_again(self):
-        self.near()
-        self.assertIsNotNone(self.said())
-        self.near(five=(95, 8))                                  # the next five-hour window
-        self.assertIn("has about $0.50 left before its limit, about 15 min at its pace in the "
-                      "last hour ($2.00); it refills at 16:00 to about $10.00.", self.said())
-
-    def test_the_week_binds_then_the_short_window_warns_again(self):
-        self.near(five=(91, 3), seven=(99.5, 50))                # 5h $0.90, week $0.50
-        self.assertIn("has about $0.50 left before its limit, about 15 min at its pace in the "
-                      "last hour ($2.00); it refills at Sun 10:00 to about $10.00.", self.said())
-        self.assertIsNone(self.said())
-        self.near(five=(96, 3), seven=(99.5, 50))                # now the 5h binds: $0.40
-        self.assertIn("has about $0.40 left before its limit, about 12 min", self.said())
-        self.assertEqual(store.session(SID).warned,
-                         {"seven_day": NOW + 50 * H, "five_hour": NOW + 3 * H})
-
-    def test_silent_with_no_spend_no_rate_or_an_hour_of_room(self):
-        self.near(five=(99, 3), spent=0)                         # nothing spent this hour
-        self.assertIsNone(self.said())
-        self.near(five=(50, 3))                                  # $5.00 left: 2.5 h at $2.00
-        self.assertIsNone(self.said())
-        (self.tmp / "state" / "usage" / "a.jsonl").unlink()      # no rate (a new account)
-        self.near(five=(99, 3))
+    def test_continue_says_nothing(self):
+        self.stage(five=(89, 3))                                 # 11 points left
         self.assertIsNone(self.said())
         self.assertEqual(store.session(SID).warned, {})
 
-    def test_the_spend_is_the_accounts_not_the_sessions(self):
-        self.near(spent=0)
-        spending("s-other", "a", 1.5)
-        spending("s-else", "b", 9.0)                             # another account's: not counted
-        self.assertIn("about 32 min at its pace in the last hour ($1.50)", self.said())
+    def test_once_per_instance_of_the_binding_window(self):
+        self.stage()
+        self.assertEqual(self.said(), self.HANDOFF)
+        self.assertIsNone(self.said())
+        self.assertIsNone(self.said("prompt"))                   # the other event shares it
+        self.stage(five=(99, 3))                                 # nearer, same instance
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {"handoff": [NOW + 3 * H, "a", True]})
+        self.stage(five=(95, 8))                                 # the next five-hour window
+        self.assertEqual(self.said(), self.HANDOFF)
 
-    def test_an_older_record_is_read(self):
-        self.near()
-        store.update_session(SID, lambda r: cli.replace(r, warned={"five_hour": [NOW + 3 * H, 90]}))
-        self.assertIsNone(self.said())                           # warned in this instance
-        store.update_session(SID, lambda r: cli.replace(r, warned={"five_hour": [NOW - 2 * H, 95],
-                                                                    "seven_day": "x"}))
-        self.assertIsNotNone(self.said())                        # an earlier instance
-        self.assertEqual(store.session(SID).warned["five_hour"], NOW + 3 * H)
+    def test_the_week_binds_then_the_short_window_says_it_again(self):
+        self.stage(five=(50, 3), seven=(99, 50))                 # the week: 100/13 points left
+        self.assertEqual(self.said(), self.HANDOFF)
+        self.assertEqual(store.session(SID).warned, {"handoff": [NOW + 50 * H, "a", True]})
+        self.assertIsNone(self.said())
+        self.stage(five=(95, 3), seven=(99, 50))                 # now the 5h binds: 5 points
+        self.assertEqual(self.said(), self.HANDOFF)
 
-    def test_the_best_other_account_is_given_in_dollars_once_it_has_a_rate(self):
-        rated(self.tmp, "b")                                     # b: 5h 10%, 7d 40% -> $9.00
-        self.near()
-        self.assertIn("Best account to move to: b (about $9.00 left before its limit); b before c",
-                      self.said())
+    def test_the_target_is_the_first_other_account_that_can_take_the_work(self):
+        self.snap("b", five=(80, 3), seven=(40, 50))             # 20 points for 3 hours: no
+        self.stage()
+        self.assertTrue(self.said().endswith("continues the work on c."))
 
-    def test_workers_named_and_none_can_take_work_stays(self):
-        store.add_worker(Worker("w-x", SID, "b", str(self.here), NOW))
-        store.add_worker(Worker("w-y", SID, "b", str(self.here), NOW))
-        self.near()
-        self.assertIn("Workers you started: w-x, w-y;", self.said())
+    def test_with_no_target_checkpoint_and_keep_working_into_the_limit(self):
         for i in "bc":
             self.snap(i, five=(100, 3), seven=(10, 50))
-        self.near(five=(95, 8))                                  # the next five-hour window
-        self.assertTrue(self.said().endswith(
-            "to about $10.00. No other account can take work now, so this is not a stop: keep "
-            "working on this account until the limit stops you. No checkpoint, handoff or "
-            "pickup now."))
-
-    STAY = (", so this is not a stop: keep working on this account until the limit stops you. "
-            "No checkpoint, handoff or pickup now.")
-
-    def test_an_account_that_still_ranks_first_works_to_its_limit(self):
-        # a's week: $3.00 left, resetting in 6h, at $5.00 an hour: room that would expire.
-        self.snap("b", five=(10, 3), seven=(80, 50))             # score 0.40
-        self.snap("c", five=(10, 3), seven=(90, 50))             # score 0.20
-        self.near(five=(10, 3), seven=(97, 6), spent=5.0)        # score 0.50
-        self.assertTrue(self.said().endswith(
-            "it refills at 14:00 to about $10.00. This account still ranks first (score 0.50 vs "
-            "0.40 on b; room that would expire unused is spent first)" + self.STAY))
-
-    def test_a_tie_stays_and_a_higher_score_elsewhere_moves(self):
-        self.snap("c", five=(10, 3), seven=(90, 50))
-        self.snap("b", five=(10, 3), seven=(75, 50))             # score 0.50: a tie
-        self.near(five=(10, 3), seven=(97, 6), spent=5.0)
-        self.assertTrue(self.said().endswith(self.STAY))
-        self.snap("b", five=(10, 3), seven=(70, 50))             # score 0.60
-        store.update_session(SID, lambda r: cli.replace(r, warned={}))
-        self.assertIn("b ranks above this account (score 0.60 vs 0.50), so move: at your next "
-                      "stopping point, run fairshare handoff", self.said())
-
-    def test_no_move_to_an_account_that_would_not_last_an_hour(self):
-        rated(self.tmp, "b")
-        self.snap("b", five=(84, 3), seven=(40, 50))             # ranks first, but $1.60 < $2.00
-        self.near()                                              # a cannot take work: 5h 92%
-        said = self.said()
-        self.assertIn("This account can no longer take work (five_hour 92% used, resets in "
-                      "3.0h) and c can (score 1.00), so move", said)
-        self.assertIn("Best account to move to: c (5h 10% · 7d 50%).", said)
-        rated(self.tmp, "c")
-        self.snap("c", five=(84, 3), seven=(50, 50))             # c: $1.60 too
-        store.update_session(SID, lambda r: cli.replace(r, warned={}))
-        self.assertTrue(self.said().endswith(
-            "to about $10.00. No other account that can take work has an hour of room at this "
-            "account's pace" + self.STAY))
-
-    def test_worker_warning(self):
-        self.worker()
-        self.near(five=(10, 3), seven=(99, 50))
+        self.stage()
         self.assertEqual(self.said(), (
-            "fairshare: this account has about $1.00 left before its limit, about 30 min at its "
-            "pace in the last hour ($2.00); it refills at Sun 10:00 to about $10.00. You are a "
-            'worker: finish your current step, then run fairshare checkpoint "<what is done, what '
-            'is next>". Do not start a big new step; your main session decides what happens '
-            "next."))
+            "fairshare: account a is in its handoff stage and no account can take the work now: "
+            'write your checkpoint now (fairshare checkpoint "<what is done, what is next>"), '
+            "then keep working; when the limit stops this session, Claude Code resumes it at "
+            "11:00."))
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {"handoff": [NOW + 3 * H, "a", False]})
+
+    def test_a_target_that_appears_later_in_the_same_instance_is_said_once(self):
+        for i in "bc":
+            self.snap(i, five=(100, 3), seven=(10, 50))
+        self.stage()
+        self.assertIn("no account can take the work now", self.said())
+        self.assertIsNone(self.said())                           # still none: nothing new
+        self.snap("c", five=(10, 4), seven=(10, 50))             # c's 5h reset
+        self.assertEqual(self.said().splitlines()[0],          # (a worker's line may follow)
+                         self.HANDOFF.replace("work on b.", "work on c."))
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned["handoff"], [NOW + 3 * H, "a", True])
+        self.snap("c", five=(100, 3), seven=(10, 50))             # gone again: nothing to say
+        self.assertIsNone(self.said())
+
+    def test_the_all_clear_when_the_stage_ends_on_the_same_account(self):
+        for label, after in (("a reset", dict(five=(92, -1))),
+                             ("usage credited back", dict(five=(80, 3)))):
+            with self.subTest(label):
+                store.update_session(SID, lambda r: r and cli.replace(r, warned={}))
+                self.stage()
+                self.assertEqual(self.said(), self.HANDOFF)
+                self.stage(**after)
+                self.assertEqual(self.said(), self.OVER)
+                self.assertIsNone(self.said())
+                self.assertEqual(store.session(SID).warned, {})
+
+    def test_a_limit_lifting_within_half_an_hour_ends_the_stage_saying_when(self):
+        self.stage()
+        self.assertEqual(self.said(), self.HANDOFF)
+        self.stage(five=(92, 0.4))                               # as little room, lifts at 08:24
+        self.assertEqual(self.said(), "fairshare: account a's limit lifts at 08:24: keep working "
+                                      "here; if it stops this session first, Claude Code resumes "
+                                      "it then.")
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {})
+
+    def test_a_mark_for_another_account_is_dropped_silently(self):
+        store.note_session(SessionSeen(SID), "a", NOW)
+        store.update_session(SID, lambda r: cli.replace(r, warned={"handoff": [NOW + 3 * H, "b"]}))
+        self.stage(five=(10, 3))
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {})
+
+    def test_an_old_warning_mark_does_not_silence_the_stage(self):
+        store.note_session(SessionSeen(SID), "a", NOW)
+        store.update_session(SID, lambda r: cli.replace(r, warned={"five_hour": NOW + 3 * H}))
+        self.stage()
+        self.assertEqual(self.said(), self.HANDOFF)
+
+    def test_a_worker_hears_no_usage_line(self):
+        self.worker()
+        self.stage(five=(99, 3), seven=(99, 50))
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {})
 
     def test_a_worker_hears_a_request_once(self):
         self.worker(requested=NOW)
-        self.near()
+        self.stage()
         self.assertEqual(self.said(), cli.CHECKPOINT_ASK)
         self.assertEqual(cli.CHECKPOINT_ASK, "fairshare: your main session asks for a checkpoint "
                          'now: finish your current step and run fairshare checkpoint "<what is '
                          'done, what is next>".')
-        self.assertIn("You are a worker", self.said())           # then the warning
         self.assertIsNone(self.said())
         store.update_session(SID, lambda r: cli.replace(r, checkpoint_requested=NOW + 60))
         self.assertEqual(self.said("prompt"), cli.CHECKPOINT_ASK)  # a new request
@@ -237,22 +194,21 @@ class Speaking(Work):
         self.assertIsNone(self.said())
 
     def test_a_subagent_hears_nothing(self):
-        self.worker(requested=NOW)
-        self.near(five=(96, 3), seven=(96, 50))
+        store.note_session(SessionSeen(SID), "a", NOW)
+        self.stage()
         for name in ("post-tool", "prompt"):
             self.assertIsNone(self.hook(name, agent_id="agent-1", agent_type="Explore"))
         self.assertEqual(store.session(SID).warned, {})          # nothing marked either
-        self.assertIsNone(store.session(SID).request_said)
 
     def test_stale_numbers_say_nothing_and_start_a_probe(self):
-        self.near(five=(96, 3), at=NOW - 11 * 60)                # 2 x 5 min ago
+        self.stage(at=NOW - 11 * 60)                             # 2 x 5 min ago
         self.assertIsNone(self.said())
         self.assertEqual(self.probes, ["a"])
-        self.near(five=(96, 3), at=NOW - 9 * 60)
-        self.assertIsNotNone(self.said())
+        self.stage(at=NOW - 9 * 60)
+        self.assertEqual(self.said(), self.HANDOFF)
 
     def test_outside_the_hub_or_without_a_session_nothing(self):
-        self.near(five=(96, 3))
+        self.stage()
         with mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(b'{"cwd": "/x"}'))), \
                 mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "hub/accounts/a")}):
             self.assertEqual(self.go("hook", "post-tool"), (0, "", ""))
@@ -263,9 +219,10 @@ class Speaking(Work):
     def test_the_prompt_hook_joins_a_pending_worker_by_name(self):
         store.add_worker(Worker("w-late", PARENT, "a", str(self.here), NOW))
         (self.log / "live").write_text("w-late\n")
-        self.near(sid="s-main")                                  # its main session's spend
-        self.assertIn("You are a worker", self.said("prompt", sid="s-w-late"))
+        self.stage()
+        self.assertIsNone(self.said("prompt", sid="s-w-late"))   # a worker: nothing to say
         self.assertEqual(store.worker("w-late").session, "s-w-late")
+        self.assertEqual(store.session("s-w-late").role, ROLE_WORKER)
 
     def test_post_tool_never_lists_sessions(self):
         store.add_worker(Worker("w-late", PARENT, "a", str(self.here), NOW))
@@ -274,13 +231,75 @@ class Speaking(Work):
         listed.assert_not_called()
 
 
+class WorkerStage(Speaking):
+    """A main session hears of its workers' accounts on other accounts: the pickup that moves
+    a worker when its account is in the handoff stage and a target exists, and when it ends."""
+    WID = "s-w-b-0000-4000-8000"
+
+    def setUp(self):
+        super().setUp()
+        store.note_session(SessionSeen(SID), "a", NOW)
+        w = Worker("w-b", SID, "b", str(self.here), NOW)
+        store.add_worker(w)
+        cli._joined(w, self.WID, NOW)
+
+    LINE = ("fairshare: account b, where worker w-b runs, is in its handoff stage: run fairshare "
+            "pickup s-w-b-00 to continue the worker on a.")
+
+    def test_the_pickup_line_once_then_the_all_clear(self):
+        self.snap("b", five=(95, 3), seven=(40, 50))
+        self.assertEqual(self.said(), self.LINE)
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {f"worker:{self.WID}": [NOW + 3 * H, "b"]})
+        self.snap("b", five=(10, 4), seven=(40, 50))             # its 5h reset
+        self.assertEqual(self.said(), "fairshare: the handoff stage on account b, where worker "
+                                      "w-b runs, is over: no pickup needed.")
+        self.assertIsNone(self.said())
+
+    def test_a_limit_lifting_within_half_an_hour_says_when_and_no_pickup(self):
+        self.snap("b", five=(95, 3), seven=(40, 50))
+        self.assertEqual(self.said(), self.LINE)
+        self.snap("b", five=(95, 0.4), seven=(40, 50))
+        self.assertEqual(self.said(), "fairshare: account b's limit, where worker w-b runs, lifts "
+                                      "at 08:24: no pickup needed.")
+        self.assertIsNone(self.said())
+
+    def test_the_main_accounts_line_comes_first(self):
+        self.snap("b", five=(95, 3), seven=(40, 50))
+        self.stage()
+        self.assertEqual(self.said(), self.HANDOFF.replace("work on b.", "work on c.") + "\n"
+                         + self.LINE.replace("worker on a.", "worker on c."))
+
+    def test_no_target_nothing(self):
+        self.snap("b", five=(95, 3), seven=(40, 50))
+        self.stage(five=(75, 3))                                 # 25 points for 3 hours: no
+        self.snap("c", five=(100, 3), seven=(10, 50))
+        self.assertIsNone(self.said())
+        self.assertEqual(store.session(SID).warned, {})
+
+    def test_a_worker_stopped_by_its_limit_ended_removed_or_on_the_main_account_is_not_said(self):
+        self.snap("b", five=(95, 3), seven=(40, 50))
+        cases = {
+            "stopped": lambda: store.note_session(SessionSeen(self.WID), "b", NOW, stranded=True),
+            "ended": lambda: store.update_session(SID, lambda r: cli.replace(
+                r, reported={f"ended:{self.WID}": 1})),
+            "removed": lambda: store.remove_worker("w-b", NOW),
+            "on a": lambda: store.move_session(self.WID, "a")}
+        for label, make in cases.items():
+            with self.subTest(label):
+                self.setUp()
+                self.snap("b", five=(95, 3), seven=(40, 50))
+                make()
+                self.assertIsNone(self.said())
+
+
 class NewParent(Speaking):
     """A worker hears, once, that its main session continued under a new id."""
     NEW = "9f8e7d6c-0000-4000-8000-00000000000b"
 
-    def handed_off(self, copy=False):
+    def handed_off(self):
         store.note_session(SessionSeen(PARENT), "a", NOW)
-        store.link_session(PARENT, SessionSeen(self.NEW), "b", NOW, copy=copy)
+        store.link_session(PARENT, SessionSeen(self.NEW), "b", NOW)
 
     def notice(self, name=None):
         return (f"fairshare: your main session is now {self.NEW}"
@@ -315,9 +334,9 @@ class NewParent(Speaking):
         for p in (store.state_dir() / "workers").glob("*.json"):
             p.unlink()
 
-    def test_a_copy_or_a_same_id_pickup_says_nothing(self):
+    def test_a_same_id_pickup_says_nothing(self):
         self.worker()
-        self.handed_off(copy=True)                               # the old one may still run
+        store.note_session(SessionSeen(PARENT), "a", NOW)
         store.move_session(PARENT, "b")                          # same id, another account
         with mock.patch.object(claude, "list_sessions") as listed:
             self.assertIsNone(self.said())

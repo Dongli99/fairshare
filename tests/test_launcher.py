@@ -136,11 +136,6 @@ class Account_(Fleet):
         _, _, err = self.go("run", "-a", "a")
         self.assertNotIn("warning", err)
 
-    def test_the_grace_warning_still_applies(self):
-        self.snap("a", five=(95, 0.5), seven=(40, 50))
-        _, _, err = self.go("run", "-a", "a")
-        self.assertIn("warning: a five_hour window 95% used, resets in 30m", err)
-
     def test_an_unknown_id_lists_the_configured_ones_and_exits_2(self):
         code, _, err = self.go("run", "-a", "nope")
         self.assertEqual(code, 2)
@@ -348,13 +343,12 @@ class NoShortWindow(Fleet):
         self.assertEqual(self.go("run")[0], 0)
         self.launched.assert_called_once()
 
-    def test_the_warning_helper_copes_with_no_short_window(self):
+    def test_the_stage_copes_with_no_short_window(self):
+        """A stray five-hour window does not matter; with no `per_short`, the week alone gives
+        no room to count, so the plan never reaches the handoff stage."""
         acct = Account("w", "claude", load_plan("weekly-only"), Path("/x"))
-        v = policy.rank([acct], {}, NOW)[0]
-        with mock.patch.object(cli, "_say") as say:
-            cli._grace_warning(v, {"w": Snapshot(NOW, {"five_hour": Window(99, NOW + 60)})},
-                               model.Tuning(), NOW)
-        say.assert_not_called()
+        snap = Snapshot(NOW, {"five_hour": Window(99, NOW + 60), "seven_day": Window(99, NOW + H)})
+        self.assertEqual(cli._stage(acct, snap, NOW), "continue")
 
     def test_the_short_window_length_is_plan_data_for_the_status_line(self):
         self.assertEqual(load_plan("claude-pro").short_hours, 5.0)

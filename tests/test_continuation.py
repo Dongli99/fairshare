@@ -245,7 +245,7 @@ class Readers(Continuation):
         self.assertEqual(code, 0, err)
         self.assertNotIn(f"session {SID[:8]}", out)
         self.assertIn(f"session {NEW[:8]}", out)
-        self.assertEqual(cli._hour_spend([store.session(SID)], NOW)[SID], 2.0)   # still spent
+        self.assertEqual(store.spend(store.session(SID).costs, NOW - 3600, NOW), 2.0)   # kept
 
     def test_pickup_by_the_old_prefix_finds_the_new_id(self):
         self.assertEqual(cli._find_session(SID[:8]).id, NEW)
@@ -281,44 +281,13 @@ class Readers(Continuation):
         self.assertEqual(store.latest("c-0"), f"c-{store.CHAIN_STEPS}")
 
 
-class Copy(Continuation):
-    """A copy of a session that may still run (the foreground fork through FAIRSHARE_CONTINUES
-    with `:copy`, the background fork) links to the original without taking its place: the
-    original keeps its account, workers and line in status."""
+class StillRunning(Continuation):
+    """A session that may still run."""
 
     def setUp(self):
         super().setUp()
         store.update_session(SID, lambda old: SessionRecord(**{**vars(old), "stranded_at": None}))
         (self.log / "live").write_text(f"{SID}\n")                   # still running
-
-    def original_whole(self, copy):
-        new, old = store.session(copy), store.session(SID)
-        self.assertEqual((new.account, new.role, new.parent, new.model, new.effort,
-                          new.continues), ("b", ROLE_WORKER, "p-1", "claude-opus-5-5", "high",
-                                           SID))
-        self.assertEqual((old.account, old.moved_to, old.parent), ("a", None, "p-1"))
-        self.assertEqual([w.name for w in store.workers(SID)], ["w-1"])
-        self.assertEqual(store.workers(copy), [])
-        self.assertEqual(store.session("s-w").parent, SID)
-        self.assertEqual(store.total_cost(old.costs), 2.5)
-        self.assertEqual(self.note(copy), "## old\nparser done\n")
-        self.assertEqual(store.latest(SID), SID)
-        code, out, err = self.go("status")
-        self.assertEqual(code, 0, err)
-        self.assertIn(f"session {SID[:8]}", out)
-
-    def test_the_foreground_copy_is_linked_as_a_copy(self):
-        self.capture(value=f"{LAUNCHER}:{SID}:copy", cost={"total_cost_usd": 0.5})
-        self.original_whole(NEW)
-        self.assertEqual(store.total_cost(store.session(NEW).costs), 0.5)   # its own series
-
-    def test_the_background_fork_is_linked_as_a_copy(self):
-        code, out, err = self.go("fork", SID, "--bg")
-        self.assertEqual(code, 0, err)
-        copy = "s-fork-0a1b2c3d"
-        self.assertIn(f"continued as session {copy} on b", out)
-        self.original_whole(copy)
-        self.assertFalse((self.log / "stops").exists())
 
     def test_a_pickup_of_it_from_no_terminal_is_refused_and_stops_nothing(self):
         code, out, err = self.go("pickup", SID, "--bg")

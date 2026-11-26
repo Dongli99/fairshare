@@ -32,10 +32,6 @@ web = "claude.ai"                    # where a subscription signs in and out in 
 default_plan = "claude-pro"
 # what setup offers to turn on in every session, for its question
 remote_control = "Remote Control (follow and steer sessions from claude.ai/code or the Claude app)"
-# how a full reset claude.ai granted is used, for messages: it refills the 5-hour and the weekly
-# limit now and keeps the weekly reset day (claude.ai, seen by the owner, 2026-11; fairshare
-# cannot read held resets: the tool gets them from an internal service, not documented)
-full_reset = "`/limit-reset` in a session on that account, or claude.ai's usage page"
 
 # The command-line tool.
 BINARY = "claude"
@@ -69,11 +65,10 @@ usage_timeout = USAGE_TIMEOUT
 # `--help`); `agents --json` lists that name.
 # `--resume <id>` continues a session under its own id (any account can: the hub shares where
 # the tool keeps sessions), in the foreground or with `--bg` (docs: CLI reference, /sessions and
-# /agent-view, read 2026-11-12: on 2.1.257 or later the same id, or a copy with a `note:` line);
-# `--fork-session` continues a copy under a new id. `--model <id>` and `--effort <level>` set the
-# session's model and effort level (CLI reference, read 2026-11-12).
-BG_ARGS, NAME_ARGS, RESUME_ARGS, FORK_ARGS = ("--bg",), ("--name",), ("--resume",), \
-    ("--fork-session",)
+# /agent-view, read 2026-11-12: on 2.1.257 or later the same id, or a copy with a `note:` line).
+# `--model <id>` and `--effort <level>` set the session's model and effort level (CLI reference,
+# read 2026-11-12).
+BG_ARGS, NAME_ARGS, RESUME_ARGS = ("--bg",), ("--name",), ("--resume",)
 # A background resume (`--bg --resume <id>`) of a session that has saved background state (one
 # that ran in the background, on that account) continues it in place only when at most one
 # positional (the prompt) follows: any other argument (`--name`, `--model`, `--effort`) starts a
@@ -83,7 +78,7 @@ BG_ARGS, NAME_ARGS, RESUME_ARGS, FORK_ARGS = ("--bg",), ("--name",), ("--resume"
 # state is taken, unverified, unreadable or restricted, and says so on stderr in one `note:` line
 # naming the copy's short id. Read in 2.1.330's own code (the background dispatch), 2026-11-21.
 # The foreground `--resume <id>` has no such rule: it refuses a session running in the background
-# (`claude stop` first, or `--fork-session`) and otherwise continues it with the flags given.
+# (`claude stop` first) and otherwise continues it with the flags given.
 RESUME_BARE = True
 resume_bare = RESUME_BARE
 COPY_NOTE = re.compile(r"^note: .*\bstarted a (?:restricted )?copy\b.*$", re.M)
@@ -374,8 +369,8 @@ def session_pid() -> int | None:
         return None
 
 
-def resume_args(session_id: str, fork: bool = False) -> list[str]:
-    return [*RESUME_ARGS, session_id, *(FORK_ARGS if fork else ())]
+def resume_args(session_id: str) -> list[str]:
+    return [*RESUME_ARGS, session_id]
 
 
 def name_args(name: str) -> list[str]:

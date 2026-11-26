@@ -1,4 +1,4 @@
-"""Stage 5c, part A: what each session spends. The cost series is pure (store.add_cost,
+"""Stage 5c, part A: what each session spends (recorded, never shown). The cost series is pure (store.add_cost,
 store.spend); the rest runs on the fleets of test_handover and test_workers (temp HOME, config,
 state and hub; fakes first on PATH, proved in Fleet.setUp; inherited CLAUDE*, FAIRSHARE_* and
 BROWSER cleared; the clock injected)."""
@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest import mock
 
-from fairshare import cli, rates, store
+from fairshare import cli, store
 from fairshare.model import ROLE_WORKER, SessionRecord, SessionSeen, Worker
 
 from test_handover import Handover
@@ -115,22 +115,22 @@ class Status(Handover):
                 block.append(l.strip())
         return block
 
-    def test_heaviest_first_with_shares_roles_names_and_no_data(self):
-        costed("s-main-1", "b", [0.5, 0.5, 1.0])                  # 2.0 in the hour
+    def test_most_recently_seen_first_with_roles_and_names_and_no_dollars(self):
+        costed("s-main-1", "b", [0.5, 0.5, 1.0], seen=NOW - 2 * M)
         costed("s-wrk-22", "b", [3.0, 3.0], role=ROLE_WORKER, parent="s-main-1", model=None,
-               cwd="/w/other")                                    # 6.0
+               cwd="/w/other", seen=NOW - M)
         store.add_worker(Worker("w-s-main-1-1", "s-main-1", "b", "/w/other", NOW - H,
                                 "s-wrk-22"))
-        costed("s-quiet3", "b", [], model="Haiku")                # no cost data
-        costed("s-gone-44", "b", [9.0], seen=NOW - 11 * M)        # not live, but in the total
+        costed("s-quiet3", "b", [], model="Haiku", seen=NOW - 3 * M)
+        costed("s-gone-44", "b", [9.0], seen=NOW - 11 * M)        # not live
         self.assertEqual(self.block(), [
-            "session s-wrk-22 · - · other · w-s-main-1-1 · $6.00 (35%)",
-            "session s-main-1 · Opus · proj · main · $2.00 (12%)",
-            "session s-quiet3 · Haiku · proj · main · -"])
+            "session s-wrk-22 · - · other · w-s-main-1-1",
+            "session s-main-1 · Opus · proj · main",
+            "session s-quiet3 · Haiku · proj · main"])
 
     def test_at_most_five_then_more(self):
         for i in range(7):
-            costed(f"s-{i}", "b", [float(i + 1)])
+            costed(f"s-{i}", "b", [float(i + 1)], seen=NOW - (6 - i) * M)
         block = self.block()
         self.assertEqual([l.split()[1] for l in block[:5]], ["s-6", "s-5", "s-4", "s-3", "s-2"])
         self.assertEqual(block[5:], ["+2 more"])
@@ -142,25 +142,6 @@ class Status(Handover):
         self.assertEqual([l.split()[1] for l in self.block()], ["s-in"])
         self.assertEqual([l.split()[1] for l in self.block("c")], ["s-on-c"])
         self.assertEqual(self.block("a"), [])
-
-
-class Heaviest(Handover):
-    def text(self, me="s-me"):
-        accounts = cli._load()[0]
-        acct = next(a for a in accounts if a.id == "b")
-        rec = store.session(me)
-        room = rates.Room(0.5, "five_hour", NOW + 2 * H, 5.0, {"five_hour": 0.5})
-        return cli._warning_text(rec, acct, (room, 2.0), accounts, cli._load()[1], NOW)
-
-    def test_added_at_half_or_more_absent_below(self):
-        costed("s-me", "b", [1.0])
-        costed("s-big", "b", [1.0], cwd="/w/api")
-        self.assertIn("to about $5.00. Heaviest in the last hour: session s-big (Opus, api, "
-                      "50%). ", self.text())
-        costed("s-big", "b", [0.9], cwd="/w/api")
-        self.assertNotIn("Heaviest", self.text())
-        costed("s-me", "b", [9.0])                                # its own spend never counts
-        self.assertNotIn("Heaviest", self.text())
 
 
 class WorkerCost(Work):

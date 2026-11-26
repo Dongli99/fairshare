@@ -176,7 +176,7 @@ class WorkerCommand(Work):
         self.assertEqual(code, 0, err)
         name = "fs-parser"
         self.assertEqual(out, f"worker {name} started on a (session s-fs-par)\n")
-        self.assertIn("starting worker fs-parser on a: a before b (score ", err)   # and why
+        self.assertIn("fairshare: starting worker fs-parser on a\n", err)      # no reasons
         args = self.bg_args("a")
         self.assertEqual(args[:3], ["--bg", "--name", name])
         self.assertEqual(args[3:], ["--model", "opus", "--effort", "high",

@@ -8,8 +8,8 @@ Every command, message and setting. For what fairshare is and how to install it,
 - **Hub**: the folder fairshare keeps (default `~/.local/share/fairshare/hub`). It holds one
   Claude Code config folder per account, all linked to one shared set of settings, history and
   skills.
-- **Main session**: a session started by `fairshare`. It hears fairshare's warnings and decides
-  for itself and its workers.
+- **Main session**: a session started by `fairshare`. It hears from fairshare only about the
+  [handoff stage](#the-two-stages), and decides for itself and its workers.
 - **Worker**: a background Claude Code session a main session starts for big or long work.
 - **Pickup**: the same session continues on another account, with its whole context.
 - **Handoff**: a fresh session starts from a note the old one wrote.
@@ -150,18 +150,12 @@ When two accounts are within 10% of each other, a new session goes to the one wi
 sessions running, so sessions started together spread out. `fairshare status` marks with `>` the
 account the next session would start on, and its last line says why that account goes before the
 next one: both scores, the rule, and both accounts' reasons (`why a: a before b (score 1.18 vs
-0.42: ...)`). Percentages alone can point the other way: room that resets sooner is spent first,
-and a planned full reset counts as room (its row says how much is left until the reset is used).
-The warning's best other account and `fairshare worker` say the same.
+0.42: ...)`). Percentages alone can point the other way: room that resets sooner is spent first.
+That is for you: the commands an agent runs (`worker`, `handoff`, `pickup`) print only the
+account chosen and what happened. A launch starts at once, with one line naming the account.
 
-If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `fork`, `handoff` and `join`
-say so first and stop, before any sign-in check or usage probe.
-
-**The launch pause.** When the choice is close (the chosen account is nearly spent, the next one
-is within 10% of it, or a warning was printed), `fairshare` pauses for a moment on a terminal:
-it lists the accounts that can take work and shows `starting a in 3 s · Enter = now · 1-2 = that
-account · q = quit`. Set `launch_pause = 0` under `[policy]` in `accounts.toml` to turn it off
-(or another number of seconds). `run -a`, pickups and handoffs never pause; a switch does.
+If the `claude` command is not on PATH, `fairshare`, `run`, `pickup`, `handoff` and `join` say so
+first and stop, before any sign-in check or usage probe.
 
 **When no account can take work.** fairshare prints one line per account (why, and when it is
 usable again). On a terminal it offers `[w]ait` for the soonest account, `[s]tart` on the top
@@ -223,41 +217,11 @@ shows `as of 14:05` until they arrive. The bar redraws once a minute (`refreshIn
 the hub's statusLine when it has none). It also shows a per-model weekly limit once it is nearly
 used up (`Fable 96% (Thu 03:00)`).
 
-## A full reset this week
-
-claude.ai sometimes grants an account a full reset, with a date to use it by. Using it
-(`/limit-reset` in a session on that account, or claude.ai's usage page) refills the 5-hour and
-the weekly limit now; the weekly reset day stays the same. Claude Code does not tell fairshare
-which resets an account holds, so you tell it: pick a busy week and plan the reset.
-
-`fairshare full-reset ID` plans it for this week: the account then ranks as if its week had 100%
-more room (`status` shows `+100% planned` on its row and when the plan ends). A spent week still
-takes no work until the reset is used. `fairshare full-reset` shows the plans,
-`fairshare full-reset ID --cancel` drops one (`--cancel` alone drops them all); planning again
-replaces it. An account whose current week fairshare has not seen yet cannot be planned
-(`fairshare status` asks for its usage).
-
-The status bar marks the week: `7d 20% +reset`, and `7d 97% (Sun 10:00) use reset` once the reset
-is due: the week by itself has less room left, in dollars, than the account spent in the last hour
-(the test the [warning](#warnings) uses; an account with no rate yet never shows it). From then
-on the warning on that account (to a main session or a worker) says not to move: keep working
-there until the limit stops the session, then you use the reset and the stopped sessions
-continue on the same account. The refill is worth most on a spent week; moving early would leave
-the rest of it unused (on Pro, the last tenth of a week is about a whole 5-hour window). A
-5-hour window near its limit while the week still has room warns as usual and keeps the reset for
-a fuller week.
-
-The plan ends when fairshare sees the reset used: a usage probe that finds the 5-hour or the
-weekly window lower than before under the same reset (the status bar's own lower numbers are
-taken for a stale redraw, so the next probe, within `refresh_minutes`, is what notices), or a
-window's reset time moving. It also ends at the regular weekly reset, used or not: a plan never
-carries into the next week. Usage the provider credits back for another reason ends it too,
-early; the account then simply ranks on its real numbers.
-
 ## When an account runs out
 
-Several sessions on one account share its limit, and the last few percent can go in minutes, so
-fairshare does not try to hand work over before the limit. When Claude Code stops a turn because
+Several sessions on one account share its limit, and the last few percent can go in minutes.
+Before the limit, a main session hears of the [handoff stage](#the-two-stages); when no account
+can take its work, it works on into the limit, and this is what follows. When Claude Code stops a turn because
 the account hit its limit (its `StopFailure` hook, which fairshare wires in the hub's settings),
 the session is marked as stopped, and:
 
@@ -287,14 +251,12 @@ the session is marked as stopped, and:
   trying again. To resume it later: fairshare run -a work -- --resume <id>`.
 - **The status bar** ends in a red `out · ! fairshare pickup` while that account cannot take work.
   Typing `! fairshare pickup` in the session asks its launcher to move it now (no check that the
-  account is out, no wait for the reset: you asked), to the best account that can take work. When
-  none can, it says `fairshare: no account can take work now; the soonest is play, usable at
+  account is out, no wait for the reset: you asked), to the [target](#the-two-stages). When there
+  is none, it says `fairshare: no account can take the work now; the soonest is play, usable at
   16:10; nothing done` and leaves the session as it is. In a session not started by `fairshare`
-  nothing can stop the session, so it refuses and names the two ways that work: `fairshare
-  handoff "<note>"` (a fresh session that reads your note) or `fairshare fork` (a copy of this
-  session in the background).
-- **From a terminal**, `fairshare pickup` resumes a recorded session, see
-  [Pickup and fork](#pickup-and-fork).
+  nothing can stop the session, so it refuses and names the way that works: `fairshare handoff
+  "<note>"` (a fresh session that reads your note).
+- **From a terminal**, `fairshare pickup` resumes a recorded session, see [Pickup](#pickup).
 
 Moving a session to another account reads its whole context once on that account, uncached: that
 is the price of keeping its reasoning. For a lean start use a handoff. Each account is its own
@@ -304,16 +266,27 @@ earlier thinking with a notice. Resumed on the same account it keeps its id and 
 
 ## Pickup, handoff, switch
 
-Four ways to continue in another session, each with `--model M`, `--effort E` (override the
-session's latest, which carry over otherwise) and `-a ID` (that account, skipping the ranking;
-the folder trust check still applies):
+Three ways to continue in another session, each with `--model M`, `--effort E` (override the
+session's latest, which carry over otherwise) and `-a ID` (that account, skipping the ranking
+and the target rule; the folder trust check still applies):
 
 | command | what starts |
 |---|---|
-| `fairshare pickup` | the same session, resumed on the best account, with its whole context |
-| `fairshare fork` | a copy of the session under a new id, with its whole context; the original goes on |
-| `fairshare handoff ["<note>"]` | a fresh session that first reads a handoff note: what was done, what is next, open decisions, files touched |
-| `fairshare` (bare, inside a session) | a fresh session with nothing carried but the folder, the model and the effort (a switch) |
+| `fairshare pickup` | the same session, resumed on the [target](#the-two-stages), with its whole context |
+| `fairshare handoff ["<note>"]` | a fresh session on the target that first reads a handoff note (what was done, what is next, open decisions, files touched); this session's workers on its account move to the target first |
+| `fairshare` (bare, inside a session) | a fresh session on the best account with nothing carried but the folder, the model and the effort (a switch) |
+
+`pickup` and `handoff` go to the target: the first account of the start ranking, other than the
+session's own, that can take the work (see [The two stages](#the-two-stages)). With none, they
+change nothing: pickup says `no account can take the work now; ... nothing done`, and handoff
+says what to do instead, in the words of the handoff stage line (write your checkpoint now, then
+keep working; when the limit stops this session, Claude Code resumes it at 15:40).
+
+**Handoff moves the workers first.** Each worker of the session that Claude Code lists running
+on the session's account is picked up onto the target, as `fairshare pickup <its id>` would (it
+is stopped, then resumed in place, in the background; one line each says what happened). A
+worker that cannot be moved stays: its limit stops it and Claude Code resumes it at the reset.
+Workers on other accounts stay where they are, and become the fresh session's workers.
 
 **Handoff with a note** (what the agent runs) saves the note as the session's checkpoint. When
 your project already has its own way to hand off (a handoff file it writes somewhere, say), the
@@ -350,7 +323,7 @@ refuses outside a session, and refuses no note in a session `fairshare` did not 
 agent: `/fairshare handoff`).
 
 **A switch** prints how to resume the old session (`fairshare run -a work -- --resume <id>`),
-then starts the fresh one; the launch pause applies. It works only in a session started by
+then starts the fresh one. It works only in a session started by
 `fairshare`: anywhere else it says to `/exit` and run `fairshare`. Bare `fairshare` never starts
 a session inside another.
 
@@ -375,16 +348,15 @@ by default), words only: no tool calls, tool output or thinking. A `!` command y
 `user ran: <command>` and its output as `output:`, at most 20 lines. A record with no transcript
 says `no transcript recorded for <id>`.
 
-### Pickup and fork
+### Pickup
 
-`fairshare pickup` continues **the same session, under its own id**; it never makes a copy.
-`fairshare fork` continues **a copy under a new id**, on purpose, and leaves the original as it
-is. Both take `[SESSION] [-a ID] [--bg] [--model M] [--effort E]`; SESSION is the session id or
-its first characters.
+`fairshare pickup` continues **the same session, under its own id**; it never makes a copy. It
+takes `[SESSION] [-a ID] [--bg] [--model M] [--effort E]`; SESSION is the session id or its first
+characters.
 
 - **From a terminal**, `fairshare pickup <id>` resumes the session in the foreground, in its
-  folder; `--bg` does it in the background (`claude --bg --resume`, on the best account that
-  trusts the folder or can get that trust copied from another account; Claude Code prints how
+  folder, on the target; `--bg` does it in the background (`claude --bg --resume`; the target
+  must trust the folder or get that trust copied from another account; Claude Code prints how
   to attach to it; background sessions open links in the system browser). Inside another
   session, or with no terminal, it runs in the background.
 - **A session that may still run** (its account lists it running) is never resumed alongside
@@ -394,14 +366,12 @@ its first characters.
     says first that the turn is lost (its conversation is kept). Yes stops it (as `fairshare run
     -a <account> stop <id>` would), waits a few seconds until Claude Code no longer lists it,
     then resumes it in place under its name. A stop that fails, or a session still listed, does
-    nothing. No does nothing and names `fairshare fork <id>`.
+    nothing. No does nothing.
   - a session open in a terminal is never stopped: `0a1b2c3d is open in a terminal; not picked
-    up. Exit it there, then pick it up (it resumes in place); or `fairshare fork 0a1b2c3d`
-    continues a copy and leaves it running`.
+    up. Exit it there, then pick it up (it resumes in place)`.
   - with no terminal (an agent, a script), or when Claude Code's list cannot be read, nothing is
     stopped: `0a1b2c3d is still running; not picked up. If it is yours, stop it first
-    (fairshare run -a work stop <id>), then pick it up; or `fairshare fork 0a1b2c3d` continues a
-    copy and leaves it running`.
+    (fairshare run -a work stop <id>), then pick it up`.
   - **your own worker**, picked up by its main session (or the session that main session went on
     as, after a handoff or a pickup): stopped without asking, since fairshare started it and its
     main session manages it, then resumed in place. A worker in the middle of a turn gets one
@@ -409,23 +379,16 @@ its first characters.
     nothing. A stop that fails, or a worker still listed, does nothing, as above.
   A session stopped by its limit is no exception: left waiting for its reset, it still runs.
   Nothing is stopped when no account can take the session.
-- **On the session's own account, a background pickup of a background session passes only the
-  resume and its prompt.** Claude Code keeps a background session's own saved name, model and
+- **On the session's own account (`-a`), a background pickup of a background session passes only
+  the resume and its prompt.** Claude Code keeps a background session's own saved name, model and
   effort, and starts a copy if anything else is passed. A session counts as a background one
   when it is a worker, or when Claude Code lists it with that kind among the account's sessions,
   ended ones included (`agents --json --all`); any other keeps its name, model and effort
-  passed as before. For a background one, `--model` or `--effort` there is refused, naming
-  `fairshare fork <id> --model ...`; on another account they apply (the session goes on under a new id
-  there, linked to the old one). If Claude Code still starts a copy for its own reasons (the
+  passed as before. For a background one, `--model` or `--effort` there is refused; on another
+  account they apply (the session goes on under a new id there, linked to the old one). If Claude Code still starts a copy for its own reasons (the
   session runs elsewhere, its saved state cannot be read), fairshare says so, with Claude
   Code's `note:` line, and links the copy; it never claims the session continued in place.
-- **`fairshare fork`** works whether the original runs or not and never stops it. The copy
-  starts in the original's folder, is told it is a copy and that the original goes on, and is
-  named after the original's listed name with the next fork number (`fairshare-6a-f2`, then
-  `-f3`), or `fork-<first 8 of its id>` when the original is not listed. The original keeps its
-  account, its workers and its line in `fairshare status`. Inside a session, bare `fairshare
-  fork` copies that session, in the background.
-- **The list.** Bare `fairshare pickup` or `fairshare fork` from a terminal, outside a session,
+- **The list.** Bare `fairshare pickup` from a terminal, outside a session,
   lists up to 8 recorded main sessions whose folder is still there: those in the current folder
   first, then stopped by their limit first, then the most recently seen:
 
@@ -434,13 +397,13 @@ its first characters.
     2  9f8e7d6c  api   b  running in the background, asks to stop it  seen 07:58      "Now add a test for December to January."
     3  5e6f7a8b  docs  c  open in a terminal                          seen 07:50      "Review the changelog"
     4  1f2e3d4c  docs  a  stopped                                     seen Wed 16:00  "Rewrite the install section"
-  fairshare: workers are not listed (their main session manages them); fairshare pickup <id> and fairshare fork <id> still take one by id
+  fairshare: workers are not listed (their main session manages them); fairshare pickup <id> still takes one by id
   Pick up which? [1]:
   ```
 
   The last column is the last message you typed in that session (from the end of its
   transcript, shown only here; the prompts fairshare itself sends, such as "fairshare moved this
-  session …", are skipped). In pickup's list a running row says what picking it does
+  session …", are skipped). A running row says what picking it does
   (`asks to stop it`, or `open in a terminal`). Enter takes the first row, a number picks one,
   anything else asks again; end of input or Ctrl-C does nothing. Without a terminal the list
   goes to stderr, nothing is asked, and the exit code is 2.
@@ -469,7 +432,8 @@ run the commands yourself, from inside a session:
   printed, the worker stays unmarked and the exit status is 1; a name that is none of this
   session's workers exits 2.
 - `fairshare watch` waits until something concerns this session and prints one line per event:
-  its account is near its limit (the [warning](#warnings)), a worker wrote a checkpoint (with the note's path), a worker was
+  the [handoff stage](#the-two-stages) (its own account's, or a worker's account's), a worker
+  wrote a checkpoint (with the note's path), a worker was
   stopped by its limit (with when that limit resets, since Claude Code resumes the worker by
   itself then, and `fairshare pickup <id>` to move it now), a worker ended its turn and is
   waiting (`worker fs-watch-stops ended its turn and is waiting: fairshare transcript 5e55105e --tail 1`;
@@ -498,7 +462,7 @@ run the commands yourself, from inside a session:
   nothing.
 - A worker stopped by its limit: wait for its reset, or `fairshare pickup <its session id>`
   from its main session stops it (left waiting for its reset it still runs) and resumes it on
-  the best account, in the background, under its own id and name, with its model and effort. `fairshare fork <id>` is a copy instead, and the worker goes on. To move the main
+  the target, in the background, under its own id and name, with its model and effort. To move the main
   session itself: `fairshare pickup` (the same session) or `fairshare handoff "<note>"` (a
   fresh one).
 - A worker that fails on its environment rather than its limit (every lookup of a system
@@ -511,80 +475,82 @@ run the commands yourself, from inside a session:
   then `fairshare pickup <id> --bg` from a shell that works: the stopped worker resumes in place,
   under a fresh shared process.
 
-## Warnings
+## The two stages
 
-When the session's account has under an hour left before its limit at its current pace,
-fairshare adds one line to the session's context at its next step (Claude Code's `PostToolUse`
-and `UserPromptSubmit` hooks, which fairshare wires in the hub). "Left" is the account's room in
-dollars (see `status`'s room line in [Who is drawing the quota](#who-is-drawing-the-quota)): the
-smaller of its 5-hour and weekly room. "Pace" is what all the account's sessions spent in the
-last hour: they share the room. So: the room is less than the last hour's spend. Nothing spent
-in the last hour, no warning. It is said once per session for each instance of the window that
-binds: when that window resets, or the other window comes to bind, it may warn again. A main
-session reads, for example: `fairshare: account a has about $0.80 left before its limit, about
-24 min at its pace in the last hour ($2.00); it refills at 11:00 to about $10.00. This account
-can no longer take work (five_hour 92% used, resets in 3.0h) and b can (score 1.20), so move: at
-your next stopping point, run fairshare handoff "<what was done, what is next, ...>" to continue
-in a fresh session on the best account, which reads your note first. Best account to move to: b
-(5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: ...); b: seven_day 40% used, resets in 50h;
-c: ... Workers you started: ...`. The verdict, stay or move, follows the same ranking as
-`status`, this account included: while it still ranks first (its room expires sooner than the
-others', so it is spent first; a tie counts as first, since moving costs a cold start), or no
-other account can take work, the line says this is not a stop: keep working until the limit
-stops you, with no checkpoint, handoff or pickup. An account whose room would not last an hour at
-this account's pace is never a place to move to (the cold start would buy minutes of work and a
-second move); when that leaves none, the line says to stay. The refill is the room right after the binding window resets: a 5-hour
-refill is capped by what the week still allows, and a weekly refill leaves the 5-hour window to
-bind. That is the default move, `warning_move = "handoff"`: the fresh session starts lean
-instead of reading the whole context again on another account, and it can read the old
-session's transcript for anything the note missed. Set `warning_move = "pickup"` under
-`[policy]` for the other: the line then says to write a checkpoint and run fairshare pickup, and
-the same session continues on the best account with its whole context. (`! fairshare pickup`
-works at any time, whichever is set; a session stopped by its limit is unchanged, see above.) A
-worker reads that it should finish its current step and checkpoint, and that its main session
-decides what happens next. Subagents hear nothing. Numbers older than twice `refresh_minutes`
-warn nothing (fairshare asks for fresh ones instead). When one other session of the same account
-drew at least half of that account's spend in the last hour, the main warning adds `Heaviest in
-the last hour: session 1f2e3d4c (Opus, api, 70%).` The hook reads only local files; with nothing
-to say it prints nothing and takes well under a tenth of a second.
+fairshare starts every session on the best account (see [Starting a session](#starting-a-session))
+and then says nothing to it while its account is in the **continue** stage. It speaks once the
+account reaches the **handoff stage**, and only to a main session: a worker never hears from
+fairshare about usage (its main session manages it), and a subagent hears nothing.
 
-An account with no rate yet (a new account, about its first week, until its usage log holds
-enough windows) gets no warning: there are no dollars to put against its pace, and there is no
-percent fallback. Claude Code's own limit stop still applies, and fairshare's resume after a
-limit (see above) covers the session it stops.
+**When.** An account is in the handoff stage when 10% of a Pro 5-hour window or less is left on
+either of its windows, counted in the same unit on every plan: on the 5-hour window, 10% left on
+Pro, 2% on Max (5 times Pro), 1% on Ultra (10 times); on the week, one 5-hour window is counted
+as 13% of a week (`per_short` in the plan file, measured on real usage), so about 1.3% of a Pro
+week. Usage comes in whole percents, so this is the safe side. A limit that resets within 30
+minutes is waited out instead: no handoff stage, the limit stops the session and Claude Code
+resumes it at the reset ([When an account runs out](#when-an-account-runs-out)). A reset that
+frees nothing (the 5-hour resets soon, but the week is nearly out) does not count.
 
-The same test decides the other "near its limit" cases, so they cannot disagree with the
-warning: what counts as "nearly spent" for the launch pause (see [Starting a
-session](#starting-a-session); a nearly full 5-hour window and a spent model week still count
-too), the status bar's `use reset`, and a moved session's first prompt (`... because a is near
-its usage limit`). The status bar keeps its percentages.
+**The target.** A handoff, and a pickup, go to the first account of the start ranking, other
+than the session's own (and the login it shares), that has the session's model left and can
+take the work: some room, enough to last until its own binding window resets, and, once that
+has reset, room to spare so the session does not reach the handoff stage again at once. In
+points of a Pro 5-hour window, the room it needs is 30 when its reset is an hour or more away,
+20 with 45 minutes to go, 10 with 30 minutes (a straight line through these, capped at 30), and
+30 right after its reset.
+
+**What a main session hears**, at its next step (Claude Code's `PostToolUse` and
+`UserPromptSubmit` hooks, which fairshare wires in the hub), once per instance of the window
+that binds (and once more, as the handoff line, when a target appears after the no-target form
+was said):
+- with a target: `fairshare: account a is in its handoff stage: write your checkpoint and hand
+  off now with fairshare handoff "<what is done, what is next, open decisions, files touched>";
+  it moves this session's workers on a and continues the work on b.` The agent runs it;
+  fairshare moves the workers and starts the fresh session (see [Pickup, handoff,
+  switch](#pickup-handoff-switch)).
+- with none: `fairshare: account a is in its handoff stage and no account can take the work now:
+  write your checkpoint now (fairshare checkpoint "<what is done, what is next>"), then keep
+  working; when the limit stops this session, Claude Code resumes it at 11:00.`
+- when the stage ends while the session is still on that account because room came back (the
+  window reset, or usage was credited back): `fairshare: the handoff stage on account a is over:
+  keep working here.`; because its limit now lifts within 30 minutes (the room is as small as
+  before): `fairshare: account a's limit lifts at 11:00: keep working here; if it stops this
+  session first, Claude Code resumes it then.`
+- for a worker of its own that runs on another account in the handoff stage, when a target
+  exists: `fairshare: account b, where worker w-1 runs, is in its handoff stage: run fairshare
+  pickup 5e55105e to continue the worker on a.`; with no target, nothing (the worker works on
+  into its limit and Claude Code resumes it); and when that stage ends: `fairshare: the handoff
+  stage on account b, where worker w-1 runs, is over: no pickup needed.`, or, when its limit now
+  lifts within 30 minutes, `fairshare: account b's limit, where worker w-1 runs, lifts at 11:00:
+  no pickup needed.` A worker stopped by its limit, ended or removed is not named.
+
+`fairshare watch` says the same lines; whichever of the hook and `watch` comes first says each
+once. Numbers older than twice `refresh_minutes` say nothing (fairshare asks for fresh ones
+instead). The hook reads only local files; with nothing to say it prints nothing and takes well
+under a tenth of a second. `fairshare status` shows each account's stage after its row's reason,
+and the status bar shows `handoff` on an account in that stage.
 
 ## Who is drawing the quota
 
-fairshare records what each session spends, from Claude Code's own running cost in the
-statusLine (`cost.total_cost_usd`): an estimate at API list prices, so on a subscription it
-compares sessions, it is not a bill. `fairshare status` lists, under each account, its sessions
-seen in the last 10 minutes, heaviest in the last hour first (at most 5, then `+N more`):
+`fairshare status` lists, under each account, its sessions seen in the last 10 minutes, most
+recently seen first (at most 5, then `+N more`):
 
 ```
-> b   claude-pro   score  2.40  seven_day 40% used, resets in 25h
-    session 1f2e3d4c · Opus · api · main · $6.00 (70%)
-    session 9a8b7c6d · Haiku · api · fs-watch-stops · $1.10 (13%)
-    session 4d5e6f70 · Sonnet · web · main · -
+> b   claude-pro   score  2.40  seven_day 40% used, resets in 25h · continue
+    session 1f2e3d4c · Opus · api · main
+    session 9a8b7c6d · Haiku · api · fs-watch-stops
+    session 4d5e6f70 · Sonnet · web · main
 ```
 
-Each line: the session id's first 8 characters, its model, its folder, `main` or the worker's
-name, its spend in the last hour and its share of the account's (`-`: no cost seen yet). When a
-worker ends, or its cost has not moved for 30 minutes, its cost and duration are kept on its
-worker record; nothing uses them yet.
+Each line: the session id's first 8 characters, its model, its folder, and `main` or the
+worker's name.
 
-Once an account's usage log holds enough windows, `status` also shows how many dollars it can
-still spend before its limit, which window binds, and when it refills and to how much: `room
-~$4.50 to the limit (5h binds; refills in 3h00m to ~$7.50) · $/pt 5h 0.075 (2 windows,
-0.05-0.1), 7d 0.3 (1 window)`. The rate per percentage point is learned from what its sessions
-spent while each window rose (an API-price estimate, so model mix moves it); the count and the
-range say how well it holds. A plan window with no rate yet is named (`5h no rate yet`) and left
-out of the room. This room is what the [warning](#warnings) acts on.
+fairshare also records, and never shows or uses, what each session spends (Claude Code's own
+running cost in the statusLine, `cost.total_cost_usd`: an estimate at API list prices) and, per
+account, a usage log (`usage/<id>.jsonl` in fairshare's state folder: each new snapshot of its
+windows with the cost its sessions drew since the one before). When a worker ends, or its cost
+has not moved for 30 minutes, its cost and duration are kept on its worker record. This is data
+kept for a later study of what a percent of each window costs; nothing in fairshare reads it.
 
 ## Status as JSON
 
@@ -592,14 +558,15 @@ out of the room. This room is what the [warning](#warnings) acts on.
 2) and nothing else on stdout, for scripts, status bars and other agents. It asks the same
 questions, in the same way, and exits as `status` does; an error (no config, no accounts, no hub)
 goes to stderr with nothing on stdout. Times are epoch seconds and numbers are raw. Every key is
-always present: what does not apply is `null`. `schema` is `2`; it changes only when a key is
+always present: what does not apply is `null`. `schema` is `3`; it changes only when a key is
 removed, renamed or changes meaning, and new keys can appear without it (read what you need and
-ignore the rest). Schema 2 (after 0.3.1): `room` counts to the limit instead of to the 90%
-warning level, `room.warn_pct` is gone, and `room.refills_at` and `room.refill` are new.
+ignore the rest). Schema 3 (0.5.0): `room`, `full_reset` and the sessions' `cost_last_hour` and
+`share_last_hour_pct` are gone, `stage` is new, and sessions are listed most recently seen
+first. Schema 2 (after 0.3.1) had `room` count to the limit.
 
 ```
 {
-  "schema": 2,
+  "schema": 3,
   "now": 1799999999.5,
   "top": "b",
   "why": "b before a (score 1.60 vs 1.00: ...); b: seven_day 20% used, resets in 50h; a: ...",
@@ -628,15 +595,14 @@ Each account:
 | `score` | ranked only: the policy's score; a spent window is negative |
 | `usable_in_hours` | ranked only: hours until it can take work again; 0 when it can now |
 | `reason` | ranked only: the reason the row shows (`seven_day 20% used, resets in 50h`) |
+| `stage` | ranked only: `continue` or `handoff` (see [The two stages](#the-two-stages)) |
 | `left_out` | left out only: why |
 | `same_login_as` | same login only: the id ranked for that login |
 | `windows` | the usage snapshot as stored, `{"<window>": {"used_pct", "resets_at"}}`, with each per-model week under its own key (`seven_day:<model>`); `null` with no snapshot |
 | `usage_as_of` | when that snapshot was captured; `null` with none |
 | `sign_in_ends` | when the sign-in ends; `null` when not known |
-| `full_reset` | `null`, or `{"adds_pct", "until"}`: a planned full reset still to use (`adds_pct` of the week, until it is used or the week resets at `until`) |
-| `room` | `null` until a window has a rate, else the dollars left before the limit: `{"dollars", "binds", "refills_at", "refill", "windows"}`, where `binds` is the window with the least room, `refills_at` when it resets (`null` when it is unused already) and `refill` the room right after (`null` likewise), and `windows` holds, per window with a rate, `{"dollars", "per_pct", "instances", "low", "high"}` (its room, dollars per percentage point, the window instances pooled, and their lowest and highest rate) |
-| `notes` | the lines `status` prints under the account, in order, except the room line and the sessions: plan or sign-in remarks, a failed usage probe, a spent per-model week, a sign-in ending soon, a planned full reset |
-| `sessions` | the live sessions `status` lists for the account (heaviest in the last hour first, at most 5): `{"id", "model", "folder", "role", "cost_last_hour", "share_last_hour_pct"}`: the full session id; its model's name; its folder's last part; `main` or the worker's name; its spend in the last hour in dollars and its share of the account's, in percent; `null` where `status` shows `-` (`share_last_hour_pct` is also `null` when nothing was spent) |
+| `notes` | the lines `status` prints under the account, in order, except the sessions: plan or sign-in remarks, a failed usage probe, a spent per-model week, a sign-in ending soon |
+| `sessions` | the live sessions `status` lists for the account (most recently seen first, at most 5): `{"id", "model", "folder", "role"}`: the full session id; its model's name; its folder's last part; `main` or the worker's name; `null` where `status` shows `-` |
 | `sessions_more` | how many more live sessions there are than listed (`status`'s `+N more`); 0 for none |
 
 ## One assistant: the hub
@@ -747,15 +713,15 @@ and `leave` edit it as text, keeping your comments, with a backup each time. Key
   kept when the detected plan differs), `browser` (see [Browser per account](#browser-per-account)),
   `status_args`, `usage_args`, and `from` (the folder `join --from` copied, written by join: it
   matches your aliases to the account, see [Your own aliases](#your-own-aliases));
-- `[policy]`: `launch_pause` (seconds, default 3, `0` = off), `resume_wait_minutes` (unset by
+- `[policy]`: `resume_wait_minutes` (unset by
   default: a session stopped by its limit waits for Claude Code's own resume; a number N moves
-  it automatically when the reset is more than N minutes away, `0` = always), `warning_move`
-  (`"handoff"` by default, or `"pickup"`: the move the near-limit warning tells the agent to make, see
-  [Warnings](#warnings)), `refresh_minutes`
+  it automatically when the reset is more than N minutes away, `0` = always), `refresh_minutes`
   (default 5, at least 1), and the ranking's thresholds `short_hot_pct` (85: a short window this
   full is "nearly full"), `long_exhausted_pct` (98: a week or a short window this full is spent
   and cannot take work until it resets) and `grace_hours` (1: a nearly full, not spent, short
   window resetting this soon still takes work, when no other account can). Every number must be finite; `nan` and `inf` are a config error.
+  `launch_pause` and `warning_move` are no longer used: an old file that sets them still loads
+  (they are ignored), and `doctor` says you may remove them.
 
 `status_args` replaces the sign-in check's arguments and `usage_args` the usage probe's (default
 `auth status --json` and `-p --no-session-persistence --output-format json --settings
@@ -769,8 +735,8 @@ from the model.
 | code | when |
 |---|---|
 | 0 | done; for `run`, the session's own exit code is passed through (for `run -a ID <subcommand>`, Claude Code's) |
-| 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check; a `pickup` refused because the session may still run (or you said no to stopping it, or the stop failed), or nothing picked from the list |
-| 2 | a usage error: an unknown command, account or session id, bare `pickup` or `fork` with no terminal to ask (the list goes to stderr) or no session to list, `setup` or `join` without a terminal, `full-reset` on an account whose current week is not known, one of Claude Code's own subcommands without `-a` |
+| 1 | an error: a config error, no hub at the configured path, no accounts yet, Claude Code not installed, an account that cannot be used, a failed `doctor` check; a `pickup` refused because the session may still run (or you said no to stopping it, or the stop failed), or nothing picked from the list; a `pickup` or `handoff` with no target |
+| 2 | a usage error: an unknown command, account or session id, bare `pickup` with no terminal to ask (the list goes to stderr) or no session to list, `setup` or `join` without a terminal, one of Claude Code's own subcommands without `-a` |
 | 75 | no account can take work and there is no terminal to ask (or you chose not to wait) |
 | 126, 127 | Claude Code could not be started (126) or was not found (127) |
 | 128 + N | the session died of signal N |

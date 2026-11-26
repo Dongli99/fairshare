@@ -13,7 +13,6 @@ from fairshare.model import SessionSeen, Worker
 from fairshare.providers import claude
 
 from test_honest import NOW
-from test_rates import rated, spending
 from test_workers import PARENT, Work
 
 
@@ -65,38 +64,46 @@ class Watch(Work):
         self.watch("--timeout", "20")
         self.assertEqual(self.listed, [])
 
-    def near(self, five=92):
-        """Account a $0.10 a point of its 5h window (test_rates.rated), at `five`% of it, and
-        $2.00 spent by its main session this hour."""
-        rated(self.tmp, "a")
+    def stage(self, five=92):
+        """Account a at `five`% of its 5h window, which resets in 3 hours: from 90%, its handoff
+        stage."""
         self.snap("a", five=(five, 3), seven=(10, 50))
-        spending(PARENT, "a", 2.0)
 
-    def test_its_accounts_warning_once_across_restarts(self):
-        self.near()
+    def test_its_accounts_handoff_stage_once_across_restarts(self):
+        self.stage()
         code, out, _ = self.watch("--timeout", "10")
         self.assertEqual(code, 0)
-        self.assertTrue(out.startswith("fairshare: account a has about $0.80 left before its "
-                                       "limit"), out)
+        self.assertTrue(out.startswith("fairshare: account a is in its handoff stage: write your "
+                                       "checkpoint and hand off now"), out)
         self.assertEqual(len(out.splitlines()), 1)
         self.assertEqual(self.watch("--timeout", "10")[1], "nothing happened\n")
+        self.stage(80)                                           # credited back: it ends
+        self.assertEqual(self.watch("--timeout", "10")[1],
+                         "fairshare: the handoff stage on account a is over: keep working here.\n")
 
-    def test_a_warning_a_hook_said_is_not_said_again(self):
-        self.near()
+    def test_a_workers_account_in_its_handoff_stage(self):
+        sid = self.worker()
+        self.snap("b", five=(95, 3), seven=(40, 50))
+        self.assertEqual(self.watch("--timeout", "10")[1], (
+            "fairshare: account b, where worker w-1 runs, is in its handoff stage: run fairshare "
+            f"pickup {sid[:8]} to continue the worker on a.\n"))
+
+    def test_a_line_a_hook_said_is_not_said_again(self):
+        self.stage()
         raw = json.dumps({"session_id": PARENT, "cwd": str(self.here)}).encode()
         with mock.patch.object(sys, "stdin", mock.Mock(buffer=io.BytesIO(raw))), \
                 mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.tmp / "hub/accounts/a")}):
-            self.assertIn("$0.80 left", self.go("hook", "post-tool")[1])
+            self.assertIn("handoff stage", self.go("hook", "post-tool")[1])
         self.assertEqual(self.watch("--timeout", "5")[1], "nothing happened\n")
 
-    def test_a_warning_while_waiting_wakes_it(self):
+    def test_the_handoff_stage_while_waiting_wakes_it(self):
         def later(s):
             self.sleep(s)
             if self.clock[0] - NOW >= 10:
-                self.near(95)
+                self.stage(95)
         with mock.patch.object(cli, "_sleep", later):
             code, out, _ = self.watch("--timeout", "60")
-        self.assertIn("has about $0.50 left before its limit", out)
+        self.assertIn("is in its handoff stage", out)
         self.assertEqual(self.clock[0] - NOW, 10)
 
     def test_a_worker_checkpoint_once_then_again_when_it_grows(self):
