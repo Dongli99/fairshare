@@ -1,11 +1,18 @@
 """The routing rule. Pure: accounts + snapshots + now in, ranked verdicts out. No I/O."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 
 from .model import Account, Snapshot, Tuning
 
 HOUR = 3600.0
+
+# The two stages of a working session. Room is counted in percent of a Pro short window, on both
+# windows (the week by `Plan.per_short`), so one amount means the same work on every plan.
+HANDOFF_ROOM = 10.0         # room at or below which a main session hands off
+RESET_SOON_S = 30 * 60.0    # a limit lifting this soon is waited out: no handoff
+TARGET_ROOM = 30.0          # room a move target needs when its limit lifts an hour or more away
 
 
 @dataclass(frozen=True)
@@ -120,3 +127,38 @@ def versus(first: Verdict, others: list[Verdict]) -> str:
         rule = (f"score {first.score:.2f} vs {second.score:.2f}, close enough that the one with "
                 "fewer sessions running, or the preferred one, goes first")
     return f"{a} before {b} ({rule}); {a}: {first.reason}; {b}: {second.reason}"
+
+
+def room(acct: Account, snap: Snapshot | None, now: float) -> tuple[float, float | None]:
+    """The account's room as of `now`, in percent of a Pro short window: the smaller of its
+    windows' (a window past its reset, or absent, counts as unused), and when the window that
+    binds resets (None: no window in use binds)."""
+    p, wins = acct.plan, snap.windows if snap else {}
+    out: tuple[float, float | None] = (100.0 * p.capacity if p.short_name else math.inf, None)
+    for name, scale in ((p.short_name, 1.0), (p.long_name, 100.0 / (p.per_short or math.inf))):
+        w = wins.get(name) if name else None
+        if w and w.resets_at > now and scale:
+            left = (100.0 - w.used_pct) * p.capacity * scale
+            if left < out[0]:
+                out = (left, w.resets_at)
+    return out if out[0] != math.inf else (100.0, None)
+
+
+def handoff_due(acct: Account, snap: Snapshot | None, now: float) -> bool:
+    """Whether a main session on `acct` should hand off now: HANDOFF_ROOM or less is left, and
+    still would be once the windows lifting within RESET_SOON_S have reset (a soon reset is
+    waited out at the limit, unless it frees nothing)."""
+    return all(room(acct, snap, t)[0] <= HANDOFF_ROOM for t in (now, now + RESET_SOON_S))
+
+
+def can_take(acct: Account, snap: Snapshot | None, now: float) -> bool:
+    """Whether a handed-off session may move to `acct`: some room, enough to last until its
+    binding window lifts (TARGET_ROOM with an hour or more to go, HANDOFF_ROOM with half an hour,
+    a straight line between and below: the owner's points), and TARGET_ROOM once it has lifted,
+    so the session does not reach the handoff stage again at once."""
+    left, at = room(acct, snap, now)
+    if at is None:
+        return left > 0
+    minutes = (at - now) / 60.0
+    need = min(TARGET_ROOM, HANDOFF_ROOM * (minutes - 15.0) / 15.0)
+    return left > 0 and left >= need and room(acct, snap, at)[0] >= TARGET_ROOM

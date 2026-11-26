@@ -15,3 +15,7 @@ hours = 5
 [windows.long]
 name = "seven_day"
 hours = 168
+# Percent of this window that one full short window (scaled by capacity) uses, measured on
+# Pro from two accounts' usage logs (2026-11-26: 13.2 and 13.1); the handoff stage counts
+# the week's room in short windows by it. Assumed for plans that scale both windows alike.
+per_short = 13.0
