@@ -193,7 +193,7 @@ class Warning(Work):
     def test_without_a_plan_the_usual_move(self):
         self.near(five=(10, 3), seven=(99, 50))
         said = self.said()
-        self.assertIn("Best other account: b", said)
+        self.assertIn("Best account to move to: b", said)
         self.assertNotIn("full reset", said)
 
     def test_a_week_near_its_limit_with_a_plan_says_work_to_the_limit(self):
@@ -222,13 +222,14 @@ class Warning(Work):
         store.plan_full_reset("a", NOW + 50 * H)
         said = self.said()
         self.assertNotIn("full reset", said)
-        self.assertIn("refills at 11:00 to about $10.00. Best other account: b ", said)
+        self.assertIn("refills at 11:00 to about $10.00. This account can no longer take work", said)
+        self.assertIn("Best account to move to: b ", said)
 
     def test_a_planned_reset_elsewhere_makes_that_account_the_best_other(self):
         self.near()
         store.plan_full_reset("c", NOW + 50 * H)                    # c: 7d 50%, now 150% room
         said = self.said()
-        self.assertIn("Best other account: c (5h 10% · 7d 50%)", said)
+        self.assertIn("Best account to move to: c (5h 10% · 7d 50%)", said)
         self.assertNotIn("planned a full reset", said)
 
 

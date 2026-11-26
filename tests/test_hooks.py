@@ -80,20 +80,21 @@ class Speaking(Work):
         self.assertEqual(self.hook("prompt")["hookEventName"], "UserPromptSubmit")
 
     MAIN = ("fairshare: account a has about $0.80 left before its limit, about 24 min at its pace "
-            "in the last hour ($2.00); it refills at 11:00 to about $10.00. Best other account: "
-            "b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: room left per hour until it "
-            "resets, so room that would expire unused is spent first); b: seven_day 40% used, "
-            "resets in 50h; c: seven_day 50% used, resets in 50h. If what is left of your work "
-            "is small, or the account refills soon, carry on. Otherwise, at the next stopping "
-            "point: ")
+            "in the last hour ($2.00); it refills at 11:00 to about $10.00. This account can no "
+            "longer take work (five_hour 92% used, resets in 3.0h) and b can (score 1.20), so "
+            "move: at your next stopping point, ")
+    BEST = (" Best account to move to: b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: room "
+            "left per hour until it resets, so room that would expire unused is spent first); b: "
+            "seven_day 40% used, resets in 50h; c: seven_day 50% used, resets in 50h.")
 
     def test_main_once_per_instance_of_the_binding_window(self):
         self.near()
         self.assertEqual(self.said(), self.MAIN + (
             'run fairshare handoff "<what was done, what is next, open decisions, constraints '
             'the user set, what was tried and failed, files touched>" to continue in a fresh '
-            "session on the best account, which reads your note first. Workers you started: "
-            "none; to have them checkpoint: fairshare checkpoint --request all."))
+            "session on the best account, which reads your note first." + self.BEST +
+            " Workers you started: none; to have them checkpoint: fairshare checkpoint "
+            "--request all."))
         self.assertIsNone(self.said())
         self.assertIsNone(self.said("prompt"))                   # the other event shares it
         self.near(five=(99, 3), spent=5.0)                       # nearer, same instance
@@ -107,8 +108,8 @@ class Speaking(Work):
         self.near()
         self.assertEqual(self.said(), self.MAIN + (
             'write a checkpoint (fairshare checkpoint "<where you stand>") and run fairshare '
-            "pickup to continue on the best account. Workers you started: none; to have them "
-            "checkpoint: fairshare checkpoint --request all."))
+            "pickup to continue on the best account." + self.BEST + " Workers you started: "
+            "none; to have them checkpoint: fairshare checkpoint --request all."))
 
     def test_a_new_instance_warns_again(self):
         self.near()
@@ -155,18 +156,43 @@ class Speaking(Work):
     def test_the_best_other_account_is_given_in_dollars_once_it_has_a_rate(self):
         rated(self.tmp, "b")                                     # b: 5h 10%, 7d 40% -> $9.00
         self.near()
-        self.assertIn("Best other account: b (about $9.00 left before its limit); b before c",
+        self.assertIn("Best account to move to: b (about $9.00 left before its limit); b before c",
                       self.said())
 
-    def test_workers_and_none_can_take_work(self):
+    def test_workers_named_and_none_can_take_work_stays(self):
         store.add_worker(Worker("w-x", SID, "b", str(self.here), NOW))
         store.add_worker(Worker("w-y", SID, "b", str(self.here), NOW))
+        self.near()
+        self.assertIn("Workers you started: w-x, w-y;", self.said())
         for i in "bc":
             self.snap(i, five=(100, 3), seven=(10, 50))
-        self.near()
-        text = self.said()
-        self.assertIn("Best other account: none can take work now.", text)
-        self.assertIn("Workers you started: w-x, w-y;", text)
+        self.near(five=(95, 8))                                  # the next five-hour window
+        self.assertTrue(self.said().endswith(
+            "to about $10.00. No other account can take work now, so this is not a stop: keep "
+            "working on this account until the limit stops you. No checkpoint, handoff or "
+            "pickup now."))
+
+    STAY = (", so this is not a stop: keep working on this account until the limit stops you. "
+            "No checkpoint, handoff or pickup now.")
+
+    def test_an_account_that_still_ranks_first_works_to_its_limit(self):
+        # a's week: $3.00 left, resetting in 6h, at $5.00 an hour: room that would expire.
+        self.snap("b", five=(10, 3), seven=(80, 50))             # score 0.40
+        self.snap("c", five=(10, 3), seven=(90, 50))             # score 0.20
+        self.near(five=(10, 3), seven=(97, 6), spent=5.0)        # score 0.50
+        self.assertTrue(self.said().endswith(
+            "it refills at 14:00 to about $10.00. This account still ranks first (score 0.50 vs "
+            "0.40 on b; room that would expire unused is spent first)" + self.STAY))
+
+    def test_a_tie_stays_and_a_higher_score_elsewhere_moves(self):
+        self.snap("c", five=(10, 3), seven=(90, 50))
+        self.snap("b", five=(10, 3), seven=(75, 50))             # score 0.50: a tie
+        self.near(five=(10, 3), seven=(97, 6), spent=5.0)
+        self.assertTrue(self.said().endswith(self.STAY))
+        self.snap("b", five=(10, 3), seven=(70, 50))             # score 0.60
+        store.update_session(SID, lambda r: cli.replace(r, warned={}))
+        self.assertIn("b ranks above this account (score 0.60 vs 0.50), so move: at your next "
+                      "stopping point, run fairshare handoff", self.said())
 
     def test_worker_warning(self):
         self.worker()

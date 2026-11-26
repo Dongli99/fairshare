@@ -63,8 +63,10 @@ choice; override it (`--account`) only when the job needs more room than the cho
 has left now, which its reason states.
 - The warning says the user planned a full reset and to keep working to the limit: do that, on
   this account (and so do your workers); no checkpoint, handoff or pickup.
-- Little work left, or the refill comes soon enough to wait for: carry on.
-- Otherwise, at the next stopping point, `fairshare checkpoint --request all` (your workers
+- The warning says this account still ranks first, or no other account can take work: keep
+  working on this account until the limit stops you; no checkpoint, handoff or pickup. The
+  verdict is fairshare's (the same ranking as `status`); do not weigh the dollars yourself.
+- The warning says move: at the next stopping point, `fairshare checkpoint --request all` (your workers
   checkpoint), then do the move the warning names; the setting `warning_move` picks it
   (default handoff):
   - **handoff**: `fairshare handoff "<what was done, what is next, open decisions, constraints

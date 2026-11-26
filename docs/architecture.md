@@ -712,9 +712,14 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
       for an input naming a subagent (`agent_id`); a worker with a pending request hears the
       request (once per request); otherwise the warning is said for the role: the main text
       names the dollars left, the minutes they last at the account's last-hour pace, the refill
-      time and amount, the best other account by local snapshots, the advice (carry on if
-      little is left or the refill is soon, else the `warning_move`) and the session's workers;
-      the worker text says to finish the step and checkpoint. The text goes as the event's
+      time and amount, a verdict and the session's workers. The verdict (`_standing`) ranks
+      every account as `status` does (local snapshots, planned resets), this one included but
+      without `spread`, which divides new sessions and would count this one against its own
+      account: while this account can take work and none scores higher, or none other can take
+      work, stay to the limit (no checkpoint, handoff or pickup); otherwise move at the next
+      stopping point (`warning_move`, to the best other account), and a worker finishes its
+      step and checkpoints. A planned full reset that is due says stay before any ranking
+      (owner, 2026-11-20). The text goes as the event's
       documented `additionalContext` (`Provider.hook_output`); nothing to say prints nothing.
       The hook reads
       only local files (the snapshot, the account's usage log, the session records): a
@@ -1309,8 +1314,8 @@ doctor --fix ──► hub.present / accounts.toml `hub` ──► hub.check ─
 - The model-week match (`uses_week`) has seen only `Fable` as a week name.
 - Under the launcher nothing re-checks a waiting session: if the tool does not resume it at the
   reset, the bar shows `out · ! fairshare pickup` again once the wait time has passed.
-- "Best other account" in a warning ranks the other accounts on their local snapshots only (no
-  sign-in check, no twin grouping); "Workers you started" lists every recorded worker of the
+- A warning's verdict and its "Best account to move to" rank the accounts on their local
+  snapshots only (no sign-in check, no twin grouping); "Workers you started" lists every recorded worker of the
   session (kept 7 days), ended ones included.
 - The ranking is greedy; it cannot promise full use of every week.
 - The usage hook calls the installed `fairshare` by the absolute path found when `setup` or

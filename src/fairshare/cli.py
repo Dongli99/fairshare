@@ -946,8 +946,14 @@ def _warning_text(rec: SessionRecord, acct: Account, near: tuple[rates.Room, flo
                 f"{acct.id} and uses it once the limit stops work, so this is not a stop: keep "
                 "working on this account until the limit stops you; the user then refills it "
                 "and the stopped sessions continue here. No checkpoint, handoff or pickup.")
+    head = (f"fairshare: {'this account' if rec.role == ROLE_WORKER else f'account {acct.id}'} "
+            f"{facts}" + ("" if rec.role == ROLE_WORKER else _heaviest(rec, acct.id, now)))
+    why, above = _standing(acct, accounts, t, now)
+    if above is None:
+        return (f"{head} {why}, so this is not a stop: keep working on this account until "
+                "the limit stops you. No checkpoint, handoff or pickup now.")
     if rec.role == ROLE_WORKER:
-        return (f"fairshare: this account {facts} You are a worker: finish your current step, "
+        return (f"{head} You are a worker: finish your current step, "
                 'then run fairshare checkpoint "<what is done, what is next>". Do not start a '
                 "big new step; your main session decides what happens next.")
     workers = ", ".join(x.name for x in store.workers(rec.id)) or "none"
@@ -956,12 +962,33 @@ def _warning_text(rec: SessionRecord, acct: Account, near: tuple[rates.Room, flo
             'run fairshare handoff "<what was done, what is next, open decisions, constraints '
             "the user set, what was tried and failed, files touched>\" to continue in a fresh "
             "session on the best account, which reads your note first.")
-    return (f"fairshare: account {acct.id} {facts}{_heaviest(rec, acct.id, now)}"
-            " Best other account: "
-            f"{_best_other(acct, accounts, t, now)}"
-            ". If what is left of your work is small, or the account refills soon, carry on. "
-            f"Otherwise, at the next stopping point: {move} Workers you started: "
-            f"{workers}; to have them checkpoint: fairshare checkpoint --request all.")
+    return (f"{head} {why}, so move: at your next stopping "
+            f"point, {move} Best account to move to: {_best_other(acct, accounts, t, now)}. "
+            f"Workers you started: {workers}; to have them checkpoint: fairshare checkpoint "
+            "--request all.")
+
+
+def _standing(acct: Account, accounts: list[Account], t: Tuning, now: float
+              ) -> tuple[str, str | None]:
+    """Whether a running session should stay on its account, by the same rank as `status`
+    (local snapshots, planned resets) but without `spread`, which divides new sessions and would
+    count this one against its own account: why, in words, and the id of an account that can
+    take work and ranks above it, or None to stay. A tie stays: moving costs a cold start."""
+    planned = [a for a in accounts if a.plan is not None]
+    snaps = {a.id: s for a in planned if (s := store.load(a.id))}
+    ranked = rank(planned, snaps, now, t, extra=_planned(now))
+    me = next((v for v in ranked if v.account.id == acct.id), None)
+    other = next((v for v in ranked if v.eligible and v.account.id != acct.id), None)
+    if other is None:
+        return "No other account can take work now", None
+    o = other.account.id
+    if me is None or not me.eligible:
+        return (f"This account can no longer take work ({me.reason if me else 'no plan'}) and "
+                f"{o} can (score {other.score:.2f})"), o
+    if other.score > me.score:
+        return f"{o} ranks above this account (score {other.score:.2f} vs {me.score:.2f})", o
+    return (f"This account still ranks first (score {me.score:.2f} vs {other.score:.2f} on "
+            f"{o}; room that would expire unused is spent first)"), None
 
 
 def _reset_due(acct: Account, room: rates.Room | None, pace: float, now: float) -> bool:

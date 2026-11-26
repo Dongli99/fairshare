@@ -156,7 +156,7 @@ class Heaviest(Handover):
         costed("s-me", "b", [1.0])
         costed("s-big", "b", [1.0], cwd="/w/api")
         self.assertIn("to about $5.00. Heaviest in the last hour: session s-big (Opus, api, "
-                      "50%). Best other account:", self.text())
+                      "50%). ", self.text())
         costed("s-big", "b", [0.9], cwd="/w/api")
         self.assertNotIn("Heaviest", self.text())
         costed("s-me", "b", [9.0])                                # its own spend never counts

@@ -522,12 +522,16 @@ last hour: they share the room. So: the room is less than the last hour's spend.
 in the last hour, no warning. It is said once per session for each instance of the window that
 binds: when that window resets, or the other window comes to bind, it may warn again. A main
 session reads, for example: `fairshare: account a has about $0.80 left before its limit, about
-24 min at its pace in the last hour ($2.00); it refills at 11:00 to about $10.00. Best other
-account: b (5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: ...); b: seven_day 40% used,
-resets in 50h; c: ... If what is left of your work is small, or the account refills soon, carry
-on. Otherwise, at the next stopping point: run fairshare handoff "<what was done, what is next,
-...>" to continue in a fresh session on the best account, which reads your note first. Workers
-you started: ...`. The refill is the room right after the binding window resets: a 5-hour
+24 min at its pace in the last hour ($2.00); it refills at 11:00 to about $10.00. This account
+can no longer take work (five_hour 92% used, resets in 3.0h) and b can (score 1.20), so move: at
+your next stopping point, run fairshare handoff "<what was done, what is next, ...>" to continue
+in a fresh session on the best account, which reads your note first. Best account to move to: b
+(5h 10% · 7d 40%); b before c (score 1.20 vs 1.00: ...); b: seven_day 40% used, resets in 50h;
+c: ... Workers you started: ...`. The verdict, stay or move, follows the same ranking as
+`status`, this account included: while it still ranks first (its room expires sooner than the
+others', so it is spent first; a tie counts as first, since moving costs a cold start), or no
+other account can take work, the line says this is not a stop: keep working until the limit
+stops you, with no checkpoint, handoff or pickup. The refill is the room right after the binding window resets: a 5-hour
 refill is capped by what the week still allows, and a weekly refill leaves the 5-hour window to
 bind. That is the default move, `warning_move = "handoff"`: the fresh session starts lean
 instead of reading the whole context again on another account, and it can read the old
